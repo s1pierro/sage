@@ -1,0 +1,943 @@
+//! La boucle de jeu : le joueur, sa caméra, le décor, et l'interface par-dessus. Le jeu
+//! s'appuie sur le moteur (`crate::moteur`) : le monde avance par pas fixes, et `frame`
+//! rend la scène que le moteur de rendu doit dessiner.
+//!
+//! Commandes : un doigt à gauche de l'écran est une manette (il marche dans la direction
+//! glissée, d'autant plus vite que le doigt s'éloigne) ; ailleurs, un doigt tourne la vue
+//! et deux doigts l'approchent ou l'éloignent.
+
+use crate::draw::{Color, Rect};
+use crate::math;
+use crate::moniteur::{self, dec, Etat, Moniteur};
+use crate::shell::{Layout, Shell, Side};
+use crate::campagne::{Campagne, DEPART};
+use crate::editeur::{self, Editeur};
+use crate::manette::{Evenement, Manettes};
+use crate::moteur::depot::Depot;
+use crate::moteur::{physique, systemes, Camera, Corps, Entite, Format, Horloge, Lieu, Maillages, Materiau, Mobile, Monde, Partie, Rendu, Scene, Squelette, Textures, Tuiles};
+use crate::personnage::{self, Modele};
+use crate::ui::{id, Id, Sense};
+use std::path::PathBuf;
+use crate::widgets::{self, Cx, Icon, Scrolls};
+use std::sync::Arc;
+
+const MANETTE: Id = id("manette");
+const OUVRIR: Id = id("ouvrir");
+const MANNEQUIN: Id = id("mannequin");
+const MONITEUR: Id = id("moniteur");
+const EDITEUR: Id = id("editeur");
+const REGLAGES: Id = id("reglages");
+/// Les onglets du panneau de gauche.
+const ONGLET_MONITEUR: usize = 0;
+const ONGLET_EDITEUR: usize = 1;
+const ONGLET_REGLAGES: usize = 2;
+/// Les sticks tournent la vue à tant de radians par seconde, au bout de leur course.
+const VUE_LACET: f32 = 2.4;
+const VUE_TANGAGE: f32 = 1.4;
+
+/// Rayon de la manette, en dp.
+const RAYON: f32 = 64.0;
+/// Rayon du personnage contre le décor, en mètres.
+pub const CORPS: f32 = 0.3;
+/// Portée du regard, pour désigner ce qui est au centre de la vue.
+const PORTEE: f32 = 80.0;
+/// Le personnage regarde jusque-là ce que vise la caméra (m).
+const REGARD_LOIN: f32 = 30.0;
+/// Le tangage de départ de la caméra : à lui, le personnage regarde à l'horizontale.
+const TANGAGE: f32 = 0.35;
+/// Identifiant stable du joueur.
+pub const JOUEUR: &str = "joueur";
+/// Tuiles chargées jusqu'à cette distance du joueur (en tuiles), gardées jusqu'à la
+/// suivante : 25 tuiles, 320 m de côté.
+const RAYON_TUILES: i32 = 2;
+const GARDE_TUILES: i32 = 3;
+
+pub const CIEL: [f32; 3] = [0.70, 0.80, 0.92];
+
+pub struct App {
+    pub monde: Monde,
+    pub maillages: Maillages,
+    pub textures: Textures,
+    pub tuiles: Tuiles,
+    horloge: Horloge,
+    pub joueur: Entite,
+    /// Caméra : lacet, tangage, distance.
+    pub cam: (f32, f32, f32),
+    /// Le doigt de la manette : là où il s'est posé.
+    manette: Option<(f32, f32)>,
+    message: Option<(String, f32)>,
+    /// Le sélecteur de fichiers est demandé.
+    demande: bool,
+    /// Le .glb à garder pour le prochain lancement.
+    a_garder: Option<Vec<u8>>,
+    /// Le joueur a déjà bougé : l'aide s'efface.
+    a_bouge: bool,
+    /// Les panneaux : à gauche (en haut en portrait), le moniteur.
+    pub shell: Shell,
+    pub moniteur: Moniteur,
+    scrolls: Scrolls,
+    /// Ce qu'ouvre le panneau de gauche : le moniteur, l'éditeur ou les réglages, chacun
+    /// avec ses onglets.
+    pub onglet: usize,
+    pub editeur: Editeur,
+    /// Les manettes de jeu et leurs profils.
+    pub manettes: Manettes,
+}
+
+impl App {
+    /// Le monde gardé en mémoire seulement.
+    pub fn new(dp: f32) -> App {
+        App::avec_dossier(dp, None)
+    }
+
+    /// Les données gardées dans `dossier` : le monde sous `monde/` (ses tuiles modifiées
+    /// en sont relues, et le joueur reprend où il était), les profils des manettes sous
+    /// `reglages/manettes/`.
+    pub fn avec_dossier(dp: f32, dossier: Option<PathBuf>) -> App {
+        let mut monde = Monde::default();
+        let mut maillages = Maillages::default();
+        let manettes = Manettes::new(dossier.as_ref().map(|d| d.join("reglages").join("manettes")));
+        let depot = dossier.map(|d| d.join("monde")).map_or_else(Depot::memoire, Depot::dossier);
+        let fiche = depot.lire_fiche().unwrap_or_default();
+        let joueur = monde.creer(JOUEUR);
+        let (pos, cap) = match fiche.joueur {
+            Some((t, p, c)) => {
+                monde.origine = t;
+                (p, c)
+            }
+            None => ([DEPART[0], 0.0, DEPART[1]], 0.0),
+        };
+        monde.lieu.mettre(joueur, Lieu::en(pos, cap));
+        monde.mobile.mettre(joueur, Mobile { vitesse: 0.0, elan: [cap.sin(), cap.cos()], rayon: CORPS });
+        monde.corps.mettre(joueur, Corps::new(1.75));
+        // Le monde autour du joueur, tout de suite ; la suite se charge en marchant
+        let source = Box::new(Campagne { graine: fiche.graine });
+        let mut tuiles = Tuiles::avec(source, depot, fiche, RAYON_TUILES, GARDE_TUILES);
+        let o = monde.origine;
+        tuiles.suivre(&mut monde, &mut maillages, (o[0], o[1]), usize::MAX);
+        physique::poser(&mut monde);
+        if let Some(l) = monde.lieu.get_mut(joueur) {
+            l.retenir();
+        }
+        let mut a = App {
+            monde,
+            maillages,
+            textures: Textures::default(),
+            tuiles,
+            horloge: Horloge::default(),
+            joueur,
+            cam: (0.6, TANGAGE, 4.5),
+            manette: None,
+            message: None,
+            demande: false,
+            a_garder: None,
+            a_bouge: false,
+            shell: Shell::new(dp),
+            moniteur: Moniteur::default(),
+            scrolls: Scrolls::new(),
+            onglet: ONGLET_MONITEUR,
+            editeur: Editeur::default(),
+            manettes,
+        };
+        a.mettre(Modele::depuis_glb(&personnage::mannequin_glb()).expect("le mannequin se relit"));
+        a
+    }
+
+    /// Le joueur prend ce personnage : son maillage est enregistré sous l'identifiant du
+    /// modèle, l'ancien est libéré.
+    fn mettre(&mut self, m: Modele) {
+        let ancien = self.modele().map(|m| format!("personnage/{}", m.id));
+        let cle = format!("personnage/{}", m.id);
+        if let Some(a) = ancien {
+            if a != cle {
+                self.maillages.ote(&a);
+            }
+            self.textures.oter_sous(&format!("{a}/"));
+        }
+        // Une texture par matériau qui en a une, une partie par matériau employé
+        let textures: Vec<Option<crate::moteur::TextureId>> = m.materiaux.iter().enumerate().map(|(i, x)| x.image.clone().map(|im| self.textures.mettre(&format!("{cle}/{i}"), im))).collect();
+        let parties = m
+            .parties
+            .iter()
+            .map(|p| {
+                let x = &m.materiaux[p.materiau];
+                Partie { premier: p.premier, nombre: p.nombre, materiau: Materiau { texture: textures[p.materiau], opacite: x.opacite, alpha: x.alpha } }
+            })
+            .collect();
+        let k = self.maillages.mettre_parties(&cle, Format::Peau, m.sommets.clone(), parties);
+        let local = math::mul(&translation([0.0, -m.sol * m.echelle, 0.0]), &math::scale(m.echelle));
+        self.monde.rendu.mettre(self.joueur, Rendu { maillage: k, local });
+        // Le corps a la taille du personnage
+        if let Some(c) = self.monde.corps.get_mut(self.joueur) {
+            c.hauteur = m.hauteur;
+        }
+        self.monde.squelette.mettre(self.joueur, Squelette::nouveau(Arc::new(m)));
+    }
+
+    pub fn modele(&self) -> Option<&Modele> {
+        self.monde.squelette.get(self.joueur).map(|s| &*s.modele)
+    }
+
+    pub fn lieu(&self) -> Lieu {
+        *self.monde.lieu.get(self.joueur).expect("le joueur a un lieu")
+    }
+
+    pub fn mobile(&self) -> Mobile {
+        *self.monde.mobile.get(self.joueur).expect("le joueur est mobile")
+    }
+
+    pub fn dire(&mut self, s: String) {
+        self.message = Some((s, 4.0));
+    }
+
+    /// Un .glb reçu : il remplace le personnage s'il se lit, sinon l'ancien reste.
+    pub fn charger(&mut self, nom: &str, octets: &[u8]) {
+        match Modele::depuis_glb(octets) {
+            Ok(m) => {
+                let n = m.animations.len();
+                let s = format!("« {} » : {} os, {n} animation{}", m.nom, m.armature.os.len(), if n > 1 { "s" } else { "" });
+                self.mettre(m);
+                self.a_garder = Some(octets.to_vec());
+                self.dire(s);
+            }
+            Err(e) => self.dire(format!("{nom} illisible : {e}")),
+        }
+    }
+
+    /// Relu au lancement : le dernier personnage ouvert, sans message.
+    pub fn reprendre(&mut self, octets: &[u8]) {
+        if let Ok(m) = Modele::depuis_glb(octets) {
+            self.mettre(m);
+        }
+    }
+
+    /// Écrit tout ce qui attend, et où est le joueur : l'application passe en
+    /// arrière-plan.
+    pub fn enregistrer(&mut self) {
+        let l = self.lieu();
+        self.tuiles.fiche.joueur = Some((self.monde.origine, l.pos, l.cap));
+        self.tuiles.tout_ecrire(&self.monde);
+    }
+
+    /// Ce qu'envoie une manette de jeu.
+    pub fn manette(&mut self, ev: Evenement) {
+        self.manettes.recevoir(ev);
+    }
+
+    /// Ouvre le panneau sur `onglet`, ou le ferme s'il y est déjà.
+    fn basculer(&mut self, onglet: usize) {
+        let ouvert = self.shell.start.open && self.onglet == onglet;
+        if ouvert || !self.shell.start.open {
+            self.shell.start.toggle();
+        }
+        self.onglet = onglet;
+        self.manettes.capture = None;
+    }
+
+    /// L'éditeur est ouvert : les appuis dans la vue choisissent et posent des objets.
+    pub fn edite(&self) -> bool {
+        self.shell.start.open && self.onglet == ONGLET_EDITEUR
+    }
+
+    pub fn prendre_demande(&mut self) -> bool {
+        std::mem::take(&mut self.demande)
+    }
+
+    pub fn prendre_a_garder(&mut self) -> Option<Vec<u8>> {
+        self.a_garder.take()
+    }
+
+    /// Mesures de la plateforme pour le moniteur, en secondes : intervalle réel depuis
+    /// l'image précédente, temps du jeu, de l'envoi au rendu, de l'échange des tampons.
+    pub fn mesurer(&mut self, intervalle: f32, jeu: f32, rendu: f32, echange: f32) {
+        self.moniteur.plateforme(intervalle, jeu, rendu, echange);
+    }
+
+    fn etat(&self) -> Etat {
+        let (l, m) = (self.lieu(), self.mobile());
+        let (melange, course, allures, pieds) = self.monde.squelette.get(self.joueur).map_or((0.0, 0.0, String::new(), String::new()), |s| (s.pas.marche, s.pas.course, s.locomotion.resume(), if s.pieds.jambes.is_empty() { String::new() } else { s.pieds.resume() }));
+        let (buste, regard) = self.monde.squelette.get(self.joueur).map_or((String::new(), String::new()), |s| {
+            let (b, r) = s.posture.resume();
+            (if s.posture.buste.dos.is_empty() { String::new() } else { b }, if s.posture.buste.tete.is_none() { String::new() } else { r })
+        });
+        Etat {
+            entites: self.monde.nombre(),
+            pas_total: self.horloge.pas,
+            pos: l.pos,
+            absolu: self.monde.absolu(l.pos),
+            cap: l.cap,
+            vitesse: m.vitesse,
+            melange,
+            course,
+            allures,
+            appui: self.appui(),
+            vise: self.vise(),
+            pieds,
+            buste,
+            regard,
+            tuiles: self.tuiles.chargees.len(),
+            tuile: self.monde.origine,
+            generation_ms: self.tuiles.derniere_ms,
+        }
+    }
+
+    /// Ce qui porte le joueur, et sa pente en degrés ; rien s'il est en l'air.
+    fn appui(&self) -> Option<(String, f32)> {
+        let c = self.monde.corps.get(self.joueur)?;
+        if !c.au_sol {
+            return None;
+        }
+        let p = self.lieu().pos;
+        let (_, _, e) = physique::sol(&self.monde, p[0], p[2], p[1] + 0.01)?;
+        let nom = e.and_then(|e| self.monde.ident.get(e).cloned()).unwrap_or_else(|| "relief".into());
+        Some((nom, c.normale[1].clamp(-1.0, 1.0).acos().to_degrees()))
+    }
+
+    /// Le point que vise le centre de la vue : ce qu'il touche, sinon un point au loin.
+    fn regarde(&self) -> Option<[f32; 3]> {
+        let hauteur = self.modele().map_or(1.75, |m| m.hauteur);
+        let p = self.lieu().pos;
+        let o = [p[0], p[1] + hauteur * 0.6, p[2]];
+        let (sy, cy) = self.cam.0.sin_cos();
+        // La caméra plonge vers le joueur : le regard, lui, est horizontal au tangage de
+        // départ
+        let (sp, cp) = (self.cam.1 - TANGAGE).sin_cos();
+        let d = [-sy * cp, -sp, -cy * cp];
+        let t = physique::lancer(&self.monde, o, d, REGARD_LOIN).map_or(REGARD_LOIN, |i| i.distance);
+        Some([o[0] + d[0] * t, o[1] + d[1] * t, o[2] + d[2] * t])
+    }
+
+    /// Ce que vise le centre de la vue, au-delà du joueur, et à quelle distance.
+    fn vise(&self) -> Option<(String, f32)> {
+        let hauteur = self.modele().map_or(1.75, |m| m.hauteur);
+        let p = self.lieu().pos;
+        let cible = [p[0], p[1] + hauteur * 0.6, p[2]];
+        let (sy, cy) = self.cam.0.sin_cos();
+        let (sp, cp) = self.cam.1.sin_cos();
+        let i = physique::lancer(&self.monde, cible, [-sy * cp, -sp, -cy * cp], PORTEE)?;
+        let nom = i.entite.and_then(|e| self.monde.ident.get(e).cloned()).unwrap_or_else(|| "relief".into());
+        Some((nom, i.distance))
+    }
+
+    /// Le jeu s'anime sans cesse.
+    pub fn animating(&self) -> bool {
+        true
+    }
+
+    /// Avant et droite au sol, vus de la caméra.
+    fn axes_camera(&self) -> ([f32; 2], [f32; 2]) {
+        let (s, c) = self.cam.0.sin_cos();
+        ([-s, -c], [c, -s])
+    }
+
+    /// Un pas de simulation, la manette en `j` (x vers la droite, y vers le bas de l'écran).
+    pub fn avancer(&mut self, j: [f32; 2]) {
+        let (av, dr) = self.axes_camera();
+        let dir = [av[0] * -j[1] + dr[0] * j[0], av[1] * -j[1] + dr[1] * j[0]];
+        if dir[0].hypot(dir[1]) > 0.05 {
+            self.a_bouge = true;
+        }
+        systemes::retenir(&mut self.monde);
+        systemes::marcher(&mut self.monde, self.joueur, dir);
+        physique::deplacer(&mut self.monde);
+        systemes::suivre_origine(&mut self.monde, self.joueur);
+    }
+
+    /// Une image : commandes, pas de simulation, animation, caméra, interface.
+    pub fn frame(&mut self, cx: &mut Cx, ecran: Rect, dt: f32) -> Scene {
+        let dp = cx.dp;
+        let l = self.shell.layout(ecran, dt);
+        let w = l.workspace;
+        // Manette : un doigt posé dans la moitié gauche de l'espace de travail
+        let zone = Rect::new(w.x, w.y + 64.0 * dp, w.w * 0.45, (w.h - 64.0 * dp).max(0.0));
+        let doigt = cx.ui.drag(MANETTE, zone);
+        let mut j = [0.0f32; 2];
+        match doigt {
+            Some(d) => {
+                let o = *self.manette.get_or_insert((d.x, d.y));
+                let (dx, dy) = ((d.x - o.0) / (RAYON * dp), (d.y - o.1) / (RAYON * dp));
+                let l = dx.hypot(dy);
+                j = if l > 1.0 { [dx / l, dy / l] } else { [dx, dy] };
+            }
+            None => self.manette = None,
+        }
+        // Vue : un doigt tourne, deux approchent
+        let g = cx.ui.take_gesture();
+        self.cam.0 -= g.orbit.0 * 0.006;
+        self.cam.1 = (self.cam.1 + g.orbit.1 * 0.004).clamp(-0.15, 1.3);
+        if g.zoom.is_finite() && g.zoom > 0.0 {
+            self.cam.2 = (self.cam.2 / g.zoom).clamp(1.5, 14.0);
+        }
+        // La manette de jeu : le stick de marche si le doigt n'y est pas, le stick de vue,
+        // les gâchettes pour approcher
+        let c = self.manettes.commandes();
+        if doigt.is_none() && c.marcher != [0.0; 2] {
+            j = c.marcher;
+        }
+        let (sens, inverser) = self.manettes.active().map_or((1.0, false), |a| (a.profil.sensibilite, a.profil.inverser));
+        self.cam.0 -= c.vue[0] * VUE_LACET * sens * dt;
+        let vy = if inverser { -c.vue[1] } else { c.vue[1] };
+        self.cam.1 = (self.cam.1 + vy * VUE_TANGAGE * sens * dt).clamp(-0.15, 1.3);
+        if c.tenu("approcher") {
+            self.cam.2 = (self.cam.2 * (-1.5 * dt).exp()).clamp(1.5, 14.0);
+        }
+        if c.tenu("eloigner") {
+            self.cam.2 = (self.cam.2 * (1.5 * dt).exp()).clamp(1.5, 14.0);
+        }
+        for (action, onglet) in [("moniteur", ONGLET_MONITEUR), ("editeur", ONGLET_EDITEUR), ("reglages", ONGLET_REGLAGES)] {
+            if c.appui(action) {
+                self.basculer(onglet);
+            }
+        }
+        if c.appui("fermer") {
+            self.shell.start.open = false;
+            self.manettes.capture = None;
+        }
+
+        // Simulation à pas fixes ; l'image tombe entre deux pas
+        let (n, u) = self.horloge.avancer(dt);
+        for _ in 0..n {
+            self.avancer(j);
+        }
+        // Une tuile au plus par image : le chargement ne fait pas d'à-coups
+        let o = self.monde.origine;
+        self.tuiles.suivre(&mut self.monde, &mut self.maillages, (o[0], o[1]), 1);
+        self.tuiles.vieillir(&self.monde, dt);
+        // Le personnage regarde ce que vise la caméra
+        let regard = self.regarde();
+        if let Some(s) = self.monde.squelette.get_mut(self.joueur) {
+            s.regard = regard;
+        }
+        systemes::animer(&mut self.monde, dt, u);
+
+        let camera = self.camera(w, u);
+        // L'éditeur : un appui bref dans la vue, manette comprise
+        if self.edite() {
+            if let Some((None | Some(MANETTE), x, y)) = cx.ui.appui_bref() {
+                if w.contains(x, y) {
+                    self.editeur.appui(&mut self.monde, &mut self.maillages, &mut self.tuiles, &camera, x, y, self.cam.0);
+                }
+            }
+            // À la manette : le centre de la vue
+            if c.appui("choisir") {
+                self.editeur.appui(&mut self.monde, &mut self.maillages, &mut self.tuiles, &camera, w.cx(), w.cy(), self.cam.0);
+            }
+            if c.appui("annuler") {
+                self.editeur.annuler(&mut self.monde, &mut self.maillages, &mut self.tuiles);
+            }
+        } else if self.monde.choisie.take().is_some() {
+            self.editeur.mode = editeur::Mode::Choisir;
+        }
+        self.interface(cx, w, doigt.is_some().then_some(j), dt);
+        self.panneau(cx, &l);
+        self.poignee(cx, &l, ecran);
+        let mut scene = Scene::extraire(&self.monde, &self.maillages, &self.textures, camera, u);
+        // Les ombres portées autour du joueur
+        scene.soleil.centre = self.lieu().interpole(u).0;
+        let etat = self.etat();
+        self.moniteur.image(dt, n, &scene, etat);
+        scene
+    }
+
+    /// Caméra à la troisième personne derrière le joueur, jamais sous le sol.
+    fn camera(&self, w: Rect, u: f32) -> Camera {
+        let hauteur = self.modele().map_or(1.75, |m| m.hauteur);
+        let (p, _) = self.lieu().interpole(u);
+        let cible = [p[0], p[1] + hauteur * 0.6, p[2]];
+        let (sy, cy) = self.cam.0.sin_cos();
+        let (sp, cp) = self.cam.1.sin_cos();
+        let d = self.cam.2 * hauteur / 1.75;
+        let mut oeil = [cible[0] + d * sy * cp, cible[1] + d * sp, cible[2] + d * cy * cp];
+        // Rien entre le joueur et l'œil : la caméra s'avance devant ce qui le cacherait
+        let vers = [oeil[0] - cible[0], oeil[1] - cible[1], oeil[2] - cible[2]];
+        if let Some(i) = physique::lancer(&self.monde, cible, vers, d) {
+            let k = ((i.distance - 0.25) / d).max(0.05);
+            oeil = [cible[0] + vers[0] * k, cible[1] + vers[1] * k, cible[2] + vers[2] * k];
+        }
+        // Jamais sous le sol
+        let sol = systemes::hauteur_sol(&self.monde, oeil[0], oeil[2]).unwrap_or(p[1]);
+        oeil[1] = oeil[1].max(sol + 0.4);
+        Camera {
+            vue: math::look_at(oeil, cible, [0.0, 1.0, 0.0]),
+            proj: math::perspective(1.0, w.w / w.h.max(1.0), 0.1, 500.0),
+            oeil,
+            fenetre: [w.x, w.y, w.w, w.h],
+        }
+    }
+
+    /// Sur l'espace de travail `w` : la pastille du moniteur, les pilules, le nom du
+    /// personnage, la manette sous le doigt, l'aide et les messages.
+    fn interface(&mut self, cx: &mut Cx, w: Rect, manette: Option<[f32; 2]>, dt: f32) {
+        let dp = cx.dp;
+        let m = 14.0 * dp;
+        let (taille, h) = (52.0 * dp, 44.0 * dp);
+        // Une pastille par onglet du panneau de gauche : elle l'ouvre sur son onglet, ou le
+        // ferme s'il y est déjà
+        let mut x = w.x + m;
+        for (cle, icone, onglet) in [(MONITEUR, Icon::Pouls, ONGLET_MONITEUR), (EDITEUR, Icon::Crayon, ONGLET_EDITEUR), (REGLAGES, Icon::Engrenage, ONGLET_REGLAGES)] {
+            let ouvert = self.shell.start.open && self.onglet == onglet;
+            if cx.pastille(cle, Rect::new(x, w.y + m, taille, taille), icone, ouvert) {
+                self.basculer(onglet);
+            }
+            x += taille + 10.0 * dp;
+        }
+        let y = w.y + m + (taille - h) / 2.0;
+        let l = "Ouvrir un personnage";
+        let lw = cx.pill_width(l);
+        if cx.pill(OUVRIR, Rect::new(x, y, lw, h), l, false) {
+            self.demande = true;
+        }
+        x += lw + 10.0 * dp;
+        if self.modele().is_some_and(|m| m.id != "mannequin") {
+            let l = "Mannequin";
+            let lw = cx.pill_width(l);
+            if cx.pill(MANNEQUIN, Rect::new(x, y, lw, h), l, false) {
+                self.mettre(Modele::depuis_glb(&personnage::mannequin_glb()).expect("mannequin"));
+                self.a_garder = Some(Vec::new());
+                self.dire("Le mannequin revient".into());
+            }
+            x += lw + 10.0 * dp;
+        }
+        // Le nom s'efface quand la place manque
+        if let Some(md) = self.modele() {
+            let n = md.nom.clone();
+            if x + cx.text.measure(&n, (15.0 * dp).round()) + 2.0 * m < w.right() {
+                cx.text_right(w.right() - m, y + h / 2.0, &n, 15.0, widgets::TEXT);
+            }
+        }
+        // La manette sous le doigt
+        if let (Some(o), Some(j)) = (self.manette, manette) {
+            let r = RAYON * dp;
+            let anneau: Color = [255, 255, 255, 90];
+            cx.dl.rrect(Rect::new(o.0 - r, o.1 - r, 2.0 * r, 2.0 * r), r, anneau);
+            let k = 26.0 * dp;
+            let (px, py) = (o.0 + j[0] * r, o.1 + j[1] * r);
+            cx.dl.rrect(Rect::new(px - k, py - k, 2.0 * k, 2.0 * k), k, [255, 255, 255, 200]);
+        }
+        if !self.a_bouge {
+            let t = "À gauche, glissez pour marcher ; à droite, pour tourner la vue ; à deux doigts, pour l'approcher";
+            let px = (15.0 * dp).round();
+            let mut cy = w.bottom() - m - 10.0 * dp;
+            for ligne in cx.text.wrap(t, px, w.w - 2.0 * m).into_iter().rev() {
+                cx.text_at(w.x + m, cy, &ligne, 15.0, [0x1B, 0x1B, 0x24, 200]);
+                cy -= 22.0 * dp;
+            }
+        }
+        if let Some((s, reste)) = &mut self.message {
+            *reste -= dt;
+            if *reste <= 0.0 {
+                self.message = None;
+            } else {
+                let s = s.clone();
+                let lw = (cx.text.measure(&s, (15.0 * dp).round()) + 32.0 * dp).min(w.w - 2.0 * m);
+                let r = Rect::new(w.cx() - lw / 2.0, w.y + m + taille + 10.0 * dp, lw, 40.0 * dp);
+                cx.dl.rrect(r, r.h / 2.0, [0x1B, 0x1B, 0x24, 220]);
+                cx.text_at(r.x + 16.0 * dp, r.cy(), &s, 15.0, [255, 255, 255, 255]);
+            }
+        }
+    }
+
+    /// Le panneau de gauche (en haut en portrait) : le moniteur.
+    fn panneau(&mut self, cx: &mut Cx, l: &Layout) {
+        if self.shell.start.anim == 0.0 {
+            return;
+        }
+        let d = cx.dp;
+        let r = l.start;
+        cx.ui.region_add(id("panneau"), r, Sense::Sink);
+        cx.dl.rrect(r, 0.0, widgets::SURFACE);
+        let t = d.max(1.0);
+        let bord = if l.landscape { Rect::new(r.right() - t, r.y, t, r.h) } else { Rect::new(r.x, r.bottom() - t, r.w, t) };
+        cx.dl.rrect(bord, 0.0, widgets::LINE);
+        // En-tête : l'onglet et ✕
+        let tete = 60.0 * d;
+        let fermer = Rect::new(r.right() - 50.0 * d, r.y + 8.0 * d, 44.0 * d, 44.0 * d);
+        if cx.ui.click(id("fermer-panneau"), fermer, None) {
+            self.shell.start.open = false;
+            self.manettes.capture = None;
+        }
+        cx.dl.rrect(fermer, 22.0 * d, widgets::CHIP);
+        cx.icon(fermer.inset(11.0 * d), Icon::Close, widgets::TEXT);
+        cx.dl.rrect(Rect::new(r.x, r.y + tete - d, r.w, t), 0.0, widgets::LINE);
+        // Chaque pastille a ses onglets
+        let onglets: &[&str] = match self.onglet {
+            ONGLET_EDITEUR => &["Éditeur"],
+            ONGLET_REGLAGES => &["Manette"],
+            _ => &["Moniteur"],
+        };
+        cx.tabs(id("onglets-panneau"), Rect::new(r.x + 12.0 * d, r.y + 11.0 * d, r.w - 74.0 * d, 38.0 * d), onglets, 0);
+        let corps = Rect::new(r.x, r.y + tete, r.w, r.h - tete);
+        if self.onglet == ONGLET_REGLAGES {
+            let mut b = cx.body(id("corps-manette"), corps, &self.scrolls);
+            crate::reglages::manette(cx, &mut b, &mut self.manettes);
+            cx.body_end(b, &mut self.scrolls);
+            return;
+        }
+        if self.onglet == ONGLET_EDITEUR {
+            let mut b = cx.body(id("corps-editeur"), corps, &self.scrolls);
+            self.editeur.panneau(cx, &mut b, &mut self.monde, &mut self.maillages, &mut self.tuiles);
+            cx.body_end(b, &mut self.scrolls);
+            return;
+        }
+        let mut b = cx.body(id("corps-moniteur"), corps, &self.scrolls);
+        let a = self.moniteur.affiche.clone();
+        let ms = |v: f32| format!("{} ms", dec(v, 1));
+
+        cx.section(&mut b, "IMAGES");
+        cx.mesure(&mut b, "Cadence", &format!("{} i/s", dec(a.cadence, 0)));
+        cx.mesure(&mut b, "Intervalle", &format!("{} · pire {}", ms(a.intervalle), dec(a.pire, 1)));
+        let images: Vec<f32> = self.moniteur.images.iter().copied().collect();
+        cx.barres(&mut b, &images, 50.0, &[1000.0 / 60.0, 1000.0 / 30.0], 1000.0 / 50.0);
+        if let Some([jeu, rendu, echange]) = a.temps {
+            cx.mesure(&mut b, "Jeu", &ms(jeu));
+            cx.mesure(&mut b, "Envoi au rendu", &ms(rendu));
+            cx.mesure(&mut b, "Échange des tampons", &ms(echange));
+        }
+
+        cx.section(&mut b, "SIMULATION");
+        cx.mesure(&mut b, "Pas fixes", &format!("{} /s", dec(a.pas_seconde, 0)));
+        cx.mesure(&mut b, "Pas par image", &dec(a.pas_image, 2));
+        cx.mesure(&mut b, "Pas depuis le début", &a.etat.pas_total.to_string());
+
+        cx.section(&mut b, "MONDE");
+        cx.mesure(&mut b, "Entités", &a.etat.entites.to_string());
+        cx.mesure(&mut b, "Objets dessinés", &a.dessins.to_string());
+        cx.mesure(&mut b, "Triangles", &a.triangles.to_string());
+        cx.mesure(&mut b, "Maillages", &format!("{} · {}", a.maillages, moniteur::octets(a.octets)));
+        let e = &a.etat;
+        cx.mesure(&mut b, "Tuiles chargées", &e.tuiles.to_string());
+        cx.mesure(&mut b, "Chargement d'une tuile", &ms(e.generation_ms));
+        cx.mesure(&mut b, "Tuiles écrites", &self.tuiles.ecrites.to_string());
+
+        cx.section(&mut b, "JOUEUR");
+        let e = &a.etat;
+        cx.mesure(&mut b, "Tuile", &format!("{} ; {}", e.tuile[0], e.tuile[1]));
+        cx.mesure(&mut b, "Dans la tuile", &format!("{} ; {}", dec(e.pos[0], 1), dec(e.pos[2], 1)));
+        cx.mesure(&mut b, "Position absolue", &format!("{} ; {}", dec(e.absolu[0] as f32, 0), dec(e.absolu[2] as f32, 0)));
+        cx.mesure(&mut b, "Altitude", &format!("{} m", dec(e.pos[1], 1)));
+        cx.mesure(&mut b, "Cap", &format!("{} °", dec(e.cap.to_degrees().rem_euclid(360.0), 0)));
+        cx.mesure(&mut b, "Vitesse", &format!("{} m/s", dec(e.vitesse, 2)));
+        cx.mesure(&mut b, "Mouvement", &format!("{} %", dec(e.melange * 100.0, 0)));
+        cx.mesure(&mut b, "Course", &format!("{} %", dec(e.course * 100.0, 0)));
+        match &e.appui {
+            Some((nom, pente)) => {
+                cx.mesure(&mut b, "Appui", nom);
+                cx.mesure(&mut b, "Pente", &format!("{} °", dec(*pente, 0)));
+            }
+            None => cx.mesure(&mut b, "Appui", "en l'air"),
+        }
+        match &e.vise {
+            Some((nom, d)) => cx.mesure(&mut b, "Visé", &format!("{nom} · {} m", dec(*d, 1))),
+            None => cx.mesure(&mut b, "Visé", "rien"),
+        }
+        if !e.pieds.is_empty() {
+            cx.mesure(&mut b, "Pieds", &e.pieds);
+        }
+        if !e.buste.is_empty() {
+            cx.mesure(&mut b, "Buste", &e.buste);
+        }
+        if !e.regard.is_empty() {
+            cx.mesure(&mut b, "Regard", &e.regard);
+        }
+        if !e.allures.is_empty() {
+            cx.paragraph(&mut b, &e.allures);
+        }
+        cx.body_end(b, &mut self.scrolls);
+    }
+
+    /// La poignée qui redimensionne le panneau ; un double appui rétablit sa taille.
+    fn poignee(&mut self, cx: &mut Cx, l: &Layout, ecran: Rect) {
+        if self.shell.start.anim < 1.0 {
+            return;
+        }
+        let d = cx.dp;
+        let cle = id("poignee-panneau");
+        let bande = self.shell.handle(l, Side::Start);
+        if let Some(g) = cx.ui.drag(cle, bande) {
+            self.shell.resize(Side::Start, ecran, g.x, g.y);
+        }
+        if cx.ui.double_tapped(cle) {
+            self.shell.reset_size(Side::Start, ecran);
+        }
+        let c = if cx.ui.pressed(cle) { widgets::ACCENT } else { [0x6C, 0x6C, 0x80, 140] };
+        let (long, epais) = (52.0 * d, 5.0 * d);
+        let prise = if l.landscape {
+            Rect::new(bande.cx() - epais / 2.0, bande.cy() - long / 2.0, epais, long)
+        } else {
+            Rect::new(bande.cx() - long / 2.0, bande.cy() - epais / 2.0, long, epais)
+        };
+        cx.dl.rrect(prise, epais / 2.0, c);
+    }
+}
+
+pub fn translation(t: [f32; 3]) -> math::Mat4 {
+    [1., 0., 0., 0., 0., 1., 0., 0., 0., 0., 1., 0., t[0], t[1], t[2], 1.]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Sans obstacles, sur un sol plat : pour mesurer le déplacement seul.
+    fn a_plat() -> App {
+        let mut a = App::new(1.0);
+        a.monde.obstacles = Default::default();
+        for (_, r) in a.monde.relief.iter_mut() {
+            r.h.iter_mut().for_each(|h| *h = 0.0);
+        }
+        physique::poser(&mut a.monde);
+        a.monde.lieu.get_mut(a.joueur).unwrap().retenir();
+        a
+    }
+
+    #[test]
+    fn la_manette_avance_dans_le_sens_de_la_vue() {
+        let mut a = a_plat();
+        a.cam.0 = 0.0; // caméra en +Z, qui regarde vers -Z
+        let depart = a.monde.absolu(a.lieu().pos);
+        for _ in 0..60 {
+            a.avancer([0.0, -1.0]);
+        }
+        let l = a.lieu();
+        let p = a.monde.absolu(l.pos);
+        assert!(p[2] < depart[2] - 1.0 && (p[0] - depart[0]).abs() < 1e-3, "vers -Z : {p:?}");
+        assert!((l.cap.abs() - std::f32::consts::PI).abs() < 0.05, "tourné vers -Z : {}", l.cap);
+        // À droite de l'écran : +X
+        for _ in 0..60 {
+            a.avancer([1.0, 0.0]);
+        }
+        assert!(a.monde.absolu(a.lieu().pos)[0] > p[0] + 1.0);
+    }
+
+    #[test]
+    fn le_decor_arrete_le_joueur() {
+        let mut a = a_plat();
+        let mur = a.monde.creer("mur");
+        let p = a.lieu().pos;
+        a.monde.lieu.mettre(mur, Lieu::en(p, 0.0));
+        a.monde.obstacles.mettre(mur, vec![crate::moteur::Forme::Boite(crate::moteur::Aabb { centre: [0.0, 1.0, -3.0], demi: [1.0; 3] })]);
+        a.cam.0 = 0.0;
+        for _ in 0..240 {
+            a.avancer([0.0, -1.0]);
+        }
+        assert!(a.lieu().pos[2] > p[2] - 2.0 - CORPS - 1e-3, "devant le bloc : {:?}", a.lieu().pos);
+    }
+
+    #[test]
+    fn le_joueur_marche_sur_le_relief() {
+        let mut a = App::new(1.0);
+        a.monde.obstacles = Default::default();
+        physique::poser(&mut a.monde);
+        for _ in 0..300 {
+            a.avancer([0.3, -1.0]);
+            let p = a.lieu().pos;
+            let h = systemes::hauteur_sol(&a.monde, p[0], p[2]).unwrap();
+            assert_eq!(p[1], h);
+        }
+    }
+
+    #[test]
+    fn marcher_loin_charge_et_decharge_les_tuiles() {
+        let mut a = a_plat();
+        a.cam.0 = std::f32::consts::FRAC_PI_2; // la vue regarde vers -X
+        let n = (2 * RAYON_TUILES + 1).pow(2) as usize;
+        assert_eq!(a.tuiles.chargees.len(), n);
+        let depart = a.monde.absolu(a.lieu().pos);
+        // Trois cents mètres vers -X, une image par pas
+        for _ in 0..(300.0 / systemes::VITESSE_MAX * 60.0) as usize {
+            a.avancer([0.0, -1.0]);
+            let o = a.monde.origine;
+            a.tuiles.suivre(&mut a.monde, &mut a.maillages, (o[0], o[1]), 1);
+        }
+        let p = a.monde.absolu(a.lieu().pos);
+        assert!(depart[0] - p[0] > 280.0, "{depart:?} → {p:?}");
+        assert!(a.monde.origine[0] <= -4);
+        assert!((0.0..crate::moteur::TAILLE).contains(&a.lieu().pos[0]), "le joueur reste près de l'origine");
+        for _ in 0..30 {
+            let o = a.monde.origine;
+            a.tuiles.suivre(&mut a.monde, &mut a.maillages, (o[0], o[1]), 1);
+        }
+        let o = a.monde.origine;
+        assert!(a.tuiles.chargees.len() <= (2 * GARDE_TUILES + 1).pow(2) as usize);
+        assert!(a.tuiles.chargees.keys().all(|&(i, j)| (i - o[0]).abs().max((j - o[1]).abs()) <= GARDE_TUILES));
+        assert!(a.tuiles.chargees.contains_key(&(o[0], o[1])));
+        // Les maillages suivent : deux terrains par tuile (complet et simplifié), au plus
+        // un décor, le personnage
+        let terrains = a.maillages.tous().iter().filter(|(_, m)| m.format == Format::Terrain).count();
+        assert_eq!(terrains, 2 * a.tuiles.chargees.len());
+    }
+
+    #[test]
+    fn un_fichier_illisible_garde_le_personnage() {
+        let mut a = App::new(1.0);
+        a.charger("x.glb", b"pas un glb");
+        assert_eq!(a.modele().unwrap().id, "mannequin");
+        assert!(a.prendre_a_garder().is_none());
+        a.charger("m.glb", &personnage::mannequin_glb());
+        assert!(a.prendre_a_garder().is_some());
+    }
+
+    #[test]
+    fn changer_de_personnage_libere_l_ancien_maillage() {
+        let mut a = App::new(1.0);
+        let personnages = |a: &App| a.maillages.tous().into_iter().map(|(_, m)| m.id).filter(|i| i.starts_with("personnage/")).collect::<Vec<_>>();
+        assert_eq!(personnages(&a), ["personnage/mannequin"]);
+        let mut m = Modele::depuis_glb(&personnage::mannequin_glb()).unwrap();
+        m.id = "autre".into();
+        a.mettre(m);
+        assert_eq!(personnages(&a), ["personnage/autre"]);
+    }
+
+    #[test]
+    fn la_scene_porte_le_decor_et_le_joueur_anime() {
+        use crate::text::Text;
+        use crate::ui::Ui;
+        let mut a = App::new(1.0);
+        let (mut ui, mut text, mut dl) = (Ui::new(1.0), Text::new(), crate::draw::DrawList::default());
+        let mut cx = Cx { ui: &mut ui, text: &mut text, dl: &mut dl, dp: 1.0 };
+        let s = a.frame(&mut cx, Rect::new(0.0, 0.0, 800.0, 600.0), 1.0 / 30.0);
+        assert!(s.dessins.len() > 25, "les tuiles, leur décor et le joueur : {}", s.dessins.len());
+        assert!(s.dessins.iter().any(|d| d.os.len() == 19), "le mannequin et ses os");
+        assert_eq!(s.soleil.centre, a.lieu().pos, "les ombres autour du joueur");
+        assert!(s.textures.iter().any(|(_, t)| t.id == "personnage/mannequin/1" || t.id.starts_with("personnage/mannequin/")), "la veste du mannequin");
+        assert_eq!(s.camera.fenetre, [0.0, 0.0, 800.0, 600.0]);
+    }
+
+    #[test]
+    fn la_pastille_ouvre_le_moniteur_et_l_espace_se_reduit() {
+        use crate::text::Text;
+        use crate::ui::{Event, Ui};
+        let mut a = App::new(1.0);
+        let (mut ui, mut text, mut dl) = (Ui::new(1.0), Text::new(), crate::draw::DrawList::default());
+        let ecran = Rect::new(0.0, 0.0, 1600.0, 900.0);
+        let mut s = None;
+        for i in 0..40 {
+            if i == 2 {
+                ui.event(Event::Down { id: 0, x: 40.0, y: 40.0 }, 0.1);
+                ui.event(Event::Up { id: 0 }, 0.15);
+            }
+            dl.clear();
+            let mut cx = Cx { ui: &mut ui, text: &mut text, dl: &mut dl, dp: 1.0 };
+            s = Some(a.frame(&mut cx, ecran, 1.0 / 30.0));
+            ui.end_frame();
+        }
+        assert!(a.shell.start.open);
+        let f = s.unwrap().camera.fenetre;
+        assert!(f[0] > 100.0 && f[2] < 1500.0, "la 3D laisse la place au panneau : {f:?}");
+        assert!(a.moniteur.affiche.cadence > 25.0);
+        assert_eq!(a.moniteur.affiche.etat.tuiles, 25);
+        assert!(a.moniteur.affiche.etat.entites > 26);
+    }
+
+    #[test]
+    fn le_monde_modifie_se_retrouve_au_lancement_suivant() {
+        use crate::moteur::{Genre, Objet};
+        let d = std::env::temp_dir().join(format!("sage-monde-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let mut a = App::avec_dossier(1.0, Some(d.clone()));
+        // Un poteau devant le joueur, un objet généré ôté, le joueur un peu plus loin
+        let p = a.lieu().pos;
+        let poteau = a.tuiles.ajouter(&mut a.monde, &mut a.maillages, Objet::neuf(Genre::Poteau), Lieu::en([p[0] + 2.0, p[1], p[2]], 0.0));
+        let id = a.monde.ident.get(poteau).cloned().unwrap();
+        let (genere, _) = a.monde.objet.iter().find(|(e, _)| a.monde.ident.get(*e).is_some_and(|i| i.starts_with("tuile/"))).unwrap();
+        let ote = a.monde.ident.get(genere).cloned().unwrap();
+        a.tuiles.oter(&mut a.monde, &mut a.maillages, genere);
+        a.cam.0 = 0.0;
+        for _ in 0..90 {
+            a.avancer([0.0, -1.0]);
+        }
+        let ici = a.monde.absolu(a.lieu().pos);
+        a.enregistrer();
+        assert!(d.join("monde/monde.json").exists());
+        let b = App::avec_dossier(1.0, Some(d.clone()));
+        assert!(b.monde.trouver(&id).is_some(), "le poteau est relu");
+        assert!(b.monde.trouver(&ote).is_none(), "l'objet ôté ne revient pas");
+        let la = b.monde.absolu(b.lieu().pos);
+        assert!((la[0] - ici[0]).abs() < 0.01 && (la[2] - ici[2]).abs() < 0.01, "{la:?} {ici:?}");
+        // Le prochain objet ne reprend pas un identifiant déjà donné
+        let mut b = b;
+        let n = b.tuiles.nouvel_id();
+        assert_ne!(n, id);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn la_pastille_de_l_editeur_ouvre_son_onglet_et_l_appui_choisit() {
+        use crate::text::Text;
+        use crate::ui::{Event, Ui};
+        let mut a = App::new(1.0);
+        let (mut ui, mut text, mut dl) = (Ui::new(1.0), Text::new(), crate::draw::DrawList::default());
+        let ecran = Rect::new(0.0, 0.0, 1600.0, 900.0);
+        let mut image = |a: &mut App, ui: &mut Ui| {
+            dl.clear();
+            let mut cx = Cx { ui, text: &mut text, dl: &mut dl, dp: 1.0 };
+            let s = a.frame(&mut cx, ecran, 1.0 / 30.0);
+            ui.end_frame();
+            s
+        };
+        image(&mut a, &mut ui);
+        // La seconde pastille : 14 + 52 + 10 dp, puis la moitié
+        ui.event(Event::Down { id: 0, x: 102.0, y: 40.0 }, 0.1);
+        ui.event(Event::Up { id: 0 }, 0.15);
+        let mut s = image(&mut a, &mut ui);
+        for _ in 0..30 {
+            s = image(&mut a, &mut ui);
+        }
+        assert!(a.edite());
+        // Un appui sur un objet de la vue le choisit : on vise le premier dessiné
+        let cam = s.camera;
+        let (e, l) = a.monde.objet.iter().filter_map(|(e, _)| Some((e, *a.monde.lieu.get(e)?))).find(|(e, l)| {
+            let o = a.monde.objet.get(*e).unwrap();
+            let c = [l.pos[0], l.pos[1] + o.dim[1] / 2.0, l.pos[2]];
+            let k = math::appliquer(&math::mul(&cam.proj, &cam.vue), c);
+            let (x, y) = (k[0] / k[3], k[1] / k[3]);
+            k[3] > 0.0 && x.abs() < 0.8 && y.abs() < 0.8 && physique::lancer(&a.monde, cam.oeil, [c[0] - cam.oeil[0], c[1] - cam.oeil[1], c[2] - cam.oeil[2]], 150.0).is_some_and(|i| i.entite == Some(*e))
+        }).expect("un objet en vue");
+        let o = a.monde.objet.get(e).unwrap();
+        let k = math::appliquer(&math::mul(&cam.proj, &cam.vue), [l.pos[0], l.pos[1] + o.dim[1] / 2.0, l.pos[2]]);
+        let f = cam.fenetre;
+        let (x, y) = (f[0] + (k[0] / k[3] + 1.0) / 2.0 * f[2], f[1] + (1.0 - k[1] / k[3]) / 2.0 * f[3]);
+        ui.event(Event::Down { id: 0, x, y }, 1.0);
+        ui.event(Event::Up { id: 0 }, 1.05);
+        let s = image(&mut a, &mut ui);
+        assert_eq!(a.monde.choisie, Some(e));
+        image(&mut a, &mut ui);
+        assert!(image(&mut a, &mut ui).dessins.iter().any(|d| d.choisi), "en surbrillance");
+        // Fermer l'éditeur laisse l'objet : sa pastille a suivi l'espace de travail
+        let x0 = s.camera.fenetre[0] + 102.0;
+        ui.event(Event::Down { id: 0, x: x0, y: 40.0 }, 2.0);
+        ui.event(Event::Up { id: 0 }, 2.05);
+        image(&mut a, &mut ui);
+        image(&mut a, &mut ui);
+        assert!(!a.edite() && a.monde.choisie.is_none());
+    }
+
+    #[test]
+    fn la_manette_de_jeu_fait_marcher_et_ouvre_les_reglages() {
+        use crate::manette::{axe, touche};
+        use crate::text::Text;
+        use crate::ui::Ui;
+        let mut a = a_plat();
+        let (mut ui, mut text, mut dl) = (Ui::new(1.0), Text::new(), crate::draw::DrawList::default());
+        let ecran = Rect::new(0.0, 0.0, 1600.0, 900.0);
+        a.manette(Evenement::Appareil { id: 3, nom: "Essai".into(), descripteur: "essai".into(), axes: vec![] });
+        a.manette(Evenement::Axes { id: 3, valeurs: vec![(axe::X, 0.0), (axe::Y, -1.0), (axe::Z, 0.6)] });
+        let (depart, lacet) = (a.monde.absolu(a.lieu().pos), a.cam.0);
+        for _ in 0..30 {
+            dl.clear();
+            let mut cx = Cx { ui: &mut ui, text: &mut text, dl: &mut dl, dp: 1.0 };
+            a.frame(&mut cx, ecran, 1.0 / 30.0);
+            ui.end_frame();
+        }
+        let p = a.monde.absolu(a.lieu().pos);
+        assert!((p[0] - depart[0]).hypot(p[2] - depart[2]) > 1.0, "le stick gauche fait marcher");
+        assert!(a.cam.0 < lacet - 0.5, "le stick droit tourne la vue vers la droite : {}", a.cam.0);
+        a.manette(Evenement::Touche { id: 3, code: touche::START, bas: true });
+        let mut cx = Cx { ui: &mut ui, text: &mut text, dl: &mut dl, dp: 1.0 };
+        a.frame(&mut cx, ecran, 1.0 / 30.0);
+        assert!(a.shell.start.open && a.onglet == ONGLET_REGLAGES);
+        a.manette(Evenement::Touche { id: 3, code: touche::B, bas: true });
+        a.frame(&mut cx, ecran, 1.0 / 30.0);
+        assert!(!a.shell.start.open, "B ferme le panneau");
+    }
+}

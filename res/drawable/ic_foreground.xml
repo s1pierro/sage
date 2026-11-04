@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Silhouette debout sur son ombre, dans la zone sûre centrale de 66×66. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path android:fillColor="#8F88EF" android:pathData="M34,78 a20,5 0 1,0 40,0 a20,5 0 1,0 -40,0 Z" />
+    <path android:fillColor="#FFFFFF" android:pathData="M54,26 a7,7 0 1,0 0.01,0 Z" />
+    <path android:fillColor="#FFFFFF" android:pathData="M45,42 L63,42 L66,60 L61,60 L60,50 L59,76 L55,76 L54,60 L53,76 L49,76 L48,50 L47,60 L42,60 Z" />
+</vector>
