@@ -8,7 +8,7 @@
 
 use super::depot::{Depot, Fiche};
 use super::entites::{Entite, Lieu, Monde, Rendu};
-use super::objets::Objet;
+use super::objets::{Genre, Objet};
 use super::ressources::{Format, MaillageId, Maillages};
 use crate::math;
 use std::collections::HashMap;
@@ -291,7 +291,7 @@ impl Tuiles {
         let n = manque.len().min(limite);
         for &(i, j) in &manque[..n] {
             let t0 = Instant::now();
-            let (c, lue) = match self.depot.lire_tuile(i, j) {
+            let (c, lue) = match self.depot.lire_tuile(i, j, &mut monde.modeles) {
                 Ok(Some(c)) => (c, true),
                 Ok(None) => (self.source.tuile(i, j), false),
                 Err(e) => {
@@ -403,7 +403,7 @@ impl Tuiles {
     fn ecrire_tuile(&mut self, monde: &Monde, k: (i32, i32)) {
         self.sales.remove(&k);
         let Some(c) = self.contenu(monde, k) else { return };
-        match self.depot.ecrire_tuile(k.0, k.1, &c) {
+        match self.depot.ecrire_tuile(k.0, k.1, &c, &monde.modeles) {
             Ok(()) => {
                 self.ecrites += 1;
                 if let Some(t) = self.chargees.get_mut(&k) {
@@ -456,19 +456,49 @@ impl Tuiles {
 /// Donne à `e` l'objet `objet` en `lieu` : son maillage (partagé par les mêmes
 /// réglages), ses obstacles à son cap.
 pub fn placer(monde: &mut Monde, maillages: &mut Maillages, e: Entite, objet: Objet, lieu: Lieu) {
-    let cle = objet.cle();
-    let k = maillages.chercher(&cle).unwrap_or_else(|| maillages.mettre(&cle, Format::Statique, Arc::new(objet.maillage())));
+    let (k, local) = match objet.genre {
+        // Un modèle importé : un maillage par version du modèle, l'échelle dans le repère
+        // local ; absent, une boîte grise
+        Genre::Modele(m) => {
+            let modele = monde.modeles.get(m);
+            let k = match modele.and_then(|x| x.gabarit.as_ref().map(|g| (x, g))) {
+                Some((x, g)) => {
+                    let cle = format!("modele/{}/{}", x.id, x.version);
+                    maillages.chercher(&cle).unwrap_or_else(|| maillages.mettre_parties(&cle, Format::Texture, g.sommets.clone(), g.parties.clone()))
+                }
+                None => maillages.chercher(ABSENT).unwrap_or_else(|| maillages.mettre(ABSENT, Format::Statique, Arc::new(objet.maillage()))),
+            };
+            (k, math::scale(objet.echelle()))
+        }
+        _ => {
+            let cle = objet.cle();
+            (maillages.chercher(&cle).unwrap_or_else(|| maillages.mettre(&cle, Format::Statique, Arc::new(objet.maillage()))), math::scale(1.0))
+        }
+    };
+    let obstacles = objet.obstacles(lieu.cap, &monde.modeles);
     monde.lieu.mettre(e, lieu);
-    monde.rendu.mettre(e, Rendu { maillage: k, local: math::scale(1.0) });
-    monde.obstacles.mettre(e, objet.obstacles(lieu.cap));
+    monde.rendu.mettre(e, Rendu { maillage: k, local });
+    monde.obstacles.mettre(e, obstacles);
     monde.objet.mettre(e, objet);
+}
+
+/// Le maillage des modèles absents.
+const ABSENT: &str = "modele-absent";
+
+/// Le modèle `m` a changé (arrivé, remplacé, retiré) : ses objets se refont.
+pub fn rafraichir(monde: &mut Monde, maillages: &mut Maillages, m: crate::moteur::ModeleId) {
+    let qui: Vec<(Entite, Objet, Lieu)> = monde.objet.iter().filter(|(_, o)| o.genre == Genre::Modele(m)).filter_map(|(e, o)| Some((e, *o, *monde.lieu.get(e)?))).collect();
+    for (e, o, l) in qui {
+        placer(monde, maillages, e, o, l);
+    }
+    balayer(monde, maillages);
 }
 
 /// Ôte les maillages d'objets que plus rien ne dessine.
 pub fn balayer(monde: &Monde, maillages: &mut Maillages) {
     let vus: std::collections::HashSet<MaillageId> = monde.rendu.iter().map(|(_, r)| r.maillage).collect();
     for (k, m) in maillages.tous() {
-        if m.id.starts_with("objet/") && !vus.contains(&k) {
+        if (m.id.starts_with("objet/") || m.id.starts_with("modele/") || m.id == ABSENT) && !vus.contains(&k) {
             maillages.ote(&m.id);
         }
     }

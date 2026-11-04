@@ -174,6 +174,8 @@ pub struct Monde {
     pub objet: Stock<super::objets::Objet>,
     /// L'entité que l'éditeur a choisie : elle se dessine en surbrillance.
     pub choisie: Option<Entite>,
+    /// Les modèles importés que les objets désignent.
+    pub modeles: super::modeles::Modeles,
 }
 
 impl Monde {

@@ -7,6 +7,7 @@
 //! fichier temporaire renommé : une écriture interrompue ne laisse jamais de fichier à
 //! moitié écrit.
 
+use super::modeles::Modeles;
 use super::objets::{depuis_hex, hex, Genre, Objet};
 use super::tuiles::{ident, Contenu, Element, Relief};
 use gda::json::{self, J};
@@ -99,13 +100,13 @@ impl Depot {
     }
 
     /// La tuile (i, j) si elle a été écrite ; une erreur si son fichier est illisible.
-    pub fn lire_tuile(&self, i: i32, j: i32) -> Result<Option<Contenu>, String> {
+    pub fn lire_tuile(&self, i: i32, j: i32, modeles: &mut Modeles) -> Result<Option<Contenu>, String> {
         let Some(s) = self.lire(&Depot::chemin(i, j)) else { return Ok(None) };
-        depuis_json(&s).map(Some).ok_or_else(|| format!("{} illisible", Depot::chemin(i, j)))
+        depuis_json(&s, modeles).map(Some).ok_or_else(|| format!("{} illisible", Depot::chemin(i, j)))
     }
 
-    pub fn ecrire_tuile(&mut self, i: i32, j: i32, c: &Contenu) -> std::io::Result<()> {
-        let s = vers_json(i, j, c);
+    pub fn ecrire_tuile(&mut self, i: i32, j: i32, c: &Contenu, modeles: &Modeles) -> std::io::Result<()> {
+        let s = vers_json(i, j, c, modeles);
         self.ecrire(&Depot::chemin(i, j), s)
     }
 
@@ -136,19 +137,28 @@ impl Depot {
 }
 
 /// La tuile (i, j) en JSON.
-pub fn vers_json(i: i32, j: i32, c: &Contenu) -> String {
+pub fn vers_json(i: i32, j: i32, c: &Contenu, modeles: &Modeles) -> String {
     let objets = c
         .objets
         .iter()
-        .map(|e| {
-            objet(vec![
+        .map(|e| match e.objet.genre {
+            // Un modèle importé : sa référence et son échelle, jamais sa géométrie
+            Genre::Modele(k) => objet(vec![
+                ("id", texte(&e.id)),
+                ("genre", texte("modele")),
+                ("modele", texte(modeles.id(k))),
+                ("pos", nombres(&e.pos)),
+                ("cap", n(e.cap)),
+                ("echelle", n(e.objet.dim[0])),
+            ]),
+            _ => objet(vec![
                 ("id", texte(&e.id)),
                 ("genre", texte(e.objet.genre.ident())),
                 ("pos", nombres(&e.pos)),
                 ("cap", n(e.cap)),
                 ("dim", nombres(&e.objet.dim)),
                 ("couleur", texte(&hex(e.objet.couleur))),
-            ])
+            ]),
         })
         .collect();
     let t = objet(vec![
@@ -165,7 +175,7 @@ pub fn vers_json(i: i32, j: i32, c: &Contenu) -> String {
 }
 
 /// Une tuile relue ; `None` si le fichier ne se tient pas.
-pub fn depuis_json(s: &str) -> Option<Contenu> {
+pub fn depuis_json(s: &str, modeles: &mut Modeles) -> Option<Contenu> {
     let j = json::lire(s)?;
     if j.get("format")?.num()? > FORMAT {
         return None;
@@ -180,10 +190,17 @@ pub fn depuis_json(s: &str) -> Option<Contenu> {
     let relief = Relief { n, h };
     let mut objets = Vec::new();
     for o in j.get("objets")?.liste()? {
-        let genre = Genre::depuis(o.get("genre")?.txt()?)?;
+        let g = o.get("genre")?.txt()?;
+        let objet = if g == "modele" {
+            let k = modeles.inscrire(o.get("modele")?.txt()?);
+            let s = o.get("echelle").and_then(J::num).unwrap_or(1.0) as f32;
+            Objet { genre: Genre::Modele(k), dim: [s; 3], couleur: Objet::neuf(Genre::Modele(k)).couleur }
+        } else {
+            Objet { genre: Genre::depuis(g)?, dim: f3(o.get("dim"))?, couleur: depuis_hex(o.get("couleur")?.txt()?)? }
+        };
         objets.push(Element {
             id: o.get("id")?.txt()?.to_string(),
-            objet: Objet { genre, dim: f3(o.get("dim"))?, couleur: depuis_hex(o.get("couleur")?.txt()?)? },
+            objet,
             pos: f3(o.get("pos"))?,
             cap: o.get("cap")?.num()? as f32,
         });
@@ -204,16 +221,17 @@ mod tests {
     #[test]
     fn une_tuile_se_relit_telle_qu_elle_s_est_ecrite() {
         let c = tuile();
-        let s = vers_json(3, -1, &c);
+        let mut m = Modeles::default();
+        let s = vers_json(3, -1, &c, &m);
         assert!(s.contains("\"id\":\"tuile/3/-1\"") && s.contains("\"genre\":\"rampe\""), "{s}");
-        let r = depuis_json(&s).unwrap();
+        let r = depuis_json(&s, &mut m).unwrap();
         assert_eq!(r.relief, c.relief);
         assert_eq!(r.objets[0].id, "o/3");
         assert_eq!(r.objets[0].pos, c.objets[0].pos);
         assert!((r.couleurs[0][1] - 0.4).abs() < 0.003);
         assert_eq!(r.normales.len(), 9);
-        assert!(depuis_json("{\"format\":1}").is_none());
-        assert!(depuis_json(&s.replace("\"rampe\"", "\"inconnu\"")).is_none());
+        assert!(depuis_json("{\"format\":1}", &mut m).is_none());
+        assert!(depuis_json(&s.replace("\"rampe\"", "\"inconnu\""), &mut m).is_none());
     }
 
     #[test]
@@ -221,16 +239,35 @@ mod tests {
         let d = std::env::temp_dir().join(format!("sage-depot-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         let mut p = Depot::dossier(d.clone());
-        assert_eq!(p.lire_tuile(0, 0), Ok(None));
-        p.ecrire_tuile(0, 0, &tuile()).unwrap();
+        let mut m = Modeles::default();
+        assert_eq!(p.lire_tuile(0, 0, &mut m), Ok(None));
+        p.ecrire_tuile(0, 0, &tuile(), &m).unwrap();
         let f = Fiche { suivant: 12, joueur: Some(([2, -3], [1.0, 2.0, 3.0], 0.5)), ..Fiche::default() };
         p.ecrire_fiche(&f).unwrap();
         let q = Depot::dossier(d.clone());
-        assert_eq!(q.lire_tuile(0, 0).unwrap().unwrap().objets.len(), 1);
+        assert_eq!(q.lire_tuile(0, 0, &mut m).unwrap().unwrap().objets.len(), 1);
         assert_eq!(q.lire_fiche(), Some(f));
         assert!(!d.join("tuiles/0_0.tmp").exists(), "le temporaire est renommé");
         std::fs::write(d.join("tuiles/1_0.json"), "{").unwrap();
-        assert!(q.lire_tuile(1, 0).is_err());
+        assert!(q.lire_tuile(1, 0, &mut m).is_err());
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn un_modele_importe_ne_garde_que_sa_reference() {
+        let mut m = Modeles::default();
+        let k = m.inscrire("glb/3");
+        let mut c = tuile();
+        c.objets.push(Element { id: "o/9".into(), objet: Objet { genre: Genre::Modele(k), dim: [2.5; 3], couleur: [0.5; 3] }, pos: [1.0, 2.0, 3.0], cap: 0.5 });
+        let s = vers_json(0, 0, &c, &m);
+        assert!(s.contains("\"modele\":\"glb/3\"") && s.contains("\"echelle\":2.5"), "{s}");
+        // Relu dans un monde neuf : le modèle s'inscrit sous son identifiant, encore absent
+        let mut n = Modeles::default();
+        let r = depuis_json(&s, &mut n).unwrap();
+        let o = r.objets.iter().find(|e| e.id == "o/9").unwrap();
+        let Genre::Modele(j) = o.objet.genre else { panic!() };
+        assert_eq!(n.id(j), "glb/3");
+        assert!(n.get(j).unwrap().gabarit.is_none());
+        assert_eq!(o.objet.dim, [2.5; 3]);
     }
 }

@@ -133,6 +133,31 @@ fn choisir_le_plus_proche(app: &mut App) {
     println!("choisi {} ({:?}) à {:.1} m", app.monde.ident.get(e).unwrap(), o.genre, (l.pos[0] - p[0]).hypot(l.pos[2] - p[2]));
 }
 
+/// Le décor de `SAGE_DECOR` (un .glb), importé et posé à 8 m devant le joueur, vu de
+/// biais.
+fn poser_le_decor(app: &mut App, chemin: &str) {
+    let o = std::fs::read(chemin).expect("décor illisible");
+    app.charger(chemin.rsplit('/').next().unwrap_or("decor.glb"), &o);
+    let Some(k) = app.monde.modeles.presents().last().copied() else {
+        println!("décor refusé");
+        return;
+    };
+    let g = app.monde.modeles.get(k).unwrap().gabarit.clone().unwrap();
+    // Une taille d'environ 6 m pour le plus grand côté
+    let t = (0..3).map(|c| g.boite.1[c] - g.boite.0[c]).fold(0.0f32, f32::max).max(0.01);
+    let s = (6.0 / t).clamp(0.01, 100.0);
+    let p = app.lieu().pos;
+    let lieu = sage::moteur::Lieu::en([p[0], p[1] - 0.05, p[2] + 8.0], 0.6);
+    let objet = sage::moteur::Objet { dim: [s; 3], ..sage::moteur::Objet::neuf(sage::moteur::Genre::Modele(k)) };
+    let e = app.tuiles.ajouter(&mut app.monde, &mut app.maillages, objet, lieu);
+    app.monde.choisie = Some(e);
+    app.editeur.mode = sage::editeur::Mode::Choisir;
+    app.cam.0 = std::f32::consts::PI + 0.5;
+    app.cam.1 = 0.3;
+    app.cam.2 = 9.0;
+    println!("décor {} : {} triangles, échelle {s:.2}", app.monde.modeles.get(k).unwrap().nom, g.triangles.len());
+}
+
 fn main() {
     let mut args = std::env::args().skip(1);
     let dir = args.next().expect("dossier de sortie");
@@ -159,6 +184,9 @@ fn main() {
         Shot { name: "editeur", w: 1920, h: 1200, dp: 1.5, images: 30, manette: None, panneau: true, rampe: false, dalle: false, vue: None, tourne: 0.0, editeur: true },
         Shot { name: "editeur-portrait", w: 1200, h: 1920, dp: 1.5, images: 30, manette: None, panneau: true, rampe: false, dalle: false, vue: None, tourne: 0.0, editeur: true },
         Shot { name: "manette", w: 1920, h: 1200, dp: 1.5, images: 30, manette: None, panneau: true, rampe: false, dalle: false, vue: None, tourne: 0.0, editeur: false },
+        Shot { name: "decor", w: 1920, h: 1200, dp: 1.5, images: 30, manette: None, panneau: true, rampe: false, dalle: false, vue: None, tourne: 0.0, editeur: false },
+        Shot { name: "affichage", w: 1920, h: 1200, dp: 1.5, images: 160, manette: None, panneau: true, rampe: false, dalle: false, vue: None, tourne: 0.0, editeur: false },
+        Shot { name: "affichage-court", w: 1920, h: 1200, dp: 1.5, images: 30, manette: None, panneau: true, rampe: false, dalle: false, vue: None, tourne: 0.0, editeur: false },
         Shot { name: "telephone", w: 2400, h: 1080, dp: 2.5, images: 40, manette: Some((60.0, 0.0)), panneau: true, rampe: false, dalle: false, vue: None, tourne: 0.0, editeur: false },
     ];
     let mut egl = Egl::new(true).expect("EGL");
@@ -189,8 +217,26 @@ fn main() {
         if s.editeur {
             choisir_le_plus_proche(&mut app);
         }
+        if s.name == "decor" {
+            match std::env::var("SAGE_DECOR") {
+                Ok(c) => poser_le_decor(&mut app, &c),
+                Err(_) => continue,
+            }
+        }
         if s.name.starts_with("manette") {
             manette_simulee(&mut app);
+        }
+        if s.name.starts_with("affichage") {
+            // Les réglages de l'affichage, au plus loin, puis au plus près
+            app.onglet = 2;
+            app.onglet_reglages = 1;
+            app.shell.start.open = true;
+            app.shell.start.anim = 1.0;
+            if s.name == "affichage" {
+                app.affichage.modifier(5, 400.0);
+            } else {
+                app.affichage.modifier(1, 60.0);
+            }
         }
         let mut ui = Ui::new(s.dp);
         let mut dl = DrawList::default();

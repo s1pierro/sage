@@ -437,3 +437,105 @@ dossier privé de l'application, sous `monde/`. Hors Android, le monde reste en 
   - le crayon sur Éditeur ;
   - l'engrenage sur Manette (d'autres réglages pourront s'y ajouter).
 - Le dossier de l'application contient `monde/` et `reglages/`.
+
+### Affichage (0.8.1)
+
+L'onglet Affichage des réglages (`reglages::Affichage`, écrit dans
+`reglages/affichage.json`) règle deux choses.
+
+- **La distance** est le rayon des tuiles chargées, de 1 à 5 tuiles. La garde suit
+  une tuile plus loin.
+  - `App::frame` la donne à `Tuiles` à chaque image ; `suivre` charge une tuile par
+    image.
+  - Le plan lointain de la caméra recule avec elle.
+- **Le brouillard** passe au shader par `Scene.brouillard` (`u_brouillard`) :
+  `f = 1 − exp(−(2d/B)²)`, soit 98 % de ciel à la distance B.
+  - B est borné de 30 m à (distance + ¼ de tuile), pour que le bord du monde reste
+    caché.
+  - Quand la distance change, B garde sa part de la distance.
+
+## 7. Décors et bâtiments en .glb (0.8)
+
+### Catalogue
+
+`src/catalogue.rs` décode un `.glb` sans squelette en `Decor` et le garde dans
+`catalogue/` du dossier de l'application.
+
+- `catalogue/<id>.glb` contient le fichier tel qu'il est arrivé.
+- `catalogue/catalogue.json` donne, pour chaque entrée :
+  - l'identifiant ;
+  - le nom affiché ;
+  - le fichier ;
+  - l'empreinte, en FNV-1a sur 64 bits ;
+  - le nombre de triangles.
+- L'identifiant vient de `extras.sage.id`, sinon il est donné en `glb/<n>`. Importer à
+  nouveau le même fichier ne fait rien, puisque l'empreinte est la même.
+- `jeu::charger` aiguille le fichier :
+  - un `.glb` avec squelette est un personnage ;
+  - un `.glb` sans squelette entre au catalogue, puis l'éditeur s'ouvre sur
+    `Ajouter(Modele(k))`.
+- À l'ouverture, chaque entrée est décodée. Une entrée illisible laisse son modèle
+  absent.
+
+### Pose
+
+- La géométrie passe au repère du modèle : base en (0, 0, 0) et avant vers +z, comme
+  en glTF.
+- Le point le plus bas va à y = 0. Le modèle est recentré en x/z si son origine tombe
+  hors de son emprise.
+- Les normales sont lissées, sauf sur une arête vive de plus de 40°.
+- Les couleurs des matériaux passent par `srvb()`.
+
+### Moteur
+
+`moteur/modeles.rs` tient le registre `Modeles`.
+
+- `ModeleId` est une poignée sur `Modele { id, nom, gabarit, version }`. Le `Gabarit`
+  contient :
+  - les sommets au `Format::Texture` (position, normale, couleur, uv) ;
+  - les parties par matériau ;
+  - les triangles de collision ;
+  - la boîte.
+- Un objet `Genre::Modele(k)` garde son échelle uniforme dans `dim = [s; 3]`, bornée de
+  0,01 à 100.
+- Le maillage `modele/<id>/<version>` est partagé par toutes les instances. L'échelle
+  passe par `Rendu.local`. Une nouvelle version (« Remplacer le fichier du modèle »)
+  refait les objets par `tuiles::rafraichir`.
+- La collision est un obstacle `Triangles` : ceux du gabarit, mis à l'échelle et
+  tournés au cap.
+- Un modèle inscrit sans gabarit se dessine avec le maillage `modele-absent`, une boîte
+  grise d'un mètre, et heurte comme elle.
+- Le rendu dessine `Format::Texture` par le programme `matiere`. Ce programme gère :
+  - les textures ;
+  - l'opacité ;
+  - le masque ;
+  - la teinte de sélection ;
+  - les ombres.
+
+### Mémoire
+
+- La tuile écrit l'élément d'un modèle en
+  `{"id","genre":"modele","modele":<id>,"pos","cap","echelle"}`, sans sa géométrie.
+- À la lecture, un identifiant inconnu est inscrit sans gabarit : l'objet attend son
+  modèle.
+
+### Faces (0.8.2)
+
+- `gda::Maillage::a_l_envers` mesure le volume signé des faces depuis le centre de leur
+  boîte. Le modèle est à l'envers si ce volume est inférieur à −¼ de la somme des
+  volumes sans signe ; un sol ou un panneau seul, sans volume, ne l'est jamais.
+- L'import retourne alors les faces (`Decor.retourne`). `Entree.retourne` garde le
+  choix dans `catalogue.json` (`"faces": "endroit"` ou `"retournees"`) ; absent, il est
+  décidé à la lecture.
+- Les normales étant recalculées depuis l'ordre des sommets, retourner les faces suffit.
+- `Materiau.deux_cotes` vient de `doubleSided`. Le programme `matiere` ne supprime pas
+  l'envers de ces parties et y retourne la normale.
+- gda remet aussi à l'endroit les faces d'un nœud à matrice miroir, comme le veut glTF.
+
+### Limites
+
+- Sont refusés :
+  - les maillages compressés (Draco, meshopt) ;
+  - les textures KTX2 et WebP.
+- Les animations sont ignorées.
+- Au-delà de `TRIANGLES_LOURD` (50 000), le modèle est signalé comme lourd.

@@ -54,12 +54,30 @@ struct Retour {
 pub struct Editeur {
     pub mode: Mode,
     retours: Vec<Retour>,
+    /// Le modèle dont on demande un nouveau fichier (l'application ouvre le sélecteur).
+    pub remplacement: Option<String>,
+    /// Le modèle dont il faut retourner les faces.
+    pub retournement: Option<String>,
 }
 
 impl Default for Editeur {
     fn default() -> Editeur {
-        Editeur { mode: Mode::Choisir, retours: Vec::new() }
+        Editeur { mode: Mode::Choisir, retours: Vec::new(), remplacement: None, retournement: None }
     }
+}
+
+/// Le nom affiché d'un objet : celui de son modèle importé, sinon de son genre.
+fn nom_de(monde: &Monde, o: &Objet) -> String {
+    match o.genre {
+        Genre::Modele(k) => monde.modeles.get(k).map_or("Modèle".into(), |m| m.nom.clone()),
+        g => g.nom().into(),
+    }
+}
+
+/// Le demi-côté au sol d'un objet, pour le poser contre une paroi.
+fn rayon(monde: &Monde, o: &Objet) -> f32 {
+    let (lo, hi) = o.boite(&monde.modeles);
+    [lo[0].abs(), hi[0].abs(), lo[2].abs(), hi[2].abs()].into_iter().fold(0.0, f32::max)
 }
 
 /// L'objet choisi, s'il existe encore.
@@ -126,7 +144,7 @@ impl Editeur {
         let poser = |o: &Objet, i: &physique::Impact| {
             let mut p = i.point;
             if i.normale[1] < 0.5 {
-                let r = o.dim[0].max(o.dim[2]) / 2.0;
+                let r = rayon(monde, o);
                 let l = i.normale[0].hypot(i.normale[2]).max(1e-6);
                 p[0] += i.normale[0] / l * r;
                 p[2] += i.normale[2] / l * r;
@@ -178,8 +196,26 @@ impl Editeur {
         if let Some(k) = cx.liens(b, id("editeur-ajouter"), &noms, actif) {
             self.mode = if actif == Some(k) { Mode::Choisir } else { Mode::Ajouter(Genre::TOUS[k]) };
         }
+        // Les modèles importés, sous leur nom
+        let importes: Vec<(Genre, String)> = monde.modeles.presents().into_iter().map(|k| (Genre::Modele(k), monde.modeles.get(k).map_or(String::new(), |m| m.nom.clone()))).collect();
+        if !importes.is_empty() {
+            let refs: Vec<&str> = importes.iter().map(|(_, n)| n.as_str()).collect();
+            let actif = match self.mode {
+                Mode::Ajouter(g) => importes.iter().position(|(x, _)| *x == g),
+                _ => None,
+            };
+            if let Some(k) = cx.liens(b, id("editeur-importes"), &refs, actif) {
+                self.mode = if actif == Some(k) { Mode::Choisir } else { Mode::Ajouter(importes[k].0) };
+            }
+        }
         if let Mode::Ajouter(g) = self.mode {
-            cx.paragraph(b, &format!("Touchez dans la vue l'endroit où poser {}.", article(g)));
+            let quoi = match g {
+                Genre::Modele(_) => format!("« {} »", nom_de(monde, &Objet::neuf(g))),
+                _ => article(g).to_string(),
+            };
+            cx.paragraph(b, &format!("Touchez dans la vue l'endroit où poser {quoi}."));
+        } else {
+            cx.paragraph(b, "Pour ajouter un décor ou un bâtiment, touchez « Ouvrir un .glb » : un modèle sans squelette entre au catalogue.");
         }
 
         cx.section(b, "ENREGISTREMENT");
@@ -200,7 +236,7 @@ impl Editeur {
 
     #[allow(clippy::too_many_arguments)]
     fn reglages(&mut self, cx: &mut Cx, b: &mut Body, monde: &mut Monde, maillages: &mut Maillages, tuiles: &mut Tuiles, e: Entite, o: Objet, l: Lieu) {
-        cx.section(b, &o.genre.nom().to_uppercase());
+        cx.section(b, &nom_de(monde, &o).to_uppercase());
         let ident = monde.ident.get(e).cloned().unwrap_or_default();
         cx.mesure(b, "Identifiant", &ident);
         let k = Tuiles::tuile_de(monde, l.pos);
@@ -214,7 +250,7 @@ impl Editeur {
             Some(0) => self.mode = if self.mode == Mode::Deplacer { Mode::Choisir } else { Mode::Deplacer },
             Some(1) => {
                 // À côté, vers la droite de l'objet
-                let r = crate::moteur::objets::tourner([o.dim[0] + 0.5, 0.0, 0.0], l.cap);
+                let r = crate::moteur::objets::tourner([2.0 * rayon(monde, &o) + 0.5, 0.0, 0.0], l.cap);
                 let p = [l.pos[0] + r[0], l.pos[1], l.pos[2] + r[2]];
                 let p = [p[0], physique::sol(monde, p[0], p[2], p[1] + 1.0).map_or(p[1], |s| s.0.max(p[1] - 1.0)), p[2]];
                 let n = tuiles.ajouter(monde, maillages, o, Lieu::en(p, l.cap));
@@ -237,6 +273,26 @@ impl Editeur {
         }
         if self.mode == Mode::Deplacer {
             cx.paragraph(b, "Touchez dans la vue l'endroit où le poser.");
+        }
+        if let Genre::Modele(k) = o.genre {
+            let m = monde.modeles.get(k);
+            match m.and_then(|m| m.gabarit.as_ref()) {
+                Some(g) => {
+                    let n = g.triangles.len();
+                    cx.mesure(b, "Triangles", &n.to_string());
+                    if n > crate::catalogue::TRIANGLES_LOURD {
+                        cx.paragraph(b, "Modèle lourd : il ralentit le dessin et les collisions.");
+                    }
+                }
+                None => cx.paragraph(b, &format!("Le modèle « {} » n'est pas au catalogue : l'objet reste une boîte grise. Ouvrez son .glb pour qu'il revienne.", monde.modeles.id(k))),
+            }
+            let present = monde.modeles.get(k).is_some_and(|m| m.gabarit.is_some());
+            let liens: &[&str] = if present { &["Remplacer le fichier du modèle", "Retourner ses faces"] } else { &["Remplacer le fichier du modèle"] };
+            match cx.liens(b, id("editeur-remplacer"), liens, None) {
+                Some(0) => self.remplacement = Some(monde.modeles.id(k).to_string()),
+                Some(_) => self.retournement = Some(monde.modeles.id(k).to_string()),
+                None => {}
+            }
         }
 
         cx.section(b, "RÉGLAGES");
@@ -270,17 +326,39 @@ impl Editeur {
                 cle = k;
             }
         }
+        if let Genre::Modele(_) = o.genre {
+            // L'échelle, sur une règle logarithmique : de ÷ 100 (un fichier en centimètres)
+            // à × 100, arrondie à trois chiffres significatifs
+            let k = id("editeur-echelle");
+            let mut t = o.dim[0].log10();
+            let e = o.dim[0];
+            let texte = if e < 0.1 { dec(e, 3) } else { dec(e, 2) };
+            cx.slider(b, k, "Échelle", &format!("× {texte}"), &mut t, -2.0, 2.0);
+            let v = 10f32.powf(t);
+            let pas = 10f32.powf(v.log10().floor() - 2.0);
+            let v = (v / pas).round() * pas;
+            if (v - o.dim[0]).abs() > 1e-4 {
+                x.dim = [v; 3];
+                cle = k;
+            }
+        }
         x = x.borne();
-        match cx.liens(b, id("editeur-hauteur"), &["10 cm plus bas", "10 cm plus haut"], None) {
-            Some(0) => {
-                lieu.pos[1] -= 0.1;
-                cle = id("editeur-hauteur");
+        // L'enfoncement : de combien la base est sous le relief
+        let sol = crate::moteur::systemes::hauteur_sol(monde, l.pos[0], l.pos[2]).unwrap_or(l.pos[1]);
+        let k = id("editeur-enfoncement");
+        let mut enf = sol - l.pos[1];
+        cx.slider(b, k, "Enfoncement", &format!("{} m", dec(enf, 2)), &mut enf, -1.0, 3.0);
+        let enf = (enf / 0.01).round() * 0.01;
+        if (enf - (sol - l.pos[1])).abs() > 0.005 {
+            lieu.pos[1] = sol - enf;
+            cle = k;
+        }
+        if let Genre::Modele(_) = o.genre {
+            if cle != 0 && (x != o || lieu.pos != l.pos || lieu.cap != l.cap) {
+                self.retenir(monde, e, cle, "le réglage");
+                tuiles.modifier(monde, maillages, e, x, Lieu::en(lieu.pos, lieu.cap));
             }
-            Some(_) => {
-                lieu.pos[1] += 0.1;
-                cle = id("editeur-hauteur");
-            }
-            None => {}
+            return;
         }
         let teintes: Vec<Color> = PALETTE.iter().map(|c| [c[0], c[1], c[2]].map(|v| (v * 255.0).round() as u8)).map(|c| [c[0], c[1], c[2], 255]).collect();
         let choisie = PALETTE.iter().position(|c| hex(*c) == hex(o.couleur));
@@ -301,6 +379,7 @@ fn article(g: Genre) -> &'static str {
         Genre::Dalle => "la dalle",
         Genre::Poteau => "le poteau",
         Genre::Rampe => "la rampe",
+        Genre::Modele(_) => "le modèle",
     }
 }
 

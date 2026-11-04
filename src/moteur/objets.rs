@@ -6,16 +6,20 @@
 //! personnages.
 
 use super::entites::Aabb;
+use super::modeles::{ModeleId, Modeles, BOITE_ABSENTE};
 use super::physique::{Forme, Triangles};
 use std::sync::Arc;
 
-/// Les modèles du catalogue, par identifiant.
+/// Les modèles du catalogue intégré, par identifiant, et les modèles importés.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Genre {
     Bloc,
     Dalle,
     Poteau,
     Rampe,
+    /// Un modèle importé d'un `.glb` : sa forme et ses matériaux sont les siens, l'objet
+    /// n'en règle que l'échelle (`dim[0]`).
+    Modele(ModeleId),
 }
 
 /// Les rampes s'enfoncent de tant sous leur départ : leurs flancs ne laissent pas de jour
@@ -32,6 +36,7 @@ impl Genre {
             Genre::Dalle => "dalle",
             Genre::Poteau => "poteau",
             Genre::Rampe => "rampe",
+            Genre::Modele(_) => "modele",
         }
     }
 
@@ -46,6 +51,7 @@ impl Genre {
             Genre::Dalle => "Dalle",
             Genre::Poteau => "Poteau",
             Genre::Rampe => "Rampe",
+            Genre::Modele(_) => "Modèle",
         }
     }
 
@@ -54,6 +60,7 @@ impl Genre {
         match self {
             Genre::Poteau => ["Diamètre", "Hauteur", ""],
             Genre::Rampe => ["Largeur", "Montée", "Longueur"],
+            Genre::Modele(_) => ["", "", ""],
             _ => ["Largeur", "Hauteur", "Profondeur"],
         }
     }
@@ -76,11 +83,16 @@ impl Objet {
             Genre::Dalle => Objet { genre, dim: [2.4, 0.25, 2.4], couleur: [0.74, 0.72, 0.68] },
             Genre::Poteau => Objet { genre, dim: [0.3, 3.0, 0.3], couleur: [0.55, 0.42, 0.30] },
             Genre::Rampe => Objet { genre, dim: [1.2, 1.2, 5.0], couleur: [0.70, 0.64, 0.54] },
+            Genre::Modele(_) => Objet { genre, dim: [1.0; 3], couleur: [0.62, 0.62, 0.64] },
         }
     }
 
     /// Les dimensions bornées à ce que le modèle accepte ; un poteau est rond.
     pub fn borne(mut self) -> Objet {
+        if let Genre::Modele(_) = self.genre {
+            self.dim = [self.dim[0].clamp(0.01, 100.0); 3];
+            return self;
+        }
         let (lo, hi) = (0.05, 40.0);
         self.dim = self.dim.map(|d| d.clamp(lo, hi));
         if self.genre == Genre::Poteau {
@@ -89,35 +101,73 @@ impl Objet {
         self
     }
 
+    /// L'échelle d'un modèle importé ; 1 pour le reste.
+    pub fn echelle(&self) -> f32 {
+        match self.genre {
+            Genre::Modele(_) => self.dim[0],
+            _ => 1.0,
+        }
+    }
+
+    /// Sa boîte englobante, dans son repère, échelle comprise.
+    pub fn boite(&self, modeles: &Modeles) -> ([f32; 3], [f32; 3]) {
+        let [x, y, z] = self.dim;
+        match self.genre {
+            Genre::Modele(k) => {
+                let (lo, hi) = modeles.get(k).and_then(|m| m.gabarit.as_ref()).map_or(BOITE_ABSENTE, |g| g.boite);
+                let s = self.dim[0];
+                (lo.map(|v| v * s), hi.map(|v| v * s))
+            }
+            Genre::Rampe => ([-x / 2.0, -ENFONCE, 0.0], [x / 2.0, y, z]),
+            _ => ([-x / 2.0, 0.0, -z / 2.0], [x / 2.0, y, z / 2.0]),
+        }
+    }
+
     /// L'identifiant de son maillage : le même pour les mêmes réglages.
     pub fn cle(&self) -> String {
         let d = self.dim.map(|x| (x * 1000.0).round() as i32);
         format!("objet/{}/{}x{}x{}/{}", self.genre.ident(), d[0], d[1], d[2], hex(self.couleur))
     }
 
-    /// Ses triangles, dans son repère.
-    pub fn triangles(&self) -> Vec<[[f32; 3]; 3]> {
+    /// Ses triangles, dans son repère, échelle comprise. Un modèle absent est une boîte.
+    pub fn triangles(&self, modeles: &Modeles) -> Vec<[[f32; 3]; 3]> {
         let [x, y, z] = self.dim;
         match self.genre {
             Genre::Bloc | Genre::Dalle => boite([-x / 2.0, 0.0, -z / 2.0], [x / 2.0, y, z / 2.0]),
             Genre::Poteau => poteau(y, x / 2.0),
             Genre::Rampe => rampe(z, x, y),
+            Genre::Modele(k) => {
+                let s = self.dim[0];
+                match modeles.get(k).and_then(|m| m.gabarit.as_ref()) {
+                    Some(g) => g.triangles.iter().map(|t| t.map(|p| p.map(|v| v * s))).collect(),
+                    None => boite(BOITE_ABSENTE.0.map(|v| v * s), BOITE_ABSENTE.1.map(|v| v * s)),
+                }
+            }
         }
     }
 
-    /// Son maillage au format `Format::Statique`, dans son repère.
+    /// Son maillage au format `Format::Statique`, dans son repère : pour le catalogue
+    /// intégré, et la boîte d'un modèle absent (à l'échelle 1).
     pub fn maillage(&self) -> Vec<f32> {
         let mut v = Vec::new();
-        ajouter(&mut v, &self.triangles(), self.couleur);
+        let o = match self.genre {
+            Genre::Modele(_) => Objet { dim: [1.0; 3], ..*self },
+            _ => *self,
+        };
+        ajouter(&mut v, &o.triangles(&Modeles::default()), self.couleur);
         v
     }
 
     /// Ses obstacles au cap `cap`, dans le repère de son lieu sans rotation, comme la
     /// physique les veut. Une boîte tournée d'un quart de tour reste une boîte ; de
     /// travers, elle devient des triangles.
-    pub fn obstacles(&self, cap: f32) -> Vec<Forme> {
+    pub fn obstacles(&self, cap: f32, modeles: &Modeles) -> Vec<Forme> {
         let [x, y, z] = self.dim;
         match self.genre {
+            Genre::Modele(_) => {
+                let t = self.triangles(modeles);
+                if t.is_empty() { vec![] } else { vec![Forme::Triangles(Arc::new(Triangles::new(tourner_tous(&t, cap))))] }
+            }
             Genre::Bloc | Genre::Dalle => {
                 let q = cap / std::f32::consts::FRAC_PI_2;
                 if (q - q.round()).abs() < 1e-3 {
@@ -125,11 +175,11 @@ impl Objet {
                     let (dx, dz) = if impair { (z / 2.0, x / 2.0) } else { (x / 2.0, z / 2.0) };
                     vec![Forme::Boite(Aabb { centre: [0.0, y / 2.0, 0.0], demi: [dx, y / 2.0, dz] })]
                 } else {
-                    vec![Forme::Triangles(Arc::new(Triangles::new(tourner_tous(&self.triangles(), cap))))]
+                    vec![Forme::Triangles(Arc::new(Triangles::new(tourner_tous(&self.triangles(modeles), cap))))]
                 }
             }
             Genre::Poteau => vec![Forme::Capsule { base: [0.0; 3], hauteur: y, rayon: x / 2.0 }],
-            Genre::Rampe => vec![Forme::Triangles(Arc::new(Triangles::new(tourner_tous(&self.triangles(), cap))))],
+            Genre::Rampe => vec![Forme::Triangles(Arc::new(Triangles::new(tourner_tous(&self.triangles(modeles), cap))))],
         }
     }
 }
@@ -229,7 +279,7 @@ mod tests {
     #[test]
     fn la_boite_regarde_dehors_et_se_tourne() {
         let o = Objet::neuf(Genre::Bloc);
-        let t = o.triangles();
+        let t = o.triangles(&Modeles::default());
         assert_eq!(t.len(), 12);
         for [a, b, c] in &t {
             let (u, w) = ([b[0] - a[0], b[1] - a[1], b[2] - a[2]], [c[0] - a[0], c[1] - a[1], c[2] - a[2]]);
@@ -238,11 +288,11 @@ mod tests {
             assert!(n[0] * m[0] + n[1] * m[1] + n[2] * m[2] > 0.0, "vers le dehors");
         }
         let o = Objet { dim: [4.0, 1.0, 1.0], ..o };
-        match &o.obstacles(std::f32::consts::FRAC_PI_2)[..] {
+        match &o.obstacles(std::f32::consts::FRAC_PI_2, &Modeles::default())[..] {
             [Forme::Boite(b)] => assert!((b.demi[0] - 0.5).abs() < 1e-5 && (b.demi[2] - 2.0).abs() < 1e-5, "{b:?}"),
             f => panic!("{f:?}"),
         }
-        assert!(matches!(o.obstacles(0.3)[..], [Forme::Triangles(_)]));
+        assert!(matches!(o.obstacles(0.3, &Modeles::default())[..], [Forme::Triangles(_)]));
     }
 
     #[test]
@@ -260,7 +310,7 @@ mod tests {
     fn la_rampe_tournee_suit_son_cap() {
         let o = Objet::neuf(Genre::Rampe);
         // Vers +x : le haut de la rampe est à x = longueur
-        let t = tourner_tous(&o.triangles(), std::f32::consts::FRAC_PI_2);
+        let t = tourner_tous(&o.triangles(&Modeles::default()), std::f32::consts::FRAC_PI_2);
         let haut = t.iter().flatten().filter(|p| (p[1] - o.dim[1]).abs() < 1e-5).map(|p| p[0]).fold(f32::MIN, f32::max);
         assert!((haut - o.dim[2]).abs() < 1e-4, "{haut}");
     }

@@ -11,8 +11,10 @@ use crate::math;
 use crate::moniteur::{self, dec, Etat, Moniteur};
 use crate::shell::{Layout, Shell, Side};
 use crate::campagne::{Campagne, DEPART};
+use crate::catalogue::{self, Catalogue, Decor, Entree};
 use crate::editeur::{self, Editeur};
 use crate::manette::{Evenement, Manettes};
+use crate::reglages::Affichage;
 use crate::moteur::depot::Depot;
 use crate::moteur::{physique, systemes, Camera, Corps, Entite, Format, Horloge, Lieu, Maillages, Materiau, Mobile, Monde, Partie, Rendu, Scene, Squelette, Textures, Tuiles};
 use crate::personnage::{self, Modele};
@@ -82,6 +84,14 @@ pub struct App {
     pub editeur: Editeur,
     /// Les manettes de jeu et leurs profils.
     pub manettes: Manettes,
+    /// Les modèles importés.
+    pub catalogue: Catalogue,
+    /// Le prochain .glb de décor remplacera ce modèle.
+    remplacer: Option<String>,
+    /// L'onglet ouvert des réglages : 0 la manette, 1 l'affichage.
+    pub onglet_reglages: usize,
+    /// La distance d'affichage et le brouillard.
+    pub affichage: Affichage,
 }
 
 impl App {
@@ -97,6 +107,8 @@ impl App {
         let mut monde = Monde::default();
         let mut maillages = Maillages::default();
         let manettes = Manettes::new(dossier.as_ref().map(|d| d.join("reglages").join("manettes")));
+        let affichage = Affichage::ouvrir(dossier.as_ref().map(|d| d.join("reglages")), RAYON_TUILES, crate::moteur::scene::BROUILLARD);
+        let (catalogue, relus) = Catalogue::ouvrir(dossier.as_ref().map(|d| d.join("catalogue")));
         let depot = dossier.map(|d| d.join("monde")).map_or_else(Depot::memoire, Depot::dossier);
         let fiche = depot.lire_fiche().unwrap_or_default();
         let joueur = monde.creer(JOUEUR);
@@ -112,7 +124,7 @@ impl App {
         monde.corps.mettre(joueur, Corps::new(1.75));
         // Le monde autour du joueur, tout de suite ; la suite se charge en marchant
         let source = Box::new(Campagne { graine: fiche.graine });
-        let mut tuiles = Tuiles::avec(source, depot, fiche, RAYON_TUILES, GARDE_TUILES);
+        let mut tuiles = Tuiles::avec(source, depot, fiche, affichage.distance, affichage.distance + GARDE_TUILES - RAYON_TUILES);
         let o = monde.origine;
         tuiles.suivre(&mut monde, &mut maillages, (o[0], o[1]), usize::MAX);
         physique::poser(&mut monde);
@@ -138,7 +150,24 @@ impl App {
             onglet: ONGLET_MONITEUR,
             editeur: Editeur::default(),
             manettes,
+            catalogue,
+            remplacer: None,
+            onglet_reglages: 0,
+            affichage,
         };
+        // Les modèles du catalogue : les objets déjà posés les retrouvent
+        let mut erreurs = Vec::new();
+        for (e, d) in relus {
+            match d {
+                Ok(d) => {
+                    a.installer(&e, d);
+                }
+                Err(x) => erreurs.push(format!("{} : {x}", e.nom)),
+            }
+        }
+        if let Some(x) = erreurs.first() {
+            a.catalogue.erreur = Some(x.clone());
+        }
         a.mettre(Modele::depuis_glb(&personnage::mannequin_glb()).expect("le mannequin se relit"));
         a
     }
@@ -161,7 +190,7 @@ impl App {
             .iter()
             .map(|p| {
                 let x = &m.materiaux[p.materiau];
-                Partie { premier: p.premier, nombre: p.nombre, materiau: Materiau { texture: textures[p.materiau], opacite: x.opacite, alpha: x.alpha } }
+                Partie { premier: p.premier, nombre: p.nombre, materiau: Materiau { texture: textures[p.materiau], opacite: x.opacite, alpha: x.alpha, deux_cotes: false } }
             })
             .collect();
         let k = self.maillages.mettre_parties(&cle, Format::Peau, m.sommets.clone(), parties);
@@ -190,8 +219,84 @@ impl App {
         self.message = Some((s, 4.0));
     }
 
-    /// Un .glb reçu : il remplace le personnage s'il se lit, sinon l'ancien reste.
+    /// Un modèle du catalogue entre dans le moteur : ses textures, son maillage, sa
+    /// collision ; ses objets déjà posés se refont.
+    fn installer(&mut self, e: &Entree, d: Decor) -> crate::moteur::ModeleId {
+        let cle = format!("modele/{}", e.id);
+        self.textures.oter_sous(&format!("{cle}/"));
+        let textures: Vec<Option<crate::moteur::TextureId>> = d.materiaux.iter().enumerate().map(|(i, x)| x.image.clone().map(|im| self.textures.mettre(&format!("{cle}/{i}"), im))).collect();
+        let parties = d
+            .parties
+            .iter()
+            .map(|&(premier, nombre, k)| {
+                let x = &d.materiaux[k];
+                Partie { premier, nombre, materiau: Materiau { texture: textures[k], opacite: x.opacite, alpha: x.alpha, deux_cotes: x.deux_cotes } }
+            })
+            .collect();
+        let g = crate::moteur::Gabarit { sommets: Arc::new(d.sommets), parties, triangles: Arc::new(d.triangles), boite: d.boite };
+        let k = self.monde.modeles.mettre(&e.id, &e.nom, g);
+        crate::moteur::tuiles::rafraichir(&mut self.monde, &mut self.maillages, k);
+        k
+    }
+
+    /// Retourne les faces du modèle `id`, pour tous ses objets.
+    pub fn retourner_modele(&mut self, id: &str) {
+        let r = self.catalogue.octets(id).ok_or_else(|| "fichier du modèle illisible".to_string()).and_then(|o| self.catalogue.retourner(id, &o));
+        match r {
+            Ok((e, d)) => {
+                let s = format!("« {} » : faces {}", e.nom, if d.retourne { "retournées" } else { "remises comme dans le fichier" });
+                self.installer(&e, d);
+                self.dire(s);
+            }
+            Err(x) => self.dire(format!("{id} : {x}")),
+        }
+    }
+
+    /// Demande un .glb qui remplacera le modèle `id`, pour tous ses objets.
+    pub fn remplacer_modele(&mut self, id: &str) {
+        self.remplacer = Some(id.to_string());
+        self.demande = true;
+    }
+
+    /// Un .glb reçu. Avec une peau, c'est un personnage : il remplace le joueur s'il se
+    /// lit, sinon l'ancien reste. Sans peau, c'est un décor : il entre au catalogue, et
+    /// l'éditeur s'ouvre pour le poser.
     pub fn charger(&mut self, nom: &str, octets: &[u8]) {
+        if gda::sage::lire_glb(octets).is_some() && !catalogue::est_personnage(octets) {
+            let remplace = self.remplacer.take();
+            match self.catalogue.importer(nom, octets, remplace.as_deref()) {
+                Ok((e, d, deja)) => {
+                    let (n, manque, retourne) = (d.triangles.len(), d.manquantes, d.retourne);
+                    let k = self.installer(&e, d);
+                    let combien = self.monde.objet.iter().filter(|(_, o)| o.genre == crate::moteur::Genre::Modele(k)).count();
+                    let mut s = match (remplace.is_some(), deja) {
+                        (true, _) => format!("« {} » remplacé : {combien} objet{} mis à jour", e.nom, if combien > 1 { "s" } else { "" }),
+                        (false, true) => format!("« {} » est déjà au catalogue", e.nom),
+                        (false, false) => format!("« {} » ajouté au catalogue : {n} triangles", e.nom),
+                    };
+                    if retourne && !deja {
+                        s.push_str(", faces retournées (elles regardaient vers l'intérieur)");
+                    }
+                    if n > catalogue::TRIANGLES_LOURD {
+                        s.push_str(", lourd à dessiner");
+                    }
+                    if manque > 0 {
+                        s.push_str(&format!(", {manque} texture{} manquante{}", if manque > 1 { "s" } else { "" }, if manque > 1 { "s" } else { "" }));
+                    }
+                    self.dire(s);
+                    if remplace.is_none() {
+                        // L'éditeur ouvert, prêt à le poser
+                        if !self.shell.start.open {
+                            self.shell.start.toggle();
+                        }
+                        self.onglet = ONGLET_EDITEUR;
+                        self.editeur.mode = editeur::Mode::Ajouter(crate::moteur::Genre::Modele(k));
+                    }
+                }
+                Err(x) => self.dire(format!("{nom} : {x}")),
+            }
+            return;
+        }
         match Modele::depuis_glb(octets) {
             Ok(m) => {
                 let n = m.animations.len();
@@ -401,6 +506,10 @@ impl App {
         }
         // Une tuile au plus par image : le chargement ne fait pas d'à-coups
         let o = self.monde.origine;
+        // Les tuiles suivent la distance d'affichage ; elles se chargent au fil des images
+        let r = self.affichage.distance;
+        self.tuiles.rayon = r;
+        self.tuiles.garde = r + GARDE_TUILES - RAYON_TUILES;
         self.tuiles.suivre(&mut self.monde, &mut self.maillages, (o[0], o[1]), 1);
         self.tuiles.vieillir(&self.monde, dt);
         // Le personnage regarde ce que vise la caméra
@@ -432,6 +541,7 @@ impl App {
         self.panneau(cx, &l);
         self.poignee(cx, &l, ecran);
         let mut scene = Scene::extraire(&self.monde, &self.maillages, &self.textures, camera, u);
+        scene.brouillard = self.affichage.brouillard;
         // Les ombres portées autour du joueur
         scene.soleil.centre = self.lieu().interpole(u).0;
         let etat = self.etat();
@@ -459,7 +569,7 @@ impl App {
         oeil[1] = oeil[1].max(sol + 0.4);
         Camera {
             vue: math::look_at(oeil, cible, [0.0, 1.0, 0.0]),
-            proj: math::perspective(1.0, w.w / w.h.max(1.0), 0.1, 500.0),
+            proj: math::perspective(1.0, w.w / w.h.max(1.0), 0.1, ((self.affichage.distance as f32 + 1.5) * crate::moteur::TAILLE * 1.5).max(500.0)),
             oeil,
             fenetre: [w.x, w.y, w.w, w.h],
         }
@@ -482,7 +592,7 @@ impl App {
             x += taille + 10.0 * dp;
         }
         let y = w.y + m + (taille - h) / 2.0;
-        let l = "Ouvrir un personnage";
+        let l = "Ouvrir un .glb";
         let lw = cx.pill_width(l);
         if cx.pill(OUVRIR, Rect::new(x, y, lw, h), l, false) {
             self.demande = true;
@@ -562,11 +672,22 @@ impl App {
         // Chaque pastille a ses onglets
         let onglets: &[&str] = match self.onglet {
             ONGLET_EDITEUR => &["Éditeur"],
-            ONGLET_REGLAGES => &["Manette"],
+            ONGLET_REGLAGES => &["Manette", "Affichage"],
             _ => &["Moniteur"],
         };
-        cx.tabs(id("onglets-panneau"), Rect::new(r.x + 12.0 * d, r.y + 11.0 * d, r.w - 74.0 * d, 38.0 * d), onglets, 0);
+        let choisi = if self.onglet == ONGLET_REGLAGES { self.onglet_reglages } else { 0 };
+        let k = cx.tabs(id("onglets-panneau"), Rect::new(r.x + 12.0 * d, r.y + 11.0 * d, r.w - 74.0 * d, 38.0 * d), onglets, choisi);
+        if self.onglet == ONGLET_REGLAGES && k != self.onglet_reglages {
+            self.onglet_reglages = k;
+            self.manettes.capture = None;
+        }
         let corps = Rect::new(r.x, r.y + tete, r.w, r.h - tete);
+        if self.onglet == ONGLET_REGLAGES && self.onglet_reglages == 1 {
+            let mut b = cx.body(id("corps-affichage"), corps, &self.scrolls);
+            crate::reglages::affichage(cx, &mut b, &mut self.affichage);
+            cx.body_end(b, &mut self.scrolls);
+            return;
+        }
         if self.onglet == ONGLET_REGLAGES {
             let mut b = cx.body(id("corps-manette"), corps, &self.scrolls);
             crate::reglages::manette(cx, &mut b, &mut self.manettes);
@@ -576,6 +697,12 @@ impl App {
         if self.onglet == ONGLET_EDITEUR {
             let mut b = cx.body(id("corps-editeur"), corps, &self.scrolls);
             self.editeur.panneau(cx, &mut b, &mut self.monde, &mut self.maillages, &mut self.tuiles);
+            if let Some(id) = self.editeur.remplacement.take() {
+                self.remplacer_modele(&id);
+            }
+            if let Some(id) = self.editeur.retournement.take() {
+                self.retourner_modele(&id);
+            }
             cx.body_end(b, &mut self.scrolls);
             return;
         }
@@ -940,4 +1067,98 @@ mod tests {
         a.frame(&mut cx, ecran, 1.0 / 30.0);
         assert!(!a.shell.start.open, "B ferme le panneau");
     }
+
+    #[test]
+    fn un_glb_de_decor_entre_au_catalogue_et_se_retrouve() {
+        use crate::moteur::{Genre, Objet};
+        let d = std::env::temp_dir().join(format!("sage-decor-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let mut a = App::avec_dossier(1.0, Some(d.clone()));
+        a.charger("maison.glb", &crate::catalogue::tests::cube_glb(None));
+        assert_eq!(a.modele().unwrap().id, "mannequin", "le joueur ne change pas");
+        let k = a.monde.modeles.chercher("glb/0").expect("au catalogue");
+        assert!(a.edite() && a.editeur.mode == editeur::Mode::Ajouter(Genre::Modele(k)), "l'éditeur s'ouvre pour le poser");
+        // Posé à l'échelle 2 devant le joueur : un cube de 4 m, qui porte ce qui monte dessus
+        let p = a.lieu().pos;
+        let o = a.tuiles.ajouter(&mut a.monde, &mut a.maillages, Objet { dim: [2.0; 3], ..Objet::neuf(Genre::Modele(k)) }, Lieu::en([p[0] + 6.0, p[1], p[2]], 0.3));
+        let dessus = physique::sol(&a.monde, p[0] + 6.0, p[2], 100.0).unwrap();
+        assert!((dessus.0 - p[1] - 4.0).abs() < 1e-3 && dessus.2 == Some(o), "{dessus:?}");
+        let m = a.maillages.get(a.monde.rendu.get(o).unwrap().maillage).unwrap();
+        assert_eq!(m.format, Format::Texture);
+        a.enregistrer();
+        // Relancé : le modèle revient du catalogue, l'objet le retrouve
+        let b = App::avec_dossier(1.0, Some(d.clone()));
+        let o = b.monde.trouver("o/0").unwrap();
+        assert_eq!(b.maillages.get(b.monde.rendu.get(o).unwrap().maillage).unwrap().format, Format::Texture);
+        // Sans son fichier : une boîte grise, et la tuile garde la référence
+        std::fs::remove_file(d.join("catalogue/glb_0.glb")).unwrap();
+        let mut c = App::avec_dossier(1.0, Some(d.clone()));
+        let o = c.monde.trouver("o/0").unwrap();
+        assert_eq!(c.maillages.get(c.monde.rendu.get(o).unwrap().maillage).unwrap().id, "modele-absent");
+        let k = Tuiles::tuile_de(&c.monde, c.monde.lieu.get(o).unwrap().pos);
+        c.tuiles.marquer(k);
+        c.enregistrer();
+        let s = std::fs::read_to_string(d.join(format!("monde/tuiles/{}_{}.json", k.0, k.1))).unwrap();
+        assert!(s.contains("\"modele\":\"glb/0\"") && s.contains("\"echelle\":2"), "{s}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn un_decor_a_l_envers_est_retourne_et_le_choix_se_garde() {
+        use crate::catalogue::tests::cube_glb_faces;
+        let d = std::env::temp_dir().join(format!("sage-envers-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let mut a = App::avec_dossier(1.0, Some(d.clone()));
+        a.charger("envers.glb", &cube_glb_faces(None, true, true));
+        assert!(a.catalogue.entrees[0].retourne == Some(true), "vu à l'envers, il est retourné");
+        assert!(a.message.as_ref().is_some_and(|m| m.0.contains("retournées")), "{:?}", a.message);
+        let k = a.monde.modeles.chercher("glb/0").unwrap();
+        let g = a.monde.modeles.get(k).unwrap().gabarit.clone().unwrap();
+        assert!(g.parties.iter().all(|p| p.materiau.deux_cotes), "doubleSided est lu");
+        // Une fois retourné, chaque triangle regarde vers l'extérieur du cube
+        let dehors = |g: &crate::moteur::Gabarit| {
+            g.triangles.iter().all(|t| {
+                let (u, w) = ([0, 1, 2].map(|c| t[1][c] - t[0][c]), [0, 1, 2].map(|c| t[2][c] - t[0][c]));
+                let n = [u[1] * w[2] - u[2] * w[1], u[2] * w[0] - u[0] * w[2], u[0] * w[1] - u[1] * w[0]];
+                let c = [0, 1, 2].map(|i| (t[0][i] + t[1][i] + t[2][i]) / 3.0 - [0.0, 1.0, 0.0][i]);
+                n[0] * c[0] + n[1] * c[1] + n[2] * c[2] > 0.0
+            })
+        };
+        assert!(dehors(&g));
+        // Le lien de l'éditeur remet les faces comme dans le fichier, et le choix reste
+        a.retourner_modele("glb/0");
+        assert!(!dehors(a.monde.modeles.get(k).unwrap().gabarit.as_ref().unwrap()));
+        let b = App::avec_dossier(1.0, Some(d.clone()));
+        assert_eq!(b.catalogue.entrees[0].retourne, Some(false));
+        let k = b.monde.modeles.chercher("glb/0").unwrap();
+        assert!(!dehors(b.monde.modeles.get(k).unwrap().gabarit.as_ref().unwrap()));
+        // Un cube à l'endroit, lui, ne bouge pas
+        let mut c = App::new(1.0);
+        c.charger("endroit.glb", &crate::catalogue::tests::cube_glb(None));
+        assert_eq!(c.catalogue.entrees[0].retourne, Some(false));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn l_affichage_charge_plus_loin_et_se_retrouve() {
+        let d = std::env::temp_dir().join(format!("sage-affichage-jeu-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let mut a = App::avec_dossier(1.0, Some(d.clone()));
+        a.affichage.modifier(4, 200.0);
+        let (mut ui, mut text, mut dl) = (crate::ui::Ui::new(1.0), crate::text::Text::new(), crate::draw::DrawList::default());
+        let mut brouillard = 0.0;
+        for _ in 0..120 {
+            dl.clear();
+            let mut cx = Cx { ui: &mut ui, text: &mut text, dl: &mut dl, dp: 1.0 };
+            brouillard = a.frame(&mut cx, Rect::new(0.0, 0.0, 1280.0, 800.0), 1.0 / 30.0).brouillard;
+            ui.end_frame();
+        }
+        assert_eq!(brouillard, 200.0);
+        assert_eq!(a.tuiles.chargees.len(), 81, "neuf tuiles de côté");
+        let b = App::avec_dossier(1.0, Some(d.clone()));
+        assert_eq!((b.affichage.distance, b.affichage.brouillard), (4, 200.0));
+        assert_eq!(b.tuiles.chargees.len(), 81);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
 }

@@ -6,6 +6,49 @@ Il vise un monde ouvert, avec d'autres valeurs que la violence.
 
 ![Le mannequin marche dans le décor de S.A.G.E.](docs/apercu.png)
 
+## Version 0.8.2 : les faces des décors
+
+- Un décor dont les faces regardent vers l'intérieur est retourné à l'import, et le
+  message le dit. C'est le cas des fichiers des visualiseurs web qui dessinent tout des
+  deux côtés, comme ceux tirés de GTA San Andreas.
+- « Retourner ses faces », dans l'éditeur, retourne le modèle à la main, pour tous ses
+  objets. Le choix est gardé au catalogue (`"faces"`).
+- Un matériau `doubleSided` se voit des deux côtés : feuillages, grilles, vitres.
+- Le nom d'un modèle exporté sous « AuxScene » est celui de son fichier.
+
+## Version 0.8.1 : l'affichage
+
+- Les réglages ont un second onglet, Affichage, avec deux curseurs :
+  - **la distance d'affichage**, c'est-à-dire jusqu'où les tuiles du monde sont
+    chargées : de 64 à 320 m, par tuile de 64 m (128 m à l'origine) ;
+  - **le brouillard**, c'est-à-dire là où le lointain a disparu dans le ciel : de 30 m
+    jusqu'au bord des tuiles chargées (144 m à l'origine).
+- Les tuiles se chargent ou se libèrent au fil des images, sans attendre.
+- Les deux réglages sont gardés dans `reglages/affichage.json`.
+
+## Version 0.8 : décors et bâtiments en .glb
+
+- « Ouvrir un .glb » accepte aussi les décors et les bâtiments. Un modèle sans
+  squelette entre au catalogue de l'application, sous son identifiant
+  (`extras.sage.id` s'il en porte un, sinon `glb/<n>`). L'éditeur s'ouvre aussitôt
+  sur AJOUTER, avec le nouveau modèle.
+- Le modèle est d'abord posé : son point le plus bas va au sol, et il est centré s'il
+  n'a pas son origine dans son emprise. Ses matériaux, couleurs et textures (PNG,
+  JPEG) viennent du fichier.
+- Chaque objet posé se règle par son cap, son échelle (de ÷ 100 à × 100, pour les
+  fichiers en centimètres) et son enfoncement dans le sol.
+- La collision suit ses triangles : on marche sur un plancher, on bute contre un mur.
+- La tuile ne garde que la référence du modèle, avec la position, le cap et l'échelle.
+  Si le fichier manque, l'objet devient une boîte grise d'un mètre, et retrouve sa
+  forme dès que le modèle revient. « Remplacer le fichier du modèle » met une nouvelle
+  version à la place de l'ancienne, pour tous les objets qui le montrent.
+- Limites :
+  - sont refusés les maillages compressés (Draco, meshopt) et les textures KTX2 ou
+    WebP ;
+  - les animations sont ignorées ;
+  - au-delà de 50 000 triangles, le modèle est signalé comme lourd à dessiner et à
+    heurter.
+
 ## Version 0.7 : les manettes de jeu
 
 - Une manette branchée ou appairée en Bluetooth est détectée à sa première touche, et

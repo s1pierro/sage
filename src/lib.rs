@@ -8,6 +8,7 @@
 //! - `editeur` : l'édition du monde et de ses objets, dans le panneau de gauche ;
 //! - `manette`, `reglages` : les manettes de jeu, leurs profils, et l'onglet qui les règle ;
 //! - `campagne` : la source de tuiles générée (relief, objets) ;
+//! - `catalogue` : les modèles importés d'un `.glb` (décors, bâtiments) ;
 //! - `personnage` : le personnage relu d'un .glb, prêt pour le processeur graphique ;
 //! - `image` : les textures PNG et JPEG, décodées.
 //!
@@ -16,6 +17,7 @@
 
 pub mod android;
 pub mod campagne;
+pub mod catalogue;
 pub mod draw;
 pub mod editeur;
 pub mod gles;

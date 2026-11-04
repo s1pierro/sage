@@ -81,6 +81,7 @@ void main() {
 const LUMIERE: &str = "
 uniform vec3 u_oeil;
 uniform vec3 u_ciel;
+uniform float u_brouillard;
 uniform vec3 u_soleil;
 uniform highp sampler2DShadow u_ombre;
 uniform mat4 u_lvp;
@@ -103,8 +104,8 @@ vec3 eclairer(vec3 base, vec3 n, vec3 p) {
   if (d > 0.0) d *= ombre(p, n);
   float ciel = 0.5 + 0.5 * n.y;
   vec3 c = base * (0.30 + 0.25 * ciel + 0.60 * d);
-  // Le lointain se fond dans le ciel avant la limite des tuiles chargées
-  float loin = distance(p, u_oeil) / 72.0;
+  // Le lointain se fond dans le ciel : à u_brouillard, il n'en reste que 2 %
+  float loin = 2.0 * distance(p, u_oeil) / u_brouillard;
   float f = 1.0 - exp(-loin * loin);
   return mix(c, u_ciel, clamp(f, 0.0, 1.0));
 }";
@@ -182,6 +183,22 @@ void main() {
   gl_Position = u_vp * p;
 }";
 
+/// Un modèle importé : statique, avec ses coordonnées de texture.
+const TEXTURE_VS: &str = "#version 300 es
+precision highp float;
+layout(location=0) in vec3 a_pos;
+layout(location=1) in vec3 a_normale;
+layout(location=2) in vec3 a_couleur;
+layout(location=3) in vec2 a_uv;
+uniform mat4 u_place;
+uniform mat4 u_vp;
+out vec3 v_monde; out vec3 v_normale; out vec3 v_couleur; out vec2 v_uv;
+void main() {
+  vec4 p = u_place * vec4(a_pos, 1.0);
+  v_monde = p.xyz; v_normale = mat3(u_place) * a_normale; v_couleur = a_couleur; v_uv = a_uv;
+  gl_Position = u_vp * p;
+}";
+
 /// Un matériau : la texture (blanche s'il n'en a pas) teintée de la couleur des sommets,
 /// son opacité, et la coupure nette à mi-opacité d'un matériau masqué.
 const MATIERE_FS: &str = "#version 300 es
@@ -190,6 +207,7 @@ in vec3 v_monde; in vec3 v_normale; in vec3 v_couleur; in vec2 v_uv;
 uniform sampler2D u_texture;
 uniform float u_opacite;
 uniform float u_masque;
+uniform float u_choisi;
 out vec4 o_color;
 #LUMIERE
 void main() {
@@ -198,7 +216,10 @@ void main() {
   if (u_masque > 0.0 && a < 0.5) discard;
   vec3 n = normalize(v_normale);
   if (!gl_FrontFacing) n = -n;
-  o_color = vec4(eclairer(v_couleur * t.rgb, n, v_monde), u_masque > 0.0 ? 1.0 : a);
+  vec3 c = eclairer(v_couleur * t.rgb, n, v_monde);
+  float bord = 1.0 - abs(dot(n, normalize(u_oeil - v_monde)));
+  c = mix(c, vec3(1.0, 0.58, 0.20), u_choisi * (0.22 + 0.38 * bord));
+  o_color = vec4(c, u_masque > 0.0 ? 1.0 : a);
 }";
 
 /// La carte d'ombre : seule la profondeur compte.
@@ -256,6 +277,8 @@ pub struct Renderer {
     terrain: u32,
     bloc: u32,
     peau: u32,
+    /// Les modèles importés, texturés.
+    matiere: u32,
     ombre_bloc: u32,
     ombre_peau: u32,
     blanc: u32,
@@ -410,6 +433,7 @@ impl Renderer {
             let terrain = program(&gl, BLOC_VS, TERRAIN_FS).map_err(|e| format!("terrain : {e}"))?;
             let bloc = program(&gl, BLOC_VS, COULEUR_FS).map_err(|e| format!("décor : {e}"))?;
             let peau = program(&gl, PEAU_VS, MATIERE_FS).map_err(|e| format!("peau : {e}"))?;
+            let matiere = program(&gl, TEXTURE_VS, MATIERE_FS).map_err(|e| format!("modèle : {e}"))?;
             let ombre_bloc = program(&gl, OMBRE_BLOC_VS, OMBRE_FS).map_err(|e| format!("ombre : {e}"))?;
             let ombre_peau = program(&gl, OMBRE_PEAU_VS, OMBRE_FS).map_err(|e| format!("ombre de la peau : {e}"))?;
             let u_size = (gl.glGetUniformLocation)(ui_program, cstr("u_size").as_ptr());
@@ -454,6 +478,7 @@ impl Renderer {
                 terrain,
                 bloc,
                 peau,
+                matiere,
                 ombre_bloc,
                 ombre_peau,
                 blanc,
@@ -487,6 +512,7 @@ impl Renderer {
         (gl.glUniformMatrix4fv)(self.loc(p, "u_vp"), 1, 0, vp.as_ptr());
         (gl.glUniform3f)(self.loc(p, "u_oeil"), o[0], o[1], o[2]);
         (gl.glUniform3f)(self.loc(p, "u_ciel"), CIEL[0], CIEL[1], CIEL[2]);
+        (gl.glUniform1f)(self.loc(p, "u_brouillard"), s.brouillard.max(1.0));
         (gl.glUniform3f)(self.loc(p, "u_soleil"), d[0], d[1], d[2]);
         (gl.glUniformMatrix4fv)(self.loc(p, "u_lvp"), 1, 0, lvp.as_ptr());
         (gl.glUniform1f)(self.loc(p, "u_ombres"), if self.carte.is_some() { 1.0 } else { 0.0 });
@@ -550,7 +576,7 @@ impl Renderer {
         let mut n = 0;
         // Ce qui est hors du carré des ombres n'y porte rien
         let (cx, cz, r) = (scene.soleil.centre[0], scene.soleil.centre[2], scene.soleil.rayon * 1.5 + 20.0);
-        for format in [Format::Statique, Format::Peau] {
+        for format in [Format::Statique, Format::Texture, Format::Peau] {
             let p = if format == Format::Peau { self.ombre_peau } else { self.ombre_bloc };
             (gl.glUseProgram)(p);
             (gl.glUniformMatrix4fv)(self.loc(p, "u_vp"), 1, 0, lvp.as_ptr());
@@ -620,6 +646,7 @@ impl Renderer {
                     Format::Terrain => self.terrain,
                     Format::Statique => self.bloc,
                     Format::Peau => self.peau,
+                    Format::Texture => self.matiere,
                 };
                 let distance = ((d.place[12] - o[0]).powi(2) + (d.place[13] - o[1]).powi(2) + (d.place[14] - o[2]).powi(2)).sqrt();
                 for partie in m.parties() {
@@ -650,15 +677,17 @@ impl Renderer {
                 }
                 let d = &scene.dessins[a.dessin];
                 (gl.glUniformMatrix4fv)(self.loc(programme, "u_place"), 1, 0, d.place.as_ptr());
-                if programme == self.bloc {
+                if programme == self.bloc || programme == self.matiere || programme == self.peau {
                     (gl.glUniform1f)(self.loc(programme, "u_choisi"), if d.choisi { 1.0 } else { 0.0 });
                 }
-                if programme == self.peau {
-                    self.os(programme, d);
+                if programme == self.peau || programme == self.matiere {
+                    if programme == self.peau {
+                        self.os(programme, d);
+                    }
                     (gl.glUniform1f)(self.loc(programme, "u_opacite"), a.partie.materiau.opacite);
                     (gl.glUniform1f)(self.loc(programme, "u_masque"), if a.alpha == Alpha::Masque { 1.0 } else { 0.0 });
-                    // Un matériau masqué ou mêlé se voit des deux côtés
-                    if a.alpha == Alpha::Opaque {
+                    // Un matériau masqué, mêlé ou à deux côtés se voit des deux côtés
+                    if a.alpha == Alpha::Opaque && !a.partie.materiau.deux_cotes {
                         (gl.glEnable)(CULL_FACE);
                     } else {
                         (gl.glDisable)(CULL_FACE);

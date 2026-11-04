@@ -78,7 +78,12 @@ pub struct Scene {
     /// libère les autres.
     pub maillages: Vec<(MaillageId, Maillage3d)>,
     pub textures: Vec<(TextureId, Texture3d)>,
+    /// Là où le brouillard a tout recouvert, en mètres.
+    pub brouillard: f32,
 }
+
+/// Le brouillard d'origine.
+pub const BROUILLARD: f32 = 144.0;
 
 impl Scene {
     /// La scène vue par `camera`, les entités placées entre leurs deux derniers pas (`u`).
@@ -97,7 +102,7 @@ impl Scene {
             dessins.push(Dessin { maillage: r.maillage, place, os, choisi: monde.choisie == Some(e) });
         }
         let soleil = Soleil { direction: SOLEIL, centre: camera.oeil, rayon: RAYON_OMBRES };
-        Scene { camera, dessins, soleil, maillages: maillages.tous(), textures: textures.toutes() }
+        Scene { camera, dessins, soleil, maillages: maillages.tous(), textures: textures.toutes(), brouillard: BROUILLARD }
     }
 }
 

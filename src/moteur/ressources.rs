@@ -17,6 +17,9 @@ pub enum Format {
     Peau,
     /// Comme `Statique`, dessiné avec le quadrillage et les ombres au sol.
     Terrain,
+    /// Position, normale, couleur, coordonnées de texture : 11 flottants. Les modèles
+    /// importés, avec leurs matériaux.
+    Texture,
 }
 
 impl Format {
@@ -24,6 +27,7 @@ impl Format {
         match self {
             Format::Statique | Format::Terrain => &[3, 3, 3],
             Format::Peau => &[3, 3, 4, 4, 3, 2],
+            Format::Texture => &[3, 3, 3, 2],
         }
     }
 
@@ -54,11 +58,13 @@ pub struct Materiau {
     pub texture: Option<TextureId>,
     pub opacite: f32,
     pub alpha: Alpha,
+    /// Ses faces se voient des deux côtés.
+    pub deux_cotes: bool,
 }
 
 impl Default for Materiau {
     fn default() -> Materiau {
-        Materiau { texture: None, opacite: 1.0, alpha: Alpha::Opaque }
+        Materiau { texture: None, opacite: 1.0, alpha: Alpha::Opaque, deux_cotes: false }
     }
 }
 
