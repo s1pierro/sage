@@ -6,6 +6,21 @@ Il vise un monde ouvert, avec d'autres valeurs que la violence.
 
 ![Le mannequin marche dans le décor de S.A.G.E.](docs/apercu.png)
 
+## Version 0.11 : une île
+
+- La carte porte une île d'environ 15 km, au contour découpé de caps et de baies, au
+  milieu de la mer. Le fond descend vers -35 m au large ; la mer cache le bord de la
+  carte.
+- Une chaîne de montagnes en crêtes, d'un côté de l'île, monte vers 900 m. Ailleurs,
+  des plaines et des collines ; près du rivage, le relief s'efface en plages douces.
+- Les couleurs suivent le relief : sable des plages, herbe plus ou moins sèche, lande en
+  altitude, roche dans les pentes et vers les sommets, fond de la mer.
+- La mer est un plan d'eau jusqu'à l'horizon : houle, reflet du ciel plus fort de biais,
+  éclat du soleil, plus transparente vue d'en haut. Le joueur entre dans l'eau jusqu'à
+  1,2 m de fond, pas au-delà.
+- Une carte d'avant change de relief : « Régénérer la carte… » la remet à neuf, sans
+  coutures entre les anciennes tuiles retouchées et les nouvelles.
+
 ## Version 0.10 : une carte finie, nue, à régénérer
 
 - La carte fait 20 km de côté : 313 tuiles de 64 m, centrées sur le départ. Au bord, le

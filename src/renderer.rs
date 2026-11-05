@@ -236,6 +236,50 @@ void main() {
   o_color = vec4(c, u_masque > 0.0 ? 1.0 : a);
 }";
 
+/// La mer : un carré à plat autour de l'œil, jusqu'à l'horizon.
+const EAU_VS: &str = "#version 300 es
+precision highp float;
+layout(location=0) in vec2 a_coin;
+uniform mat4 u_vp;
+uniform vec3 u_centre;
+uniform float u_etendue;
+out vec3 v_monde;
+void main() {
+  vec3 p = vec3(u_centre.x + a_coin.x * u_etendue, u_centre.y, u_centre.z + a_coin.y * u_etendue);
+  v_monde = p;
+  gl_Position = u_vp * vec4(p, 1.0);
+}";
+
+/// La houle (quelques ondes qui penchent la normale, effacées au loin), le ciel qui s'y
+/// reflète d'autant plus qu'on la voit de biais, l'éclat du soleil ; plus transparente
+/// vue d'en haut.
+const EAU_FS: &str = "#version 300 es
+precision highp float;
+in vec3 v_monde;
+uniform float u_temps;
+out vec4 o_color;
+#LUMIERE
+void main() {
+  vec2 p = v_monde.xz;
+  vec2 g = vec2(0.0);
+  vec4 ondes[4] = vec4[4](vec4(0.8, 0.6, 23.0, 0.10), vec4(-0.5, 0.86, 11.0, 0.05), vec4(0.2, -0.98, 5.3, 0.025), vec4(-0.9, -0.4, 2.1, 0.01));
+  for (int i = 0; i < 4; i++) {
+    vec2 k = ondes[i].xy * (6.2832 / ondes[i].z);
+    float w = sqrt(9.81 * length(k));
+    g += ondes[i].w * length(k) * cos(dot(k, p) - w * u_temps) * ondes[i].xy;
+  }
+  float d = distance(v_monde, u_oeil);
+  g *= 1.0 - smoothstep(60.0, 600.0, d);
+  vec3 n = normalize(vec3(-g.x, 1.0, -g.y));
+  vec3 v = normalize(u_oeil - v_monde);
+  float f = 0.02 + 0.98 * pow(1.0 - max(dot(n, v), 0.0), 5.0);
+  vec3 c = eclairer(vec3(0.10, 0.30, 0.36), n, v_monde);
+  c = mix(c, u_ciel * 1.05, f);
+  vec3 r = reflect(-v, n);
+  c += vec3(1.0, 0.95, 0.85) * pow(max(dot(r, u_soleil), 0.0), 180.0) * 1.5;
+  o_color = vec4(c, mix(0.62, 0.97, f));
+}";
+
 /// La carte d'ombre : seule la profondeur compte.
 const OMBRE_BLOC_VS: &str = "#version 300 es
 precision highp float;
@@ -295,6 +339,9 @@ pub struct Renderer {
     matiere: u32,
     ombre_bloc: u32,
     ombre_peau: u32,
+    /// La mer, et son carré.
+    eau: u32,
+    eau_vao: u32,
     blanc: u32,
     carte: Option<Carte>,
     /// Les maillages et les textures chargés, avec leur version.
@@ -450,6 +497,8 @@ impl Renderer {
             let matiere = program(&gl, TEXTURE_VS, MATIERE_FS).map_err(|e| format!("modèle : {e}"))?;
             let ombre_bloc = program(&gl, OMBRE_BLOC_VS, OMBRE_FS).map_err(|e| format!("ombre : {e}"))?;
             let ombre_peau = program(&gl, OMBRE_PEAU_VS, OMBRE_FS).map_err(|e| format!("ombre de la peau : {e}"))?;
+            let eau = program(&gl, EAU_VS, EAU_FS).map_err(|e| format!("mer : {e}"))?;
+            let eau_vao = tampon(&gl, &[-1.0, -1.0, 1.0, 1.0, 1.0, -1.0, -1.0, -1.0, -1.0, 1.0, 1.0, 1.0], &[2]).vao;
             let u_size = (gl.glGetUniformLocation)(ui_program, cstr("u_size").as_ptr());
 
             let (mut ui_vao, mut ui_vbo) = (0, 0);
@@ -495,6 +544,8 @@ impl Renderer {
                 matiere,
                 ombre_bloc,
                 ombre_peau,
+                eau,
+                eau_vao,
                 blanc,
                 carte,
                 maillages: HashMap::new(),
@@ -711,6 +762,20 @@ impl Renderer {
                 let t = &self.maillages[&d.maillage].2;
                 (gl.glBindVertexArray)(t.vao);
                 (gl.glDrawArrays)(TRIANGLES, a.partie.premier as i32, (a.partie.nombre as i32).min(t.n - a.partie.premier as i32));
+                self.bilan.parties += 1;
+            }
+            // La mer, par-dessus le fond, mêlée, des deux côtés
+            if let Some(niveau) = scene.mer {
+                self.communs(self.eau, scene, &vp, &lvp);
+                (gl.glUniform3f)(self.loc(self.eau, "u_centre"), o[0], niveau, o[2]);
+                (gl.glUniform1f)(self.loc(self.eau, "u_etendue"), 12_000.0);
+                (gl.glUniform1f)(self.loc(self.eau, "u_temps"), scene.temps);
+                (gl.glEnable)(BLEND);
+                (gl.glBlendFunc)(0x0302, 0x0303);
+                (gl.glDepthMask)(0);
+                (gl.glDisable)(CULL_FACE);
+                (gl.glBindVertexArray)(self.eau_vao);
+                (gl.glDrawArrays)(TRIANGLES, 0, 6);
                 self.bilan.parties += 1;
             }
             (gl.glDepthMask)(1);

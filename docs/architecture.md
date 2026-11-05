@@ -620,3 +620,40 @@ L'onglet Affichage des réglages (`reglages::Affichage`, écrit dans
     vidé.
 - Dans l'onglet Topologie, « Régénérer la carte… » propose une graine tirée de l'heure,
   en propose une autre, ou laisse la carte telle quelle.
+
+## 10. Une île (0.11)
+
+`src/campagne.rs`, point par point en coordonnées absolues (f64) : les tuiles voisines
+s'accordent exactement, normales comprises (elles se calculent par différences centrées
+sur une grille qui déborde d'un point).
+
+- **Le contour** : la distance au centre (le départ), après un décalage par un bruit de
+  3 km d'onde et 1,5 km d'ampleur, rapportée à `RAYON_ILE` (7,9 km). `terre` passe de 1
+  à 0 entre 0,80 et 1,08 de ce rayon : environ 150 km² de terre.
+- **Le relief** : `fond + (sol − fond) · terre`, avec
+  - `fond` : `FOND` (−35 m) et un bruit de 8 m ;
+  - `sol` : 2,5 m, plus collines et montagnes multipliées par `terre³` (elles s'effacent
+    vers le rivage : des plages en pente douce), plus un détail de 1,2 m à 40 m d'onde.
+- **Les collines** : un bruit à 5 octaves, 700 m d'onde, jusqu'à 70 m, sur des
+  coordonnées tordues (`domain warping`, 260 m), plus ou moins fort selon de grandes
+  zones (2,6 km) : plaines ou collines.
+- **La chaîne** : une bande le long d'un axe tiré de la graine, décalée de 2,8 km du
+  centre, qui serpente, large d'environ 1,7 km et longue de 10 ; un bruit en crêtes à 6
+  octaves y monte vers `SOMMET` (900 m).
+- **Les couleurs** : sable sous 4 m (pentes douces), herbe plus ou moins sèche, lande de
+  250 à 450 m, roche de 520 à 700 m et dans les pentes, roche claire vers les sommets ;
+  sable mouillé puis fond sous l'eau.
+- Le bruit de valeurs est lissé au quintique ; chaque octave est tournée, les réseaux ne
+  s'alignent pas.
+
+### La mer
+
+- `Scene::mer` (le niveau, `MER` = 0) : le moteur de rendu dessine après le reste un
+  carré de 24 km autour de l'œil, mêlé, sans écrire la profondeur.
+- Le programme `EAU` : quatre ondes (de 23 à 2 m, vitesses des vagues en eau profonde)
+  penchent la normale, effacées entre 60 et 600 m ; le ciel s'y reflète selon Fresnel
+  (Schlick), le soleil y brille ; l'opacité va de 0,62 vue d'en haut à 0,97 de biais.
+  Elle s'éclaire et se fond dans le brouillard comme le reste.
+- `Scene::temps` fait avancer la houle, même en pause.
+- Le joueur n'avance pas là où le fond est à plus de `PROFONDEUR` (1,2 m) sous l'eau,
+  sauf vers moins profond. La caméra reste au-dessus de l'eau.

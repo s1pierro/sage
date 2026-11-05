@@ -10,7 +10,7 @@ use crate::draw::{Color, Rect};
 use crate::math;
 use crate::moniteur::{self, dec, Etat, Moniteur};
 use crate::shell::{Layout, Shell, Side};
-use crate::campagne::{Campagne, DEPART};
+use crate::campagne::{Campagne, DEPART, MER};
 use crate::catalogue::{self, Catalogue, Decor, Entree};
 use crate::editeur::{self, Editeur};
 use crate::manette::{Evenement, Manettes};
@@ -64,6 +64,9 @@ pub fn isolignes(d: f32) -> f32 {
     [100.0, 50.0, 25.0, 10.0, 5.0, 2.0].into_iter().find(|p| *p <= d / 40.0).unwrap_or(1.0)
 }
 
+/// Le joueur ne va pas là où l'eau est plus profonde que cela (m).
+pub const PROFONDEUR: f32 = 1.2;
+
 /// En édition, tant de tuiles se chargent par image.
 const EDITION_CHARGE: usize = 4;
 
@@ -108,6 +111,8 @@ pub struct App {
     /// L'éditeur ouvert, le jeu est en pause et le joueur caché : la caméra tourne autour
     /// de ce point du sol, que la manette déplace.
     pub visee: Option<[f32; 3]>,
+    /// Le temps qui passe, même en pause : la houle.
+    instant: f32,
 }
 
 impl App {
@@ -171,6 +176,7 @@ impl App {
             onglet_reglages: 0,
             affichage,
             visee: None,
+            instant: 0.0,
         };
         // Les modèles du catalogue : les objets déjà posés les retrouvent
         let mut erreurs = Vec::new();
@@ -461,7 +467,18 @@ impl App {
         }
         systemes::retenir(&mut self.monde);
         systemes::marcher(&mut self.monde, self.joueur, dir);
+        let avant = self.lieu().pos;
         physique::deplacer(&mut self.monde);
+        // L'eau profonde arrête le joueur ; s'il y est déjà, il n'en sort que vers moins
+        // profond
+        let p = self.lieu().pos;
+        let fond = |x: f32, z: f32| systemes::hauteur_sol(&self.monde, x, z).unwrap_or(MER);
+        let (ici, la) = (fond(p[0], p[2]), fond(avant[0], avant[2]));
+        if ici < MER - PROFONDEUR && ici < la {
+            if let Some(l) = self.monde.lieu.get_mut(self.joueur) {
+                l.pos = avant;
+            }
+        }
         // Le bord de la carte est un mur
         let (lo, hi) = crate::moteur::tuiles::bords(&self.monde);
         if let Some(l) = self.monde.lieu.get_mut(self.joueur) {
@@ -679,6 +696,9 @@ impl App {
         let mut scene = Scene::extraire(&self.monde, &self.maillages, &self.textures, camera, u);
         // En édition, pas de brouillard
         scene.brouillard = if self.visee.is_some() { 1.0e7 } else { self.affichage.brouillard };
+        self.instant += dt;
+        scene.mer = Some(MER);
+        scene.temps = self.instant % 3600.0;
         // Les ombres portées autour du joueur ; en pause, autour du point visé, sans lui
         scene.soleil.centre = self.lieu().interpole(u).0;
         if let Some(v) = self.visee {
@@ -707,7 +727,7 @@ impl App {
         let (p, _) = self.lieu().interpole(u);
         let (cible, d) = match self.visee {
             Some(v) => {
-                let h = systemes::hauteur_sol(&self.monde, v[0], v[2]).unwrap_or(v[1]);
+                let h = systemes::hauteur_sol(&self.monde, v[0], v[2]).unwrap_or(v[1]).max(MER);
                 ([v[0], h + 1.0, v[2]], self.cam.2)
             }
             None => ([p[0], p[1] + hauteur * 0.6, p[2]], self.cam.2 * hauteur / 1.75),
@@ -726,7 +746,7 @@ impl App {
         }
         // Jamais sous le sol
         let sol = systemes::hauteur_sol(&self.monde, oeil[0], oeil[2]).unwrap_or(p[1]);
-        oeil[1] = oeil[1].max(sol + 0.4);
+        oeil[1] = oeil[1].max(sol + 0.4).max(MER + 0.4);
         Camera {
             vue: math::look_at(oeil, cible, haut),
             // En édition, on voit loin : le plan proche recule, la profondeur reste précise

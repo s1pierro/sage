@@ -92,6 +92,10 @@ pub struct Scene {
     pub brouillard: f32,
     /// L'écart des courbes de niveau tracées sur le relief, en mètres ; 0 : aucune.
     pub isolignes: f32,
+    /// Le niveau de la mer, s'il y en a une : un plan d'eau jusqu'à l'horizon.
+    pub mer: Option<f32>,
+    /// Le temps qui passe, en secondes : la houle.
+    pub temps: f32,
 }
 
 /// Le brouillard d'origine.
@@ -114,7 +118,7 @@ impl Scene {
             dessins.push(Dessin { maillage: r.maillage, place, os, choisi: monde.choisie == Some(e) });
         }
         let soleil = Soleil { direction: SOLEIL, centre: camera.oeil, rayon: RAYON_OMBRES };
-        Scene { camera, dessins, soleil, maillages: maillages.tous(), textures: textures.toutes(), brouillard: BROUILLARD, isolignes: 0.0 }
+        Scene { camera, dessins, soleil, maillages: maillages.tous(), textures: textures.toutes(), brouillard: BROUILLARD, isolignes: 0.0, mer: None, temps: 0.0 }
     }
 }
 
