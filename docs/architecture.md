@@ -602,3 +602,21 @@ L'onglet Affichage des réglages (`reglages::Affichage`, écrit dans
 - Les bras gardent à peu près la même taille à l'écran (16 % de la distance à l'œil).
 - Chaque poignée est une zone tenue au doigt (`Ui::drag`) : la toucher ne choisit rien
   d'autre. Un geste, du doigt posé au doigt levé, est une étape d'annulation.
+
+## 9. Une carte finie, nue, à régénérer (0.10)
+
+- `DEMI_CARTE` (156) borne les tuiles : de -156 à +156 sur chaque axe, 313 de côté,
+  20 km, centrées sur la tuile du départ. `Tuiles::suivre` ne charge rien au-delà
+  (`dans_la_carte`).
+- Le bord est un mur : après chaque pas, le joueur est ramené à `CORPS` du bord
+  (`tuiles::bords`, au repère du monde). Le point visé de l'éditeur reste dans la carte.
+- `Campagne` ne pose plus d'objets : elle ne donne que le relief et ses couleurs.
+- `App::regenerer(graine)` :
+  - `Tuiles::repartir` décharge toutes les tuiles sans les écrire, détruit les objets,
+    efface les tuiles du dépôt (`Depot::effacer_tuiles`) et prend la nouvelle source ;
+  - la fiche garde la graine ; le compteur d'objets continue, un identifiant n'est
+    jamais redonné ;
+  - le joueur revient au départ, l'origine à (0, 0) ; l'historique d'annulation est
+    vidé.
+- Dans l'onglet Topologie, « Régénérer la carte… » propose une graine tirée de l'heure,
+  en propose une autre, ou laisse la carte telle quelle.

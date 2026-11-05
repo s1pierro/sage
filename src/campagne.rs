@@ -1,14 +1,14 @@
-//! La campagne : une source de tuiles générée, toujours la même pour une graine donnée.
+//! La campagne : une source de tuiles générée, toujours la même pour une graine donnée,
+//! nue : le relief et ses couleurs, sans objets.
 //! Le relief est une somme de bruits calculée en coordonnées absolues (double précision) :
 //! deux tuiles voisines s'accordent exactement sur leur bord, à n'importe quelle distance.
 
-use crate::moteur::{Contenu, Element, Genre, Objet, Relief, Source, TAILLE};
+use crate::moteur::{Contenu, Relief, Source, TAILLE};
 
 /// Points de grille par côté de tuile : un pas de 2 m.
 pub const GRILLE: usize = 32;
-/// Le départ, en absolu, et le rayon laissé libre autour.
+/// Le départ, en absolu : le centre de la tuile (0, 0), au milieu de la carte.
 pub const DEPART: [f32; 2] = [TAILLE / 2.0, TAILLE / 2.0];
-const LIBRE: f32 = 8.0;
 
 pub struct Campagne {
     pub graine: u32,
@@ -84,83 +84,8 @@ impl Source for Campagne {
             }
         }
         let relief = Relief { n, h };
-        let mut objets = Vec::new();
-        let mut poser = |genre: Genre, pos: [f32; 3], cap: f32, dim: [f32; 3], couleur: [f32; 3]| {
-            let k = objets.iter().filter(|e: &&Element| e.objet.genre == genre).count();
-            objets.push(Element { id: format!("tuile/{i}/{j}/{}/{k}", genre.ident()), objet: Objet { genre, dim, couleur }, pos, cap });
-        };
-
-        // Quelques blocs, posés sur le relief, jamais sur le départ
-        let mut graine = (hache(self.graine ^ 0xB10C, i as i64, j as i64) * u32::MAX as f64) as u32 | 1;
-        let mut hasard = move || {
-            graine ^= graine << 13;
-            graine ^= graine >> 17;
-            graine ^= graine << 5;
-            graine as f32 / u32::MAX as f32
-        };
-        let teintes = [[0.82, 0.78, 0.70], [0.70, 0.72, 0.76], [0.78, 0.66, 0.56], [0.62, 0.70, 0.62], [0.86, 0.84, 0.80]];
-        let combien = 2 + (hasard() * 6.0) as usize;
-        for _ in 0..combien {
-            let demi = [0.4 + hasard() * 2.6, 0.3 + hasard() * 4.0, 0.4 + hasard() * 2.6];
-            let (x, z) = (demi[0] + hasard() * (TAILLE - 2.0 * demi[0]), demi[2] + hasard() * (TAILLE - 2.0 * demi[2]));
-            let couleur = teintes[(hasard() * teintes.len() as f32) as usize % teintes.len()];
-            let (ax, az) = (ox as f32 + x - DEPART[0], oz as f32 + z - DEPART[1]);
-            if ax.abs() < demi[0] + LIBRE && az.abs() < demi[2] + LIBRE {
-                continue;
-            }
-            // Le pied au plus bas du sol sous le bloc, un peu enfoncé
-            let bas = [(-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0), (0.0, 0.0)]
-                .iter()
-                .map(|(u, v)| relief.hauteur(x + u * demi[0], z + v * demi[2]))
-                .fold(f32::INFINITY, f32::min)
-                - 0.3;
-            poser(Genre::Bloc, [x, bas, z], 0.0, demi.map(|d| 2.0 * d), couleur);
-        }
-        // Des dalles basses, qui se franchissent d'un pas
-        let libre = |x: f32, z: f32, r: f32| {
-            let (ax, az) = (ox as f32 + x - DEPART[0], oz as f32 + z - DEPART[1]);
-            ax.abs() >= r + LIBRE || az.abs() >= r + LIBRE
-        };
-        // Le sol le plus bas et le plus haut sous un rectangle de demi-côtés (dx, dz)
-        let sous = |x: f32, z: f32, dx: f32, dz: f32| {
-            [(-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0), (0.0, 0.0)].iter().map(|(u, v)| relief.hauteur(x + u * dx, z + v * dz)).fold((f32::INFINITY, f32::NEG_INFINITY), |(a, b), h| (a.min(h), b.max(h)))
-        };
-        for _ in 0..1 + (hasard() * 3.0) as usize {
-            let demi = [0.8 + hasard() * 1.6, 0.0, 0.8 + hasard() * 1.6];
-            let (x, z) = (demi[0] + hasard() * (TAILLE - 2.0 * demi[0]), demi[2] + hasard() * (TAILLE - 2.0 * demi[2]));
-            if !libre(x, z, demi[0].max(demi[2])) {
-                continue;
-            }
-            let (bas, haut) = (sous(x, z, demi[0], demi[2]).0 - 0.1, sous(x, z, demi[0], demi[2]).1 + 0.12 + hasard() * 0.13);
-            poser(Genre::Dalle, [x, bas, z], 0.0, [2.0 * demi[0], haut - bas, 2.0 * demi[2]], [0.74, 0.72, 0.68]);
-        }
-
-        // Des poteaux
-        for _ in 0..(hasard() * 3.0) as usize {
-            let (r, h) = (0.12 + hasard() * 0.13, 2.0 + hasard() * 2.0);
-            let (x, z) = (1.0 + hasard() * (TAILLE - 2.0), 1.0 + hasard() * (TAILLE - 2.0));
-            if !libre(x, z, r) {
-                continue;
-            }
-            poser(Genre::Poteau, [x, relief.hauteur(x, z) - 0.2, z], 0.0, [2.0 * r, h, 2.0 * r], [0.55, 0.42, 0.30]);
-        }
-
-        // Une rampe sur une plate-forme, une fois sur deux
-        if hasard() < 0.5 {
-            let (long, large, plateau) = (5.0, 1.2, 1.2);
-            let (x, z) = (8.0 + hasard() * (TAILLE - 16.0), 8.0 + hasard() * (TAILLE - 16.0));
-            let sens: [f32; 2] = [[1.0, 0.0], [-1.0, 0.0], [0.0, 1.0], [0.0, -1.0]][(hasard() * 4.0) as usize % 4];
-            if libre(x, z, long + 2.0) {
-                // La plate-forme, au bout de la rampe
-                let (px, pz) = (x + sens[0] * (long + 1.0), z + sens[1] * (long + 1.0));
-                let haut = sous(px, pz, 1.0, 1.0).1 + plateau;
-                let bas = sous(px, pz, 1.0, 1.0).0 - 0.3;
-                poser(Genre::Bloc, [px, bas, pz], 0.0, [2.0, haut - bas, 2.0], [0.80, 0.76, 0.66]);
-                let h0 = relief.hauteur(x, z);
-                poser(Genre::Rampe, [x, h0, z], sens[0].atan2(sens[1]), [large, haut - h0, long], [0.70, 0.64, 0.54]);
-            }
-        }
-        Contenu { relief, normales, couleurs, objets }
+        // La carte est nue : les objets se posent à la main
+        Contenu { relief, normales, couleurs, objets: Vec::new() }
     }
 }
 
@@ -184,28 +109,13 @@ mod tests {
     fn la_campagne_est_toujours_la_meme() {
         let (a, b) = (Campagne { graine: 3 }.tuile(2, -1), Campagne { graine: 3 }.tuile(2, -1));
         assert_eq!(a.relief, b.relief);
-        assert_eq!(a.objets, b.objets);
         assert_ne!(Campagne { graine: 4 }.tuile(2, -1).relief, a.relief);
     }
 
     #[test]
-    fn le_depart_est_libre_et_les_blocs_touchent_le_sol() {
+    fn la_campagne_est_nue() {
         let c = Campagne { graine: 1 };
-        let mut total = 0;
-        for j in -2..=2 {
-            for i in -2..=2 {
-                let t = c.tuile(i, j);
-                for e in t.objets.iter().filter(|e| matches!(e.objet.genre, Genre::Bloc | Genre::Dalle)) {
-                    total += 1;
-                    let demi = e.objet.dim.map(|d| d / 2.0);
-                    let (ax, az) = (i as f32 * TAILLE + e.pos[0] - DEPART[0], j as f32 * TAILLE + e.pos[2] - DEPART[1]);
-                    assert!(ax.abs() >= demi[0] + LIBRE || az.abs() >= demi[2] + LIBRE);
-                    assert!(e.pos[1] < t.relief.hauteur(e.pos[0], e.pos[2]), "posé, pas en l'air");
-                    assert!(e.id.starts_with(&format!("tuile/{i}/{j}/")), "{}", e.id);
-                }
-            }
-        }
-        assert!(total > 60, "{total}");
+        assert!((-2..=2).all(|j| (-2..=2).all(|i| c.tuile(i, j).objets.is_empty())));
     }
 
     #[test]

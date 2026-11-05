@@ -110,6 +110,18 @@ impl Depot {
         self.ecrire(&Depot::chemin(i, j), s)
     }
 
+    /// Efface toutes les tuiles écrites.
+    pub fn effacer_tuiles(&mut self) -> std::io::Result<()> {
+        let Some(d) = &self.dossier else {
+            self.memoire.retain(|k, _| !k.starts_with("tuiles/"));
+            return Ok(());
+        };
+        match std::fs::remove_dir_all(d.join("tuiles")) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+            _ => Ok(()),
+        }
+    }
+
     pub fn lire_fiche(&self) -> Option<Fiche> {
         let j = json::lire(&self.lire("monde.json")?)?;
         let joueur = j.get("joueur").and_then(|p| {

@@ -118,11 +118,21 @@ pub struct Editeur {
     gestes: usize,
     /// L'écart des courbes de niveau montrées, en mètres (0 : aucune).
     pub isolignes: f32,
+    /// « Régénérer la carte » attend sa confirmation, avec cette graine.
+    confirmer: Option<u32>,
+    /// La carte à régénérer avec cette graine (l'application le fait).
+    pub regeneration: Option<u32>,
+}
+
+/// Une graine tirée de l'heure.
+fn graine_au_hasard() -> u32 {
+    let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as u64);
+    ((t ^ (t >> 29)).wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 40) as u32 % 1_000_000
 }
 
 impl Default for Editeur {
     fn default() -> Editeur {
-        Editeur { mode: Mode::Choisir, retours: Vec::new(), remplacement: None, retournement: None, onglet: AJOUT, pinceau: Pinceau::default(), coup: None, saisie: None, gestes: 0, isolignes: 0.0 }
+        Editeur { mode: Mode::Choisir, retours: Vec::new(), remplacement: None, retournement: None, onglet: AJOUT, pinceau: Pinceau::default(), coup: None, saisie: None, gestes: 0, isolignes: 0.0, confirmer: None, regeneration: None }
     }
 }
 
@@ -492,6 +502,38 @@ impl Editeur {
             cx.paragraph(b, "L'écart suit la hauteur de la vue. Seul le relief est dessiné ici : les objets reviennent dans l'onglet Ajout.");
         }
         self.enregistrement(cx, b, monde, maillages, tuiles);
+        self.regenerer(cx, b);
+    }
+
+    /// La carte repart de zéro : plus rien à annuler ni à tenir.
+    pub fn oublier(&mut self) {
+        self.retours.clear();
+        self.coup = None;
+        self.saisie = None;
+        self.mode = Mode::Choisir;
+        self.confirmer = None;
+    }
+
+    /// Le lien « Régénérer la carte… », et sa confirmation.
+    fn regenerer(&mut self, cx: &mut Cx, b: &mut Body) {
+        cx.section(b, "CARTE");
+        cx.mesure(b, "Taille", "20 km de côté");
+        let Some(g) = self.confirmer else {
+            if cx.liens(b, id("carte-regenerer"), &["Régénérer la carte…"], None).is_some() {
+                self.confirmer = Some(graine_au_hasard());
+            }
+            return;
+        };
+        cx.paragraph(b, &format!("Une carte nue, au relief tiré de la graine {g}. Toutes les retouches du relief et tous les objets posés seront effacés, sans retour possible ; le catalogue des modèles reste."));
+        match cx.liens(b, id("carte-confirmer"), &["Régénérer", "Autre graine", "Garder la carte"], None) {
+            Some(0) => {
+                self.regeneration = Some(g);
+                self.confirmer = None;
+            }
+            Some(1) => self.confirmer = Some(graine_au_hasard()),
+            Some(_) => self.confirmer = None,
+            None => {}
+        }
     }
 
     /// Un outil de topologie est pris : le doigt dans la vue peint au lieu de tourner.

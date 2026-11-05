@@ -6,6 +6,18 @@ Il vise un monde ouvert, avec d'autres valeurs que la violence.
 
 ![Le mannequin marche dans le décor de S.A.G.E.](docs/apercu.png)
 
+## Version 0.10 : une carte finie, nue, à régénérer
+
+- La carte fait 20 km de côté : 313 tuiles de 64 m, centrées sur le départ. Au bord, le
+  joueur s'arrête comme contre un mur ; au-delà il n'y a rien, que le ciel. L'éditeur
+  voit le bord mais ne le passe pas.
+- Le générateur ne fait plus que le relief et ses couleurs : la carte est nue, les
+  objets se posent à la main. Les tuiles déjà retouchées gardent les leurs.
+- « Régénérer la carte… », au bas de l'onglet Topologie, tire une graine au hasard (une
+  autre au besoin), dit ce qui sera effacé et attend la confirmation. Tout repart de
+  zéro : relief, retouches, objets posés ; le catalogue des modèles reste, et le joueur
+  revient au départ.
+
 ## Version 0.9 : l'éditeur en pause, la topologie et les poignées
 
 - Le panneau d'édition ouvert, le jeu se met en pause et le personnage disparaît. La

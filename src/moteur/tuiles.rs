@@ -17,6 +17,22 @@ use std::time::Instant;
 
 /// Côté d'une tuile, en mètres.
 pub const TAILLE: f32 = 64.0;
+/// La carte est finie : les tuiles de -`DEMI_CARTE` à +`DEMI_CARTE` sur chaque axe, 313 de
+/// côté, 20 km. Au-delà, rien.
+pub const DEMI_CARTE: i32 = 156;
+
+/// La tuile (i, j) est-elle dans la carte ?
+pub fn dans_la_carte(i: i32, j: i32) -> bool {
+    i.abs() <= DEMI_CARTE && j.abs() <= DEMI_CARTE
+}
+
+/// Les bords de la carte au repère du monde : x et z les plus petits, les plus grands.
+pub fn bords(monde: &Monde) -> ([f32; 2], [f32; 2]) {
+    let o = monde.origine;
+    let lo = [(-DEMI_CARTE - o[0]) as f32 * TAILLE, (-DEMI_CARTE - o[1]) as f32 * TAILLE];
+    let hi = [(DEMI_CARTE + 1 - o[0]) as f32 * TAILLE, (DEMI_CARTE + 1 - o[1]) as f32 * TAILLE];
+    (lo, hi)
+}
 /// Les tuiles à plus de `PROCHE` tuiles du joueur dessinent leur terrain simplifié.
 pub const PROCHE: i32 = 1;
 /// Le terrain simplifié prend un point de la grille sur `SIMPLIFIE`.
@@ -284,7 +300,7 @@ impl Tuiles {
         let mut manque: Vec<(i32, i32)> = Vec::new();
         for j in centre.1 - self.rayon..=centre.1 + self.rayon {
             for i in centre.0 - self.rayon..=centre.0 + self.rayon {
-                if !self.chargees.contains_key(&(i, j)) {
+                if !self.chargees.contains_key(&(i, j)) && dans_la_carte(i, j) {
                     manque.push((i, j));
                 }
             }
@@ -456,6 +472,28 @@ impl Tuiles {
         let e = monde.creer(&id);
         self.modifier(monde, maillages, e, objet, lieu);
         e
+    }
+
+    /// Repart de zéro : toutes les tuiles se déchargent sans s'écrire, celles du dépôt
+    /// sont effacées, et la carte se régénère de `source`.
+    pub fn repartir(&mut self, monde: &mut Monde, maillages: &mut Maillages, source: Box<dyn Source>) {
+        for (k, c) in std::mem::take(&mut self.chargees) {
+            let id = ident(k.0, k.1);
+            maillages.ote(&id);
+            maillages.ote(&format!("{id}/loin"));
+            monde.detruire(c.terrain);
+        }
+        let objets: Vec<Entite> = monde.objet.iter().map(|(e, _)| e).collect();
+        for e in objets {
+            monde.detruire(e);
+        }
+        balayer(monde, maillages);
+        self.sales.clear();
+        self.source = source;
+        if let Err(e) = self.depot.effacer_tuiles() {
+            self.erreur = Some(format!("tuiles : {e}"));
+        }
+        self.fiche_sale = true;
     }
 
     /// Les couleurs de la grille de la tuile `k`, si elle est chargée.

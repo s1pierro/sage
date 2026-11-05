@@ -462,7 +462,41 @@ impl App {
         systemes::retenir(&mut self.monde);
         systemes::marcher(&mut self.monde, self.joueur, dir);
         physique::deplacer(&mut self.monde);
+        // Le bord de la carte est un mur
+        let (lo, hi) = crate::moteur::tuiles::bords(&self.monde);
+        if let Some(l) = self.monde.lieu.get_mut(self.joueur) {
+            l.pos[0] = l.pos[0].clamp(lo[0] + CORPS, hi[0] - CORPS);
+            l.pos[2] = l.pos[2].clamp(lo[1] + CORPS, hi[1] - CORPS);
+        }
         systemes::suivre_origine(&mut self.monde, self.joueur);
+    }
+
+    /// Une carte neuve, nue, tirée de `graine` : tout ce qui a été retouché ou posé est
+    /// effacé, le catalogue des modèles reste. Le joueur revient au départ.
+    pub fn regenerer(&mut self, graine: u32) {
+        self.tuiles.repartir(&mut self.monde, &mut self.maillages, Box::new(Campagne { graine }));
+        self.tuiles.fiche.graine = graine;
+        self.editeur.oublier();
+        self.monde.choisie = None;
+        self.monde.origine = [0, 0];
+        let cap = self.lieu().cap;
+        let p = [DEPART[0], 0.0, DEPART[1]];
+        self.monde.lieu.mettre(self.joueur, Lieu::en(p, cap));
+        if let Some(m) = self.monde.mobile.get_mut(self.joueur) {
+            m.vitesse = 0.0;
+        }
+        self.tuiles.suivre(&mut self.monde, &mut self.maillages, (0, 0), 9);
+        physique::poser(&mut self.monde);
+        let l = self.lieu();
+        if let Some(x) = self.monde.lieu.get_mut(self.joueur) {
+            x.retenir();
+        }
+        if self.visee.is_some() {
+            self.visee = Some(l.pos);
+        }
+        self.tuiles.fiche.joueur = Some((self.monde.origine, l.pos, l.cap));
+        self.tuiles.tout_ecrire(&self.monde);
+        self.dire(format!("Carte régénérée, nue : graine {graine}"));
     }
 
     /// Une image : commandes, pas de simulation, animation, caméra, interface.
@@ -560,6 +594,10 @@ impl App {
                 let (dx, dz) = (dr[0] * j[0] - av[0] * j[1], dr[1] * j[0] - av[1] * j[1]);
                 v[0] += dx * vite - dr[0] * g.pan.0 * k + av[0] * g.pan.1 * k;
                 v[2] += dz * vite - dr[1] * g.pan.0 * k + av[1] * g.pan.1 * k;
+                // On voit au-delà du bord, on n'y va pas
+                let (lo, hi) = crate::moteur::tuiles::bords(&self.monde);
+                v[0] = v[0].clamp(lo[0], hi[0]);
+                v[2] = v[2].clamp(lo[1], hi[1]);
                 self.visee = Some(v);
                 (0, 1.0)
             }
@@ -867,6 +905,9 @@ impl App {
             if let Some(id) = self.editeur.retournement.take() {
                 self.retourner_modele(&id);
             }
+            if let Some(g) = self.editeur.regeneration.take() {
+                self.regenerer(g);
+            }
             cx.body_end(b, &mut self.scrolls);
             return;
         }
@@ -1052,10 +1093,10 @@ mod tests {
         assert!(a.tuiles.chargees.len() <= (2 * GARDE_TUILES + 1).pow(2) as usize);
         assert!(a.tuiles.chargees.keys().all(|&(i, j)| (i - o[0]).abs().max((j - o[1]).abs()) <= GARDE_TUILES));
         assert!(a.tuiles.chargees.contains_key(&(o[0], o[1])));
-        // Les maillages suivent : deux terrains par tuile (complet et simplifié), au plus
-        // un décor, le personnage
+        // Les maillages suivent : le simplifié de chaque tuile, le complet des proches
         let terrains = a.maillages.tous().iter().filter(|(_, m)| m.format == Format::Terrain).count();
-        assert_eq!(terrains, 2 * a.tuiles.chargees.len());
+        let n = a.tuiles.chargees.len();
+        assert!((n + 9..=n + 25).contains(&terrains), "{terrains} pour {n} tuiles");
     }
 
     #[test]
@@ -1087,7 +1128,7 @@ mod tests {
         let (mut ui, mut text, mut dl) = (Ui::new(1.0), Text::new(), crate::draw::DrawList::default());
         let mut cx = Cx { ui: &mut ui, text: &mut text, dl: &mut dl, dp: 1.0 };
         let s = a.frame(&mut cx, Rect::new(0.0, 0.0, 800.0, 600.0), 1.0 / 30.0);
-        assert!(s.dessins.len() > 25, "les tuiles, leur décor et le joueur : {}", s.dessins.len());
+        assert!(s.dessins.len() > 25, "les tuiles et le joueur : {}", s.dessins.len());
         assert!(s.dessins.iter().any(|d| d.os.len() == 19), "le mannequin et ses os");
         assert_eq!(s.soleil.centre, a.lieu().pos, "les ombres autour du joueur");
         assert!(s.textures.iter().any(|(_, t)| t.id == "personnage/mannequin/1" || t.id.starts_with("personnage/mannequin/")), "la veste du mannequin");
@@ -1130,9 +1171,9 @@ mod tests {
         let p = a.lieu().pos;
         let poteau = a.tuiles.ajouter(&mut a.monde, &mut a.maillages, Objet::neuf(Genre::Poteau), Lieu::en([p[0] + 2.0, p[1], p[2]], 0.0));
         let id = a.monde.ident.get(poteau).cloned().unwrap();
-        let (genere, _) = a.monde.objet.iter().find(|(e, _)| a.monde.ident.get(*e).is_some_and(|i| i.starts_with("tuile/"))).unwrap();
-        let ote = a.monde.ident.get(genere).cloned().unwrap();
-        a.tuiles.oter(&mut a.monde, &mut a.maillages, genere);
+        let bloc = a.tuiles.ajouter(&mut a.monde, &mut a.maillages, Objet::neuf(Genre::Bloc), Lieu::en([p[0] - 4.0, p[1], p[2]], 0.0));
+        let ote = a.monde.ident.get(bloc).cloned().unwrap();
+        a.tuiles.oter(&mut a.monde, &mut a.maillages, bloc);
         a.cam.0 = 0.0;
         for _ in 0..90 {
             a.avancer([0.0, -1.0]);
@@ -1157,6 +1198,14 @@ mod tests {
         use crate::text::Text;
         use crate::ui::{Event, Ui};
         let mut a = App::new(1.0);
+        // La carte est nue : des blocs tout autour du joueur, l'un sera en vue
+        let p = a.lieu().pos;
+        for k in 0..8 {
+            let t = k as f32 * std::f32::consts::TAU / 8.0;
+            let (x, z) = (p[0] + 6.0 * t.sin(), p[2] + 6.0 * t.cos());
+            let y = systemes::hauteur_sol(&a.monde, x, z).unwrap() - 0.2;
+            a.tuiles.ajouter(&mut a.monde, &mut a.maillages, crate::moteur::Objet::neuf(crate::moteur::Genre::Bloc), Lieu::en([x, y, z], 0.0));
+        }
         let (mut ui, mut text, mut dl) = (Ui::new(1.0), Text::new(), crate::draw::DrawList::default());
         let ecran = Rect::new(0.0, 0.0, 1600.0, 900.0);
         let mut image = |a: &mut App, ui: &mut Ui| {
@@ -1331,5 +1380,37 @@ mod tests {
         assert_eq!(isolignes(200.0), 5.0);
         assert_eq!(isolignes(1000.0), 25.0);
         assert_eq!(isolignes(TOPO_LOIN), 50.0);
+    }
+    #[test]
+    fn la_carte_est_finie_et_se_regenere_nue() {
+        use crate::moteur::tuiles::{dans_la_carte, DEMI_CARTE};
+        use crate::moteur::{Genre, Objet};
+        let d = std::env::temp_dir().join(format!("sage-regenerer-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let mut a = App::avec_dossier(1.0, Some(d.clone()));
+        assert!(a.monde.objet.iter().next().is_none(), "nue dès le départ");
+        // Un objet posé, une tuile retouchée, écrits
+        let p = a.lieu().pos;
+        a.tuiles.ajouter(&mut a.monde, &mut a.maillages, Objet::neuf(Genre::Poteau), Lieu::en([p[0] + 2.0, p[1], p[2]], 0.0));
+        a.enregistrer();
+        assert!(d.join("monde/tuiles").read_dir().unwrap().next().is_some());
+        // Au bord de la carte : le joueur s'arrête au mur, rien n'est chargé au-delà
+        a.regenerer(42);
+        assert!(a.monde.objet.iter().next().is_none() && !d.join("monde/tuiles").exists());
+        assert_eq!(App::avec_dossier(1.0, Some(d.clone())).tuiles.fiche.graine, 42);
+        a.monde.origine = [DEMI_CARTE, 0];
+        a.monde.lieu.get_mut(a.joueur).unwrap().pos = [60.0, 50.0, 30.0];
+        for _ in 0..30 {
+            let o = a.monde.origine;
+            a.tuiles.suivre(&mut a.monde, &mut a.maillages, (o[0], o[1]), usize::MAX);
+        }
+        assert!(a.tuiles.chargees.keys().all(|&(i, j)| dans_la_carte(i, j)));
+        a.cam.0 = -std::f32::consts::FRAC_PI_2; // la vue regarde vers +X
+        for _ in 0..120 {
+            a.avancer([0.0, -1.0]);
+        }
+        let x = a.monde.absolu(a.lieu().pos)[0];
+        assert!(x <= ((DEMI_CARTE + 1) as f32 * crate::moteur::TAILLE - CORPS) as f64 + 1e-3, "{x}");
+        let _ = std::fs::remove_dir_all(&d);
     }
 }
