@@ -53,6 +53,19 @@ pub const JOUEUR: &str = "joueur";
 /// suivante : 25 tuiles, 320 m de côté.
 const RAYON_TUILES: i32 = 2;
 const GARDE_TUILES: i32 = 3;
+/// En édition, on voit jusqu'à tant de tuiles, sans brouillard : 1 km.
+pub const EDITION_TUILES: i32 = 16;
+/// En topologie, la caméra s'éloigne jusque-là du point visé (m).
+pub const TOPO_LOIN: f32 = 2000.0;
+
+/// L'écart des courbes de niveau, vu de `d` mètres : environ une tous les `d / 40`, au
+/// pas de 1, 2, 5, 10, 25, 50 ou 100 m.
+pub fn isolignes(d: f32) -> f32 {
+    [100.0, 50.0, 25.0, 10.0, 5.0, 2.0].into_iter().find(|p| *p <= d / 40.0).unwrap_or(1.0)
+}
+
+/// En édition, tant de tuiles se chargent par image.
+const EDITION_CHARGE: usize = 4;
 
 pub const CIEL: [f32; 3] = [0.70, 0.80, 0.92];
 
@@ -92,6 +105,9 @@ pub struct App {
     pub onglet_reglages: usize,
     /// La distance d'affichage et le brouillard.
     pub affichage: Affichage,
+    /// L'éditeur ouvert, le jeu est en pause et le joueur caché : la caméra tourne autour
+    /// de ce point du sol, que la manette déplace.
+    pub visee: Option<[f32; 3]>,
 }
 
 impl App {
@@ -154,6 +170,7 @@ impl App {
             remplacer: None,
             onglet_reglages: 0,
             affichage,
+            visee: None,
         };
         // Les modèles du catalogue : les objets déjà posés les retrouvent
         let mut erreurs = Vec::new();
@@ -468,10 +485,42 @@ impl App {
         }
         // Vue : un doigt tourne, deux approchent
         let g = cx.ui.take_gesture();
-        self.cam.0 -= g.orbit.0 * 0.006;
-        self.cam.1 = (self.cam.1 + g.orbit.1 * 0.004).clamp(-0.15, 1.3);
+        // L'éditeur ouvert : le jeu s'arrête, la caméra vise un point du sol, plus loin et
+        // plus haut ; refermé, le joueur reprend où il était
+        let edite = self.edite();
+        match (edite, self.visee) {
+            (true, None) => self.visee = Some(self.lieu().pos),
+            (false, Some(_)) => {
+                self.visee = None;
+                self.cam.2 = self.cam.2.min(14.0);
+                // Le sol a pu monter sous lui
+                let p = self.lieu().pos;
+                if let Some(h) = systemes::hauteur_sol(&self.monde, p[0], p[2]).filter(|h| *h > p[1]) {
+                    if let Some(l) = self.monde.lieu.get_mut(self.joueur) {
+                        l.pos[1] = h;
+                        l.retenir();
+                    }
+                }
+            }
+            _ => {}
+        }
+        // En topologie : à la verticale, et de très haut
+        let topo = edite && self.editeur.onglet == editeur::TOPOLOGIE;
+        let (loin, haut) = match (edite, topo) {
+            (true, true) => (TOPO_LOIN, std::f32::consts::FRAC_PI_2),
+            (true, false) => (150.0, 1.5),
+            _ => (14.0, 1.3),
+        };
+        self.cam.2 = self.cam.2.min(loin);
+        self.cam.1 = self.cam.1.min(haut);
+        // Un outil de topologie pris, le doigt seul dans la vue peint : il ne tourne pas
+        let pinceau = if self.editeur.peint() && edite { cx.ui.doigt_seul().filter(|p| w.contains(p.0, p.1)) } else { None };
+        if pinceau.is_none() {
+            self.cam.0 -= g.orbit.0 * 0.006;
+            self.cam.1 = (self.cam.1 + g.orbit.1 * 0.004).clamp(-0.15, haut);
+        }
         if g.zoom.is_finite() && g.zoom > 0.0 {
-            self.cam.2 = (self.cam.2 / g.zoom).clamp(1.5, 14.0);
+            self.cam.2 = (self.cam.2 / g.zoom).clamp(1.5, loin);
         }
         // La manette de jeu : le stick de marche si le doigt n'y est pas, le stick de vue,
         // les gâchettes pour approcher
@@ -482,12 +531,12 @@ impl App {
         let (sens, inverser) = self.manettes.active().map_or((1.0, false), |a| (a.profil.sensibilite, a.profil.inverser));
         self.cam.0 -= c.vue[0] * VUE_LACET * sens * dt;
         let vy = if inverser { -c.vue[1] } else { c.vue[1] };
-        self.cam.1 = (self.cam.1 + vy * VUE_TANGAGE * sens * dt).clamp(-0.15, 1.3);
+        self.cam.1 = (self.cam.1 + vy * VUE_TANGAGE * sens * dt).clamp(-0.15, haut);
         if c.tenu("approcher") {
-            self.cam.2 = (self.cam.2 * (-1.5 * dt).exp()).clamp(1.5, 14.0);
+            self.cam.2 = (self.cam.2 * (-1.5 * dt).exp()).clamp(1.5, loin);
         }
         if c.tenu("eloigner") {
-            self.cam.2 = (self.cam.2 * (1.5 * dt).exp()).clamp(1.5, 14.0);
+            self.cam.2 = (self.cam.2 * (1.5 * dt).exp()).clamp(1.5, loin);
         }
         for (action, onglet) in [("moniteur", ONGLET_MONITEUR), ("editeur", ONGLET_EDITEUR), ("reglages", ONGLET_REGLAGES)] {
             if c.appui(action) {
@@ -499,30 +548,79 @@ impl App {
             self.manettes.capture = None;
         }
 
-        // Simulation à pas fixes ; l'image tombe entre deux pas
-        let (n, u) = self.horloge.avancer(dt);
-        for _ in 0..n {
-            self.avancer(j);
-        }
-        // Une tuile au plus par image : le chargement ne fait pas d'à-coups
-        let o = self.monde.origine;
-        // Les tuiles suivent la distance d'affichage ; elles se chargent au fil des images
-        let r = self.affichage.distance;
+        let (n, u) = match self.visee {
+            // En pause : la manette, et deux doigts qui glissent, déplacent le point visé
+            Some(mut v) => {
+                let (av, dr) = {
+                    let (s, c) = self.cam.0.sin_cos();
+                    ([-s, -c], [c, -s])
+                };
+                let vite = self.cam.2.max(4.0) * dt;
+                let k = self.cam.2 / w.h.max(1.0) * 1.2;
+                let (dx, dz) = (dr[0] * j[0] - av[0] * j[1], dr[1] * j[0] - av[1] * j[1]);
+                v[0] += dx * vite - dr[0] * g.pan.0 * k + av[0] * g.pan.1 * k;
+                v[2] += dz * vite - dr[1] * g.pan.0 * k + av[1] * g.pan.1 * k;
+                self.visee = Some(v);
+                (0, 1.0)
+            }
+            // Simulation à pas fixes ; l'image tombe entre deux pas
+            None => {
+                let (n, u) = self.horloge.avancer(dt);
+                for _ in 0..n {
+                    self.avancer(j);
+                }
+                (n, u)
+            }
+        };
+        // Une tuile au plus par image : le chargement ne fait pas d'à-coups ; en pause,
+        // elles suivent le point visé
+        let o = match self.visee {
+            Some(v) => {
+                let (i, j) = Tuiles::tuile_de(&self.monde, v);
+                [i, j]
+            }
+            None => self.monde.origine,
+        };
+        // Les tuiles suivent la distance d'affichage, celle de l'édition en pause ; elles se
+        // chargent au fil des images
+        let r = self.rayon_vu();
         self.tuiles.rayon = r;
         self.tuiles.garde = r + GARDE_TUILES - RAYON_TUILES;
-        self.tuiles.suivre(&mut self.monde, &mut self.maillages, (o[0], o[1]), 1);
+        self.tuiles.suivre(&mut self.monde, &mut self.maillages, (o[0], o[1]), if self.visee.is_some() { EDITION_CHARGE } else { 1 });
         self.tuiles.vieillir(&self.monde, dt);
-        // Le personnage regarde ce que vise la caméra
-        let regard = self.regarde();
-        if let Some(s) = self.monde.squelette.get_mut(self.joueur) {
-            s.regard = regard;
+        if self.visee.is_none() {
+            // Le personnage regarde ce que vise la caméra
+            let regard = self.regarde();
+            if let Some(s) = self.monde.squelette.get_mut(self.joueur) {
+                s.regard = regard;
+            }
+            systemes::animer(&mut self.monde, dt, u);
         }
-        systemes::animer(&mut self.monde, dt, u);
 
         let camera = self.camera(w, u);
         // L'éditeur : un appui bref dans la vue, manette comprise
-        if self.edite() {
-            if let Some((None | Some(MANETTE), x, y)) = cx.ui.appui_bref() {
+        let mut tenue = false;
+        if edite && self.editeur.onglet == editeur::TOPOLOGIE {
+            let point = pinceau.and_then(|(x, y)| physique::lancer(&self.monde, camera.oeil, camera.rayon(x, y), TOPO_LOIN * 2.0)).map(|i| i.point);
+            self.editeur.peindre(&mut self.monde, &mut self.maillages, &mut self.tuiles, point, dt);
+            self.cercle(cx, &camera, w, point);
+            // L'altitude sous le doigt, à côté de lui
+            if let (Some(p), Some((x, y))) = (point, pinceau) {
+                let s = format!("{} m", dec(p[1], 1));
+                let dp = cx.dp;
+                let lw = cx.text.measure(&s, (15.0 * dp).round()) + 24.0 * dp;
+                let r = Rect::new((x + 28.0 * dp).min(w.right() - lw - 4.0 * dp), (y - 76.0 * dp).max(w.y + 4.0 * dp), lw, 32.0 * dp);
+                cx.dl.rrect(r, r.h / 2.0, [0x1B, 0x1B, 0x24, 220]);
+                cx.text_at(r.x + 12.0 * dp, r.cy(), &s, 15.0, [255, 255, 255, 255]);
+            }
+        } else {
+            self.editeur.peindre(&mut self.monde, &mut self.maillages, &mut self.tuiles, None, dt);
+        }
+        if edite && self.editeur.onglet == editeur::AJOUT {
+            tenue = self.editeur.poignees(cx, &camera, w, &mut self.monde, &mut self.maillages, &mut self.tuiles);
+        }
+        if edite {
+            if let Some((None | Some(MANETTE), x, y)) = cx.ui.appui_bref().filter(|_| self.editeur.onglet == editeur::AJOUT && !tenue) {
                 if w.contains(x, y) {
                     self.editeur.appui(&mut self.monde, &mut self.maillages, &mut self.tuiles, &camera, x, y, self.cam.0);
                 }
@@ -541,26 +639,50 @@ impl App {
         self.panneau(cx, &l);
         self.poignee(cx, &l, ecran);
         let mut scene = Scene::extraire(&self.monde, &self.maillages, &self.textures, camera, u);
-        scene.brouillard = self.affichage.brouillard;
-        // Les ombres portées autour du joueur
+        // En édition, pas de brouillard
+        scene.brouillard = if self.visee.is_some() { 1.0e7 } else { self.affichage.brouillard };
+        // Les ombres portées autour du joueur ; en pause, autour du point visé, sans lui
         scene.soleil.centre = self.lieu().interpole(u).0;
+        if let Some(v) = self.visee {
+            scene.soleil.centre = v;
+            if let Some(k) = self.monde.rendu.get(self.joueur).map(|r| r.maillage) {
+                scene.dessins.retain(|d| d.maillage != k);
+            }
+        }
+        // En topologie : le relief seul, et ses courbes de niveau, plus espacées de haut
+        self.editeur.isolignes = 0.0;
+        if topo {
+            let m = &self.maillages;
+            scene.dessins.retain(|d| m.get(d.maillage).is_some_and(|x| x.id.starts_with("tuile/")));
+            self.editeur.isolignes = isolignes(self.cam.2);
+            scene.isolignes = self.editeur.isolignes;
+        }
         let etat = self.etat();
         self.moniteur.image(dt, n, &scene, etat);
         scene
     }
 
-    /// Caméra à la troisième personne derrière le joueur, jamais sous le sol.
+    /// Caméra à la troisième personne derrière le joueur, jamais sous le sol. En pause,
+    /// elle tourne autour du point visé, à un mètre au-dessus du relief.
     fn camera(&self, w: Rect, u: f32) -> Camera {
         let hauteur = self.modele().map_or(1.75, |m| m.hauteur);
         let (p, _) = self.lieu().interpole(u);
-        let cible = [p[0], p[1] + hauteur * 0.6, p[2]];
+        let (cible, d) = match self.visee {
+            Some(v) => {
+                let h = systemes::hauteur_sol(&self.monde, v[0], v[2]).unwrap_or(v[1]);
+                ([v[0], h + 1.0, v[2]], self.cam.2)
+            }
+            None => ([p[0], p[1] + hauteur * 0.6, p[2]], self.cam.2 * hauteur / 1.75),
+        };
+        let p = if self.visee.is_some() { [cible[0], cible[1] - 1.0, cible[2]] } else { p };
         let (sy, cy) = self.cam.0.sin_cos();
         let (sp, cp) = self.cam.1.sin_cos();
-        let d = self.cam.2 * hauteur / 1.75;
         let mut oeil = [cible[0] + d * sy * cp, cible[1] + d * sp, cible[2] + d * cy * cp];
+        // Le haut de la vue : penché avec elle, il reste juste même à la verticale
+        let haut = [-sy * sp, cp, -cy * sp];
         // Rien entre le joueur et l'œil : la caméra s'avance devant ce qui le cacherait
         let vers = [oeil[0] - cible[0], oeil[1] - cible[1], oeil[2] - cible[2]];
-        if let Some(i) = physique::lancer(&self.monde, cible, vers, d) {
+        if let Some(i) = physique::lancer(&self.monde, cible, vers, d).filter(|_| self.visee.is_none()) {
             let k = ((i.distance - 0.25) / d).max(0.05);
             oeil = [cible[0] + vers[0] * k, cible[1] + vers[1] * k, cible[2] + vers[2] * k];
         }
@@ -568,10 +690,41 @@ impl App {
         let sol = systemes::hauteur_sol(&self.monde, oeil[0], oeil[2]).unwrap_or(p[1]);
         oeil[1] = oeil[1].max(sol + 0.4);
         Camera {
-            vue: math::look_at(oeil, cible, [0.0, 1.0, 0.0]),
-            proj: math::perspective(1.0, w.w / w.h.max(1.0), 0.1, ((self.affichage.distance as f32 + 1.5) * crate::moteur::TAILLE * 1.5).max(500.0)),
+            vue: math::look_at(oeil, cible, haut),
+            // En édition, on voit loin : le plan proche recule, la profondeur reste précise
+            proj: math::perspective(1.0, w.w / w.h.max(1.0), if self.visee.is_some() { (d * 0.002).max(0.5) } else { 0.1 }, ((self.rayon_vu() as f32 + 1.5) * crate::moteur::TAILLE * 1.5).max(500.0) + if self.visee.is_some() { d } else { 0.0 }),
             oeil,
             fenetre: [w.x, w.y, w.w, w.h],
+        }
+    }
+
+    /// Les tuiles chargées autour du centre : la distance d'affichage, ou celle de
+    /// l'édition en pause.
+    fn rayon_vu(&self) -> i32 {
+        if self.visee.is_some() { EDITION_TUILES } else { self.affichage.distance }
+    }
+
+    /// Le cercle du pinceau, sur le relief : sous le doigt, sinon au point visé.
+    fn cercle(&self, cx: &mut Cx, camera: &Camera, w: Rect, point: Option<[f32; 3]>) {
+        if !self.editeur.peint() {
+            return;
+        }
+        let Some(c) = point.or(self.visee) else { return };
+        let r = self.editeur.pinceau.rayon;
+        let n = 48;
+        let points: Vec<Option<[f32; 2]>> = (0..=n)
+            .map(|k| {
+                let a = k as f32 / n as f32 * std::f32::consts::TAU;
+                let (x, z) = (c[0] + r * a.sin(), c[2] + r * a.cos());
+                let y = systemes::hauteur_sol(&self.monde, x, z).unwrap_or(c[1]) + 0.1;
+                camera.ecran([x, y, z]).filter(|p| w.contains(p[0], p[1]))
+            })
+            .collect();
+        let couleur = if point.is_some() { [255, 255, 255, 230] } else { [255, 255, 255, 140] };
+        for s in points.windows(2) {
+            if let (Some(a), Some(b)) = (s[0], s[1]) {
+                cx.dl.line(a, b, 2.5 * cx.dp, couleur);
+            }
         }
     }
 
@@ -671,12 +824,19 @@ impl App {
         cx.dl.rrect(Rect::new(r.x, r.y + tete - d, r.w, t), 0.0, widgets::LINE);
         // Chaque pastille a ses onglets
         let onglets: &[&str] = match self.onglet {
-            ONGLET_EDITEUR => &["Éditeur"],
+            ONGLET_EDITEUR => &editeur::ONGLETS,
             ONGLET_REGLAGES => &["Manette", "Affichage"],
             _ => &["Moniteur"],
         };
-        let choisi = if self.onglet == ONGLET_REGLAGES { self.onglet_reglages } else { 0 };
+        let choisi = match self.onglet {
+            ONGLET_REGLAGES => self.onglet_reglages,
+            ONGLET_EDITEUR => self.editeur.onglet,
+            _ => 0,
+        };
         let k = cx.tabs(id("onglets-panneau"), Rect::new(r.x + 12.0 * d, r.y + 11.0 * d, r.w - 74.0 * d, 38.0 * d), onglets, choisi);
+        if self.onglet == ONGLET_EDITEUR {
+            self.editeur.onglet = k;
+        }
         if self.onglet == ONGLET_REGLAGES && k != self.onglet_reglages {
             self.onglet_reglages = k;
             self.manettes.capture = None;
@@ -695,8 +855,12 @@ impl App {
             return;
         }
         if self.onglet == ONGLET_EDITEUR {
-            let mut b = cx.body(id("corps-editeur"), corps, &self.scrolls);
-            self.editeur.panneau(cx, &mut b, &mut self.monde, &mut self.maillages, &mut self.tuiles);
+            let mut b = cx.body(crate::ui::sub_id(id("corps-editeur"), self.editeur.onglet), corps, &self.scrolls);
+            if self.editeur.onglet == editeur::TOPOLOGIE {
+                self.editeur.panneau_topologie(cx, &mut b, &mut self.monde, &mut self.maillages, &mut self.tuiles);
+            } else {
+                self.editeur.panneau(cx, &mut b, &mut self.monde, &mut self.maillages, &mut self.tuiles);
+            }
             if let Some(id) = self.editeur.remplacement.take() {
                 self.remplacer_modele(&id);
             }
@@ -1161,4 +1325,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
+    #[test]
+    fn les_courbes_de_niveau_s_espacent_avec_la_hauteur() {
+        assert_eq!(isolignes(10.0), 1.0);
+        assert_eq!(isolignes(200.0), 5.0);
+        assert_eq!(isolignes(1000.0), 25.0);
+        assert_eq!(isolignes(TOPO_LOIN), 50.0);
+    }
 }

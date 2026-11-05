@@ -384,7 +384,7 @@ dossier privé de l'application, sous `monde/`. Hors Android, le monde reste en 
 - « Annuler » défait le dernier changement (50 au plus). Les retours d'un même curseur
   se fondent en un.
 - Fermer l'éditeur laisse l'objet choisi.
-- Le relief ne se modifie pas encore : ce sera la suite.
+- Le relief se retouche dans l'onglet Topologie (0.9).
 
 ## 6. Manettes de jeu (0.7)
 
@@ -539,3 +539,66 @@ L'onglet Affichage des réglages (`reglages::Affichage`, écrit dans
   - les textures KTX2 et WebP.
 - Les animations sont ignorées.
 - Au-delà de `TRIANGLES_LOURD` (50 000), le modèle est signalé comme lourd.
+
+## 8. L'éditeur en pause, la topologie et les poignées (0.9)
+
+### Pause
+
+- `App::edite` (le panneau ouvert sur l'éditeur) met le jeu en pause : l'horloge ne
+  compte plus, ni la marche ni l'animation n'avancent.
+- La caméra tourne autour de `App::visee`, un point du sol pris sous le joueur à
+  l'ouverture, un mètre au-dessus du relief, jusqu'à 150 m et presque à la verticale.
+  La manette et deux doigts qui glissent (`Gesture::pan`) le déplacent ; les tuiles le
+  suivent.
+- Le joueur n'est pas dessiné, les ombres se centrent sur le point visé.
+- On voit jusqu'à `EDITION_TUILES` (16 tuiles, 1 km), sans brouillard ; 4 tuiles se
+  chargent par image. Les tuiles lointaines n'ont que leur maillage simplifié : le
+  complet ne se fait qu'à `PROCHE` tuiles du centre, et s'en va au-delà de la suivante.
+- Refermé, la caméra revient au joueur ; si le sol est monté sous lui, il est reposé
+  dessus.
+
+### Topologie
+
+`src/terrain.rs`, onglet Topologie de l'éditeur.
+
+- Un pinceau rond (`Pinceau` : outil, rayon de 2 à 24 m, force) agit sur les points de
+  la grille sous son disque, avec le poids `(1 − (d/r)²)²`.
+  - Monter, Creuser : 2 m/s au centre, à pleine force.
+  - Aplanir : vers la hauteur du premier point du coup (`niveau`).
+  - Adoucir : vers la moyenne des quatre voisins, pris dans la tuile d'à côté s'il le
+    faut.
+  - Peindre : vers la couleur choisie (`TEINTES`).
+- Tout se calcule sur l'état d'avant le coup : un point du bord, présent dans deux
+  tuiles, reçoit le même calcul dans chacune, et les tuiles restent jointes.
+- `Tuiles::retoucher` refait les maillages complet et simplifié de la tuile, remet son
+  relief (la physique le lit tel quel) et la marque à réécrire.
+- Un outil pris, le doigt seul dans la vue (`Ui::doigt_seul`) peint au lieu de tourner ;
+  deux doigts zooment et déplacent toujours la vue. Le cercle du pinceau se dessine sur
+  le relief.
+- Un coup, du doigt posé au doigt levé, est une étape d'annulation : `Retour::Relief`
+  garde les tuiles touchées telles qu'avant lui.
+- En Topologie, la caméra va jusqu'à la verticale et s'éloigne jusqu'à 2 km
+  (`TOPO_LOIN`). Son haut se penche avec elle (`[-sin λ sin φ, cos φ, -cos λ sin φ]`),
+  ce qui la garde juste à la verticale. Seul le relief est dessiné (les maillages
+  `tuile/…`).
+- Les courbes de niveau se tracent dans le programme du terrain (`u_isolignes`) : un
+  trait d'un pixel tous les `u_isolignes` mètres d'altitude, un plus fort tous les cinq,
+  à la place du quadrillage. L'écart suit la distance de la caméra (`isolignes` : environ
+  d/40, au pas de 1, 2, 5, 10, 25, 50, 100 m). Elles suivent le pinceau sans calcul à
+  part.
+- L'altitude sous le doigt s'affiche à côté de lui pendant le coup.
+- Les objets ne suivent pas le sol retouché : leur enfoncement se règle dans l'onglet
+  Ajout.
+
+### Poignées
+
+- L'objet choisi, en mode *choisir*, porte cinq poignées dessinées par-dessus la vue
+  (`Camera::ecran` projette un point du monde) :
+  - le disque blanc glisse sur le plan horizontal de sa base ;
+  - les flèches rouge et bleue le poussent le long de ses axes x et z (tournés de son
+    cap), la verte en hauteur, au pas de 5 cm : le déplacement du doigt est projeté sur
+    la flèche vue à l'écran ;
+  - la pastille jaune de l'anneau le tourne autour de sa base, au pas de 5°.
+- Les bras gardent à peu près la même taille à l'écran (16 % de la distance à l'œil).
+- Chaque poignée est une zone tenue au doigt (`Ui::drag`) : la toucher ne choisit rien
+  d'autre. Un geste, du doigt posé au doigt levé, est une étape d'annulation.

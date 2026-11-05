@@ -27,6 +27,16 @@ impl Camera {
         let d = [0, 1, 2].map(|k| v[4 * k] * dx + v[4 * k + 1] * dy - v[4 * k + 2]);
         math::normalize(d)
     }
+
+    /// Le point de l'écran où se voit `p`, s'il est devant l'œil.
+    pub fn ecran(&self, p: [f32; 3]) -> Option<[f32; 2]> {
+        let c = math::appliquer(&math::mul(&self.proj, &self.vue), p);
+        if c[3] <= 1e-3 {
+            return None;
+        }
+        let f = self.fenetre;
+        Some([f[0] + (c[0] / c[3] + 1.0) / 2.0 * f[2], f[1] + (1.0 - c[1] / c[3]) / 2.0 * f[3]])
+    }
 }
 
 /// Un objet à dessiner : son maillage, sa place dans le monde, ses os s'il a une peau.
@@ -80,6 +90,8 @@ pub struct Scene {
     pub textures: Vec<(TextureId, Texture3d)>,
     /// Là où le brouillard a tout recouvert, en mètres.
     pub brouillard: f32,
+    /// L'écart des courbes de niveau tracées sur le relief, en mètres ; 0 : aucune.
+    pub isolignes: f32,
 }
 
 /// Le brouillard d'origine.
@@ -102,7 +114,7 @@ impl Scene {
             dessins.push(Dessin { maillage: r.maillage, place, os, choisi: monde.choisie == Some(e) });
         }
         let soleil = Soleil { direction: SOLEIL, centre: camera.oeil, rayon: RAYON_OMBRES };
-        Scene { camera, dessins, soleil, maillages: maillages.tous(), textures: textures.toutes(), brouillard: BROUILLARD }
+        Scene { camera, dessins, soleil, maillages: maillages.tous(), textures: textures.toutes(), brouillard: BROUILLARD, isolignes: 0.0 }
     }
 }
 

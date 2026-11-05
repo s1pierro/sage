@@ -7,6 +7,7 @@
 //! - `jeu` : le jeu bâti sur le moteur (commandes, caméra, interface), sans OpenGL ;
 //! - `editeur` : l'édition du monde et de ses objets, dans le panneau de gauche ;
 //! - `manette`, `reglages` : les manettes de jeu, leurs profils, et l'onglet qui les règle ;
+//! - `terrain` : le pinceau qui retouche le relief des tuiles ;
 //! - `campagne` : la source de tuiles générée (relief, objets) ;
 //! - `catalogue` : les modèles importés d'un `.glb` (décors, bâtiments) ;
 //! - `personnage` : le personnage relu d'un .glb, prêt pour le processeur graphique ;
@@ -31,6 +32,7 @@ pub mod personnage;
 pub mod reglages;
 pub mod renderer;
 pub mod shell;
+pub mod terrain;
 pub mod text;
 pub mod ui;
 pub mod widgets;

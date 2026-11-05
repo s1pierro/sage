@@ -1,11 +1,15 @@
-//! L'éditeur du monde : choisir un objet d'un appui dans la vue, le déplacer, le tourner,
-//! le régler, le dupliquer, le supprimer, en ajouter du catalogue. Chaque changement
-//! marque les tuiles touchées, que `Tuiles` écrit ensuite dans le dépôt.
+//! L'éditeur du monde, en deux onglets :
+//! - Ajout : choisir un objet d'un appui dans la vue, le déplacer et le tourner par ses
+//!   poignées, le régler, le dupliquer, le supprimer, en ajouter du catalogue ;
+//! - Topologie : retoucher le relief au pinceau (`crate::terrain`).
+//!
+//! Chaque changement marque les tuiles touchées, que `Tuiles` écrit ensuite dans le dépôt.
 
 use crate::draw::Color;
 use crate::moniteur::dec;
 use crate::moteur::objets::hex;
 use crate::moteur::{physique, Camera, Entite, Genre, Lieu, Maillages, Monde, Objet, Tuiles, TAILLE};
+use crate::terrain::{self, Avant, Outil, Pinceau};
 use crate::ui::{id, sub_id, Id};
 use crate::widgets::{Body, Cx};
 use std::f32::consts::{FRAC_PI_2, PI, TAU};
@@ -39,16 +43,62 @@ pub enum Mode {
     Ajouter(Genre),
 }
 
-/// De quoi défaire un changement : l'objet tel qu'il était (rien : il n'existait pas),
-/// avec la tuile d'origine du monde à ce moment-là.
+/// De quoi défaire un changement.
 #[derive(Clone, Debug)]
-struct Retour {
-    id: String,
-    avant: Option<(Objet, Lieu)>,
-    origine: [i32; 2],
-    /// Le réglage qui l'a fait : les retours d'un même geste se fondent en un.
-    cle: Id,
-    quoi: &'static str,
+enum Retour {
+    /// L'objet tel qu'il était (rien : il n'existait pas), avec la tuile d'origine du
+    /// monde à ce moment-là.
+    Objet {
+        id: String,
+        avant: Option<(Objet, Lieu)>,
+        origine: [i32; 2],
+        /// Le réglage qui l'a fait : les retours d'un même geste se fondent en un.
+        cle: Id,
+        quoi: &'static str,
+    },
+    /// Les tuiles qu'un coup de pinceau a touchées, telles qu'elles étaient.
+    Relief(Avant),
+}
+
+impl Retour {
+    fn quoi(&self) -> &'static str {
+        match self {
+            Retour::Objet { quoi, .. } => quoi,
+            Retour::Relief(_) => "le coup de pinceau",
+        }
+    }
+}
+
+/// Les onglets de l'éditeur.
+pub const AJOUT: usize = 0;
+pub const TOPOLOGIE: usize = 1;
+pub const ONGLETS: [&str; 2] = ["Ajout", "Topologie"];
+
+/// Les poignées de l'objet choisi.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Poignee {
+    /// Le disque du centre : glisser sur le sol.
+    Plan,
+    /// Les flèches : le long des axes de l'objet, ou vers le haut.
+    X,
+    Z,
+    Y,
+    /// La pastille de l'anneau : le cap.
+    Cap,
+}
+
+impl Poignee {
+    pub const TOUTES: [Poignee; 5] = [Poignee::Plan, Poignee::X, Poignee::Z, Poignee::Y, Poignee::Cap];
+}
+
+/// Une poignée tenue : où le doigt s'est posé, et l'objet à ce moment-là.
+#[derive(Clone, Copy, Debug)]
+struct Saisie {
+    poignee: Poignee,
+    doigt: [f32; 2],
+    lieu: Lieu,
+    /// Là où le doigt touchait le plan du sol de l'objet.
+    prise: Option<[f32; 3]>,
 }
 
 pub struct Editeur {
@@ -58,12 +108,32 @@ pub struct Editeur {
     pub remplacement: Option<String>,
     /// Le modèle dont il faut retourner les faces.
     pub retournement: Option<String>,
+    /// L'onglet ouvert : `AJOUT` ou `TOPOLOGIE`.
+    pub onglet: usize,
+    pub pinceau: Pinceau,
+    /// Le coup de pinceau en cours : les tuiles touchées, telles qu'avant lui.
+    coup: Option<Avant>,
+    saisie: Option<Saisie>,
+    /// Les gestes de poignée faits : chacun est une étape d'annulation.
+    gestes: usize,
+    /// L'écart des courbes de niveau montrées, en mètres (0 : aucune).
+    pub isolignes: f32,
 }
 
 impl Default for Editeur {
     fn default() -> Editeur {
-        Editeur { mode: Mode::Choisir, retours: Vec::new(), remplacement: None, retournement: None }
+        Editeur { mode: Mode::Choisir, retours: Vec::new(), remplacement: None, retournement: None, onglet: AJOUT, pinceau: Pinceau::default(), coup: None, saisie: None, gestes: 0, isolignes: 0.0 }
     }
+}
+
+/// Là où le rayon de la vue par (x, y) coupe le plan horizontal à la hauteur `h`.
+fn sur_plan(camera: &Camera, x: f32, y: f32, h: f32) -> Option<[f32; 3]> {
+    let d = camera.rayon(x, y);
+    if d[1].abs() < 1e-4 {
+        return None;
+    }
+    let t = (h - camera.oeil[1]) / d[1];
+    (t > 0.0 && t < 2000.0).then(|| [camera.oeil[0] + d[0] * t, h, camera.oeil[2] + d[2] * t])
 }
 
 /// Le nom affiché d'un objet : celui de son modèle importé, sinon de son genre.
@@ -99,11 +169,15 @@ impl Editeur {
     /// Retient l'état de `e` avant un changement.
     fn retenir(&mut self, monde: &Monde, e: Entite, cle: Id, quoi: &'static str) {
         let Some(id) = monde.ident.get(e).cloned() else { return };
-        if cle != 0 && self.retours.last().is_some_and(|r| r.cle == cle && r.id == id) {
+        if cle != 0 && matches!(self.retours.last(), Some(Retour::Objet { cle: c, id: i, .. }) if *c == cle && *i == id) {
             return;
         }
         let avant = monde.objet.get(e).copied().zip(monde.lieu.get(e).copied());
-        self.retours.push(Retour { id, avant, origine: monde.origine, cle, quoi });
+        self.pousser(Retour::Objet { id, avant, origine: monde.origine, cle, quoi });
+    }
+
+    fn pousser(&mut self, r: Retour) {
+        self.retours.push(r);
         if self.retours.len() > RETOURS {
             self.retours.remove(0);
         }
@@ -112,15 +186,20 @@ impl Editeur {
     /// Défait le dernier changement.
     pub fn annuler(&mut self, monde: &mut Monde, maillages: &mut Maillages, tuiles: &mut Tuiles) {
         let Some(r) = self.retours.pop() else { return };
-        let e = monde.trouver(&r.id);
-        match (r.avant, e) {
+        let (id, avant, origine) = match r {
+            Retour::Objet { id, avant, origine, .. } => (id, avant, origine),
+            Retour::Relief(avant) => return terrain::remettre(monde, maillages, tuiles, &avant),
+        };
+        let r = (id, origine);
+        let e = monde.trouver(&r.0);
+        match (avant, e) {
             (Some((objet, mut lieu)), e) => {
                 // Le monde a pu se décaler depuis
-                let (dx, dz) = ((r.origine[0] - monde.origine[0]) as f32 * TAILLE, (r.origine[1] - monde.origine[1]) as f32 * TAILLE);
+                let (dx, dz) = ((r.1[0] - monde.origine[0]) as f32 * TAILLE, (r.1[1] - monde.origine[1]) as f32 * TAILLE);
                 lieu.pos[0] += dx;
                 lieu.pos[2] += dz;
                 let lieu = Lieu::en(lieu.pos, lieu.cap);
-                let e = e.unwrap_or_else(|| monde.creer(&r.id));
+                let e = e.unwrap_or_else(|| monde.creer(&r.0));
                 tuiles.modifier(monde, maillages, e, objet, lieu);
                 monde.choisie = Some(e);
             }
@@ -169,7 +248,7 @@ impl Editeur {
                     // De face, l'avant de l'objet loin de la caméra, au quart de tour
                     let cap = angle(((lacet + PI) / FRAC_PI_2).round() * FRAC_PI_2);
                     let e = tuiles.ajouter(monde, maillages, o, Lieu::en(p, cap));
-                    self.retours.push(Retour { id: monde.ident.get(e).cloned().unwrap_or_default(), avant: None, origine: monde.origine, cle: 0, quoi: "l'ajout" });
+                    self.pousser(Retour::Objet { id: monde.ident.get(e).cloned().unwrap_or_default(), avant: None, origine: monde.origine, cle: 0, quoi: "l'ajout" });
                     monde.choisie = Some(e);
                 }
                 self.mode = Mode::Choisir;
@@ -218,6 +297,11 @@ impl Editeur {
             cx.paragraph(b, "Pour ajouter un décor ou un bâtiment, touchez « Ouvrir un .glb » : un modèle sans squelette entre au catalogue.");
         }
 
+        self.enregistrement(cx, b, monde, maillages, tuiles);
+    }
+
+    /// L'état de l'enregistrement, et de quoi annuler : au bas des deux onglets.
+    fn enregistrement(&mut self, cx: &mut Cx, b: &mut Body, monde: &mut Monde, maillages: &mut Maillages, tuiles: &mut Tuiles) {
         cx.section(b, "ENREGISTREMENT");
         let lues = tuiles.chargees.values().filter(|c| c.lue).count();
         cx.mesure(b, "Tuiles modifiées chargées", &lues.to_string());
@@ -227,7 +311,7 @@ impl Editeur {
             cx.paragraph(b, err);
         }
         if let Some(r) = self.retours.last() {
-            let l = format!("Annuler {}", r.quoi);
+            let l = format!("Annuler {}", r.quoi());
             if cx.liens(b, id("editeur-annuler"), &[&l], None).is_some() {
                 self.annuler(monde, maillages, tuiles);
             }
@@ -254,7 +338,7 @@ impl Editeur {
                 let p = [l.pos[0] + r[0], l.pos[1], l.pos[2] + r[2]];
                 let p = [p[0], physique::sol(monde, p[0], p[2], p[1] + 1.0).map_or(p[1], |s| s.0.max(p[1] - 1.0)), p[2]];
                 let n = tuiles.ajouter(monde, maillages, o, Lieu::en(p, l.cap));
-                self.retours.push(Retour { id: monde.ident.get(n).cloned().unwrap_or_default(), avant: None, origine: monde.origine, cle: 0, quoi: "la copie" });
+                self.pousser(Retour::Objet { id: monde.ident.get(n).cloned().unwrap_or_default(), avant: None, origine: monde.origine, cle: 0, quoi: "la copie" });
                 monde.choisie = Some(n);
                 return;
             }
@@ -273,6 +357,8 @@ impl Editeur {
         }
         if self.mode == Mode::Deplacer {
             cx.paragraph(b, "Touchez dans la vue l'endroit où le poser.");
+        } else {
+            cx.paragraph(b, "Dans la vue, glissez le disque blanc pour le déplacer sur le sol, une flèche pour le pousser le long d'un axe ou en hauteur, la pastille jaune de l'anneau pour le tourner.");
         }
         if let Genre::Modele(k) = o.genre {
             let m = monde.modeles.get(k);
@@ -370,6 +456,186 @@ impl Editeur {
             self.retenir(monde, e, cle, "le réglage");
             tuiles.modifier(monde, maillages, e, x, Lieu::en(lieu.pos, lieu.cap));
         }
+    }
+}
+
+impl Editeur {
+    /// L'onglet Topologie : l'outil, le rayon, la force, la couleur à peindre.
+    pub fn panneau_topologie(&mut self, cx: &mut Cx, b: &mut Body, monde: &mut Monde, maillages: &mut Maillages, tuiles: &mut Tuiles) {
+        cx.section(b, "PINCEAU");
+        let noms: Vec<&str> = Outil::TOUS.iter().map(|o| o.nom()).collect();
+        let p = &mut self.pinceau;
+        let actif = p.outil.and_then(|o| Outil::TOUS.iter().position(|x| *x == o));
+        if let Some(k) = cx.liens(b, id("topologie-outil"), &noms, actif) {
+            p.outil = if actif == Some(k) { None } else { Some(Outil::TOUS[k]) };
+        }
+        cx.paragraph(b, match p.outil {
+            None => "Choisissez un outil, puis glissez un doigt dans la vue. Sans outil, le doigt tourne la vue.",
+            Some(Outil::Aplanir) => "Glissez dans la vue : le sol revient à la hauteur du premier point touché. Touchez l'outil de nouveau pour tourner la vue.",
+            Some(_) => "Glissez dans la vue pour retoucher le sol sous le cercle. Touchez l'outil de nouveau pour tourner la vue.",
+        });
+        cx.slider(b, id("topologie-rayon"), "Rayon", &format!("{} m", dec(p.rayon, 0)), &mut p.rayon, terrain::RAYON_MIN, terrain::RAYON_MAX);
+        p.rayon = p.rayon.round().clamp(terrain::RAYON_MIN, terrain::RAYON_MAX);
+        let mut f = p.force * 100.0;
+        cx.slider(b, id("topologie-force"), "Force", &format!("{} %", dec(f, 0)), &mut f, 5.0, 100.0);
+        p.force = ((f / 5.0).round() * 5.0 / 100.0).clamp(0.05, 1.0);
+        if p.outil == Some(Outil::Peindre) {
+            let teintes: Vec<Color> = terrain::TEINTES.iter().map(|c| c.map(|v| (v * 255.0).round() as u8)).map(|c| [c[0], c[1], c[2], 255]).collect();
+            let choisie = terrain::TEINTES.iter().position(|c| hex(*c) == hex(p.couleur));
+            if let Some(i) = cx.nuancier(b, id("topologie-couleur"), &teintes, choisie) {
+                p.couleur = terrain::TEINTES[i];
+            }
+        }
+        if self.isolignes > 0.0 {
+            cx.section(b, "COURBES DE NIVEAU");
+            cx.mesure(b, "Écart", &format!("{} m · fortes tous les {} m", dec(self.isolignes, 0), dec(self.isolignes * 5.0, 0)));
+            cx.paragraph(b, "L'écart suit la hauteur de la vue. Seul le relief est dessiné ici : les objets reviennent dans l'onglet Ajout.");
+        }
+        self.enregistrement(cx, b, monde, maillages, tuiles);
+    }
+
+    /// Un outil de topologie est pris : le doigt dans la vue peint au lieu de tourner.
+    pub fn peint(&self) -> bool {
+        self.onglet == TOPOLOGIE && self.pinceau.outil.is_some()
+    }
+
+    /// Le pinceau, ce temps-ci : posé en `point` (au repère du monde), ou levé. Un coup,
+    /// du doigt posé au doigt levé, est une étape d'annulation.
+    pub fn peindre(&mut self, monde: &mut Monde, maillages: &mut Maillages, tuiles: &mut Tuiles, point: Option<[f32; 3]>, dt: f32) {
+        let Some(c) = point.filter(|_| self.peint()) else {
+            if let Some(avant) = self.coup.take() {
+                if !avant.is_empty() {
+                    self.pousser(Retour::Relief(avant));
+                }
+            }
+            self.pinceau.niveau = None;
+            return;
+        };
+        if self.pinceau.niveau.is_none() {
+            self.pinceau.niveau = Some(c[1]);
+        }
+        let avant = terrain::appliquer(monde, maillages, tuiles, &self.pinceau, c, dt);
+        let coup = self.coup.get_or_insert_with(Vec::new);
+        for t in avant {
+            if coup.iter().all(|x| x.0 != t.0) {
+                coup.push(t);
+            }
+        }
+    }
+
+    /// Les poignées de l'objet choisi, dessinées dans la vue `camera` (sur `zone`) ; les
+    /// glisser déplace ou tourne l'objet. Vrai tant qu'une poignée est tenue.
+    pub fn poignees(&mut self, cx: &mut Cx, camera: &Camera, zone: crate::draw::Rect, monde: &mut Monde, maillages: &mut Maillages, tuiles: &mut Tuiles) -> bool {
+        let Some((e, o, l)) = choisi(monde).filter(|_| self.onglet == AJOUT && self.mode == Mode::Choisir) else {
+            self.saisie = None;
+            return false;
+        };
+        let dp = cx.dp;
+        // Les bras gardent à peu près la même taille à l'écran
+        let p = l.pos;
+        let dist = ((p[0] - camera.oeil[0]).powi(2) + (p[1] - camera.oeil[1]).powi(2) + (p[2] - camera.oeil[2]).powi(2)).sqrt();
+        let bras = (dist * 0.16).clamp(0.4, 40.0);
+        let axe = |q: Poignee| match q {
+            Poignee::X => crate::moteur::objets::tourner([1.0, 0.0, 0.0], l.cap),
+            Poignee::Z => crate::moteur::objets::tourner([0.0, 0.0, 1.0], l.cap),
+            _ => [0.0, 1.0, 0.0],
+        };
+        let anneau = bras * 0.8;
+        let ou = |q: Poignee| -> [f32; 3] {
+            match q {
+                Poignee::Plan => p,
+                Poignee::Cap => [p[0] + anneau * l.cap.sin(), p[1], p[2] + anneau * l.cap.cos()],
+                _ => {
+                    let a = axe(q);
+                    [p[0] + a[0] * bras, p[1] + a[1] * bras, p[2] + a[2] * bras]
+                }
+            }
+        };
+        let Some(centre) = camera.ecran(p) else { return false };
+        let couleur = |q: Poignee| -> Color {
+            match q {
+                Poignee::Plan => [255, 255, 255, 230],
+                Poignee::X => [0xE0, 0x55, 0x50, 255],
+                Poignee::Z => [0x50, 0x85, 0xE0, 255],
+                Poignee::Y => [0x55, 0xB8, 0x60, 255],
+                Poignee::Cap => [0xF0, 0xC0, 0x40, 255],
+            }
+        };
+        // L'anneau du cap, sur le sol de l'objet
+        let n = 48;
+        let points: Vec<Option<[f32; 2]>> = (0..=n).map(|k| {
+            let a = k as f32 / n as f32 * std::f32::consts::TAU;
+            camera.ecran([p[0] + anneau * a.sin(), p[1], p[2] + anneau * a.cos()])
+        }).collect();
+        for w in points.windows(2) {
+            if let (Some(a), Some(b)) = (w[0], w[1]) {
+                cx.dl.line(a, b, 2.0 * dp, [0xF0, 0xC0, 0x40, 160]);
+            }
+        }
+        // Les flèches, puis les pastilles ; chacune se tient au doigt
+        let mut tenue = None;
+        for q in Poignee::TOUTES {
+            let Some(s) = camera.ecran(ou(q)) else { continue };
+            if !zone.contains(s[0], s[1]) {
+                continue;
+            }
+            if matches!(q, Poignee::X | Poignee::Z | Poignee::Y) {
+                cx.dl.line(centre, s, 3.0 * dp, couleur(q));
+            }
+            let r = if q == Poignee::Plan { 13.0 } else { 10.0 } * dp;
+            let cle = sub_id(id("poignee"), q as usize);
+            let prise = 22.0 * dp;
+            if let Some(d) = cx.ui.drag(cle, crate::draw::Rect::new(s[0] - prise, s[1] - prise, 2.0 * prise, 2.0 * prise)) {
+                tenue = Some((q, d));
+            }
+            let actif = self.saisie.is_some_and(|x| x.poignee == q);
+            let r = if actif { r * 1.3 } else { r };
+            cx.dl.rrect(crate::draw::Rect::new(s[0] - r - dp, s[1] - r - dp, 2.0 * (r + dp), 2.0 * (r + dp)), r + dp, [0x1B, 0x1B, 0x24, 160]);
+            cx.dl.rrect(crate::draw::Rect::new(s[0] - r, s[1] - r, 2.0 * r, 2.0 * r), r, couleur(q));
+        }
+        // Une poignée tenue : l'objet suit le doigt depuis là où il l'a prise
+        let Some((q, d)) = tenue.filter(|(q, _)| self.saisie.is_none_or(|s| s.poignee == *q)) else {
+            if self.saisie.take().is_some() {
+                self.gestes += 1;
+            }
+            return false;
+        };
+        let s = *self.saisie.get_or_insert(Saisie { poignee: q, doigt: [d.x, d.y], lieu: l, prise: sur_plan(camera, d.x, d.y, l.pos[1]) });
+        let p0 = s.lieu.pos;
+        let mut lieu = s.lieu;
+        match q {
+            Poignee::Plan => {
+                if let (Some(a), Some(b)) = (s.prise, sur_plan(camera, d.x, d.y, p0[1])) {
+                    lieu.pos = [p0[0] + b[0] - a[0], p0[1], p0[2] + b[2] - a[2]];
+                }
+            }
+            Poignee::X | Poignee::Z | Poignee::Y => {
+                // Le doigt projeté sur la flèche vue à l'écran : un mètre y fait tant de pixels
+                let a = axe(q);
+                if let (Some(c0), Some(c1)) = (camera.ecran(p0), camera.ecran([p0[0] + a[0], p0[1] + a[1], p0[2] + a[2]])) {
+                    let v = [c1[0] - c0[0], c1[1] - c0[1]];
+                    let l2 = v[0] * v[0] + v[1] * v[1];
+                    if l2 > 1.0 {
+                        let m = ((d.x - s.doigt[0]) * v[0] + (d.y - s.doigt[1]) * v[1]) / l2;
+                        let m = (m / 0.05).round() * 0.05;
+                        lieu.pos = [p0[0] + a[0] * m, p0[1] + a[1] * m, p0[2] + a[2] * m];
+                    }
+                }
+            }
+            Poignee::Cap => {
+                if let (Some(a), Some(b)) = (s.prise, sur_plan(camera, d.x, d.y, p0[1])) {
+                    let (a0, a1) = ((a[0] - p0[0]).atan2(a[2] - p0[2]), (b[0] - p0[0]).atan2(b[2] - p0[2]));
+                    let pas = 5f32.to_radians();
+                    lieu.cap = angle(((s.lieu.cap + a1 - a0) / pas).round() * pas);
+                }
+            }
+        }
+        if lieu.pos != l.pos || (lieu.cap - l.cap).abs() > 1e-5 {
+            let quoi = if q == Poignee::Cap { "l'orientation" } else { "le déplacement" };
+            self.retenir(monde, e, sub_id(id("poignee-geste"), self.gestes), quoi);
+            tuiles.modifier(monde, maillages, e, o, Lieu::en(lieu.pos, lieu.cap));
+        }
+        true
     }
 }
 

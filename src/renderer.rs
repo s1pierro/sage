@@ -111,12 +111,20 @@ vec3 eclairer(vec3 base, vec3 n, vec3 p) {
 }";
 
 /// Le terrain : sa couleur et un quadrillage de 2 et de 16 m (des diviseurs de la tuile :
-/// il ne saute pas quand l'origine se déplace).
+/// il ne saute pas quand l'origine se déplace). Avec `u_isolignes`, des courbes de niveau
+/// à la place : un trait tous les `u_isolignes` mètres d'altitude, un plus fort tous les
+/// cinq, d'un pixel quelle que soit la distance.
 const TERRAIN_FS: &str = "#version 300 es
 precision highp float;
 in vec3 v_monde; in vec3 v_normale; in vec3 v_couleur;
 out vec4 o_color;
+uniform float u_isolignes;
 #LUMIERE
+float niveau(float y, float pas, float large) {
+  float q = y / pas;
+  float g = abs(fract(q - 0.5) - 0.5) / max(fwidth(q), 1e-4);
+  return 1.0 - clamp(g / large, 0.0, 1.0);
+}
 float trait(vec2 c, float pas) {
   vec2 q = c / pas;
   vec2 g = abs(fract(q - 0.5) - 0.5) / max(fwidth(q), vec2(1e-4));
@@ -125,8 +133,14 @@ float trait(vec2 c, float pas) {
 void main() {
   vec2 c = v_monde.xz;
   vec3 base = v_couleur;
-  base = mix(base, base * 0.86, trait(c, 2.0) * 0.5);
-  base = mix(base, base * 0.74, trait(c, 16.0) * 0.8);
+  if (u_isolignes > 0.0) {
+    float y = v_monde.y;
+    base = mix(base, base * 0.55, niveau(y, u_isolignes, 1.0) * 0.75);
+    base = mix(base, vec3(0.30, 0.20, 0.12), niveau(y, u_isolignes * 5.0, 1.6) * 0.9);
+  } else {
+    base = mix(base, base * 0.86, trait(c, 2.0) * 0.5);
+    base = mix(base, base * 0.74, trait(c, 16.0) * 0.8);
+  }
   o_color = vec4(eclairer(base, normalize(v_normale), v_monde), 1.0);
 }";
 
@@ -513,6 +527,7 @@ impl Renderer {
         (gl.glUniform3f)(self.loc(p, "u_oeil"), o[0], o[1], o[2]);
         (gl.glUniform3f)(self.loc(p, "u_ciel"), CIEL[0], CIEL[1], CIEL[2]);
         (gl.glUniform1f)(self.loc(p, "u_brouillard"), s.brouillard.max(1.0));
+        (gl.glUniform1f)(self.loc(p, "u_isolignes"), s.isolignes.max(0.0));
         (gl.glUniform3f)(self.loc(p, "u_soleil"), d[0], d[1], d[2]);
         (gl.glUniformMatrix4fv)(self.loc(p, "u_lvp"), 1, 0, lvp.as_ptr());
         (gl.glUniform1f)(self.loc(p, "u_ombres"), if self.carte.is_some() { 1.0 } else { 0.0 });

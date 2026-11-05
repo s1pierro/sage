@@ -292,6 +292,13 @@ impl Ui {
         self.drags.get(&id).copied()
     }
 
+    /// Le doigt posé sur l'espace de travail, s'il y est seul : où il est.
+    pub fn doigt_seul(&self) -> Option<(f32, f32)> {
+        let mut l = self.pointers.iter().filter(|p| p.owner == Owner::Workspace);
+        let p = l.next()?;
+        (l.next().is_none() && !p.multi).then_some((p.x, p.y))
+    }
+
     pub fn pressed(&self, id: Id) -> bool {
         self.pointers.iter().any(|p| p.owner == Owner::Widget(id))
     }

@@ -6,6 +6,23 @@ Il vise un monde ouvert, avec d'autres valeurs que la violence.
 
 ![Le mannequin marche dans le décor de S.A.G.E.](docs/apercu.png)
 
+## Version 0.9 : l'éditeur en pause, la topologie et les poignées
+
+- Le panneau d'édition ouvert, le jeu se met en pause et le personnage disparaît. La
+  caméra tourne autour d'un point du sol : la manette le déplace, deux doigts qui
+  glissent aussi, et l'on peut s'éloigner jusqu'à 150 m. On voit jusqu'à 1 km, sans
+  brouillard. Refermé, le joueur reprend où il était.
+- L'éditeur a deux onglets. **Ajout** est l'ancien éditeur. **Topologie** retouche le
+  relief au pinceau : Monter, Creuser, Aplanir, Adoucir, Peindre la couleur du sol, avec
+  un rayon et une force. Chaque coup de pinceau s'annule, et les tuiles retouchées
+  s'enregistrent comme les autres.
+  La vue y va jusqu'à la verticale et s'éloigne jusqu'à 2 km ; seul le relief est
+  dessiné, avec ses courbes de niveau, dont l'écart suit la hauteur de la vue, et
+  l'altitude sous le doigt.
+- Dans l'onglet Ajout, l'objet choisi a des poignées : le disque blanc le fait glisser
+  sur le sol, les flèches le poussent le long de ses axes ou en hauteur, la pastille
+  jaune de l'anneau le tourne (au pas de 5°). Chaque geste est une étape d'annulation.
+
 ## Version 0.8.2 : les faces des décors
 
 - Un décor dont les faces regardent vers l'intérieur est retourné à l'import, et le
@@ -217,7 +234,9 @@ Pour les appareils ARM 64 bits, sous Android 8.0 ou plus récent, avec OpenGL ES
 - `src/moteur/objets.rs`, `src/moteur/depot.rs` : les objets du décor et leur
   catalogue ; le dépôt du monde en JSON ;
 - `src/campagne.rs` : la source de tuiles générée ;
-- `src/editeur.rs` : l'éditeur du monde, dans le panneau de gauche ;
+- `src/editeur.rs` : l'éditeur du monde, dans le panneau de gauche (onglets Ajout et
+  Topologie, poignées de l'objet choisi) ;
+- `src/terrain.rs` : le pinceau qui retouche le relief des tuiles ;
 - `src/manette.rs`, `src/reglages.rs` : les manettes de jeu (actions, profils,
   assignation) et l'onglet Manette des réglages ;
 - `src/image.rs` : les textures PNG et JPEG, décodées ;

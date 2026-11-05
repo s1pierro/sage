@@ -194,10 +194,12 @@ pub fn ident(i: i32, j: i32) -> String {
 pub const DELAI: f32 = 2.0;
 
 /// Une tuile chargée : son terrain, ses couleurs (pour la réécrire), ses deux maillages.
+/// Le maillage complet ne se fait que près du centre : loin, la tuile n'a que le
+/// simplifié, et beaucoup de tuiles tiennent en mémoire.
 pub struct Chargee {
     pub terrain: Entite,
     couleurs: Arc<Vec<[f32; 3]>>,
-    proche: MaillageId,
+    proche: Option<MaillageId>,
     loin: Option<MaillageId>,
     /// Lue d'un fichier plutôt que générée.
     pub lue: bool,
@@ -299,30 +301,44 @@ impl Tuiles {
                     (self.source.tuile(i, j), false)
                 }
             };
-            self.poser(monde, maillages, i, j, c, lue);
+            self.poser(monde, maillages, i, j, c, lue, !loin_de(&(i, j), PROCHE));
             self.derniere_ms = t0.elapsed().as_secs_f32() * 1000.0;
         }
-        // Le terrain complet près du joueur, le simplifié au-delà
-        for (k, c) in &self.chargees {
-            let voulu = match c.loin {
-                Some(l) if loin_de(k, PROCHE) => l,
-                _ => c.proche,
+        // Le terrain complet près du joueur, fait s'il manque ; le simplifié au-delà, et
+        // le complet s'en va un peu plus loin
+        for (k, c) in self.chargees.iter_mut() {
+            let id = ident(k.0, k.1);
+            if c.loin.is_none() || !loin_de(k, PROCHE) {
+                if c.proche.is_none() {
+                    if let Some(r) = monde.relief.get(c.terrain) {
+                        c.proche = Some(maillages.mettre(&id, Format::Terrain, Arc::new(r.maillage(&r.normales(), &c.couleurs))));
+                    }
+                }
+            } else if c.proche.is_some() && loin_de(k, PROCHE + 1) {
+                maillages.ote(&id);
+                c.proche = None;
+            }
+            let voulu = match (c.loin, c.proche) {
+                (Some(l), _) if loin_de(k, PROCHE) => Some(l),
+                (l, p) => p.or(l),
             };
-            if let Some(r) = monde.rendu.get_mut(c.terrain) {
-                r.maillage = voulu;
+            if let (Some(v), Some(r)) = (voulu, monde.rendu.get_mut(c.terrain)) {
+                r.maillage = v;
             }
         }
         manque.len() - n
     }
 
-    fn poser(&mut self, monde: &mut Monde, maillages: &mut Maillages, i: i32, j: i32, c: Contenu, lue: bool) {
+    #[allow(clippy::too_many_arguments)]
+    fn poser(&mut self, monde: &mut Monde, maillages: &mut Maillages, i: i32, j: i32, c: Contenu, lue: bool, pres: bool) {
         let id = ident(i, j);
         let o = Tuiles::coin(monde, (i, j));
         let t = monde.creer(&id);
         monde.lieu.mettre(t, Lieu::en(o, 0.0));
-        let proche = maillages.mettre(&id, Format::Terrain, Arc::new(c.relief.maillage(&c.normales, &c.couleurs)));
         let loin = (c.relief.n % SIMPLIFIE == 0 && c.relief.n > SIMPLIFIE).then(|| maillages.mettre(&format!("{id}/loin"), Format::Terrain, Arc::new(c.relief.maillage_loin(&c.normales, &c.couleurs, SIMPLIFIE))));
-        monde.rendu.mettre(t, Rendu { maillage: proche, local: math::scale(1.0) });
+        let proche = (pres || loin.is_none()).then(|| maillages.mettre(&id, Format::Terrain, Arc::new(c.relief.maillage(&c.normales, &c.couleurs))));
+        let Some(vu) = proche.or(loin) else { return };
+        monde.rendu.mettre(t, Rendu { maillage: vu, local: math::scale(1.0) });
         monde.relief.mettre(t, c.relief);
         for el in c.objets {
             let e = monde.creer(&el.id);
@@ -440,6 +456,31 @@ impl Tuiles {
         let e = monde.creer(&id);
         self.modifier(monde, maillages, e, objet, lieu);
         e
+    }
+
+    /// Les couleurs de la grille de la tuile `k`, si elle est chargée.
+    pub fn couleurs(&self, k: (i32, i32)) -> Option<&[[f32; 3]]> {
+        self.chargees.get(&k).map(|c| c.couleurs.as_slice())
+    }
+
+    /// Le relief et les couleurs de la tuile chargée `k` changent : ses maillages se
+    /// refont, elle sera réécrite.
+    pub fn retoucher(&mut self, monde: &mut Monde, maillages: &mut Maillages, k: (i32, i32), relief: Relief, couleurs: Vec<[f32; 3]>) {
+        let Some(c) = self.chargees.get_mut(&k) else { return };
+        if relief.h.len() != couleurs.len() {
+            return;
+        }
+        let id = ident(k.0, k.1);
+        let normales = relief.normales();
+        if c.proche.is_some() {
+            maillages.mettre(&id, Format::Terrain, Arc::new(relief.maillage(&normales, &couleurs)));
+        }
+        if c.loin.is_some() {
+            maillages.mettre(&format!("{id}/loin"), Format::Terrain, Arc::new(relief.maillage_loin(&normales, &couleurs, SIMPLIFIE)));
+        }
+        c.couleurs = Arc::new(couleurs);
+        monde.relief.mettre(c.terrain, relief);
+        self.marquer(k);
     }
 
     /// Ôte l'objet `e` du monde.
