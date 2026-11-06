@@ -723,3 +723,12 @@ sur une grille qui déborde d'un point).
   (`editeur::Terrassement`), puis l'objet posé sur la plateforme ou au fond de la fosse
   (sa boîte en bas ; une rampe à son départ). `Retour::Terrassement(avant, objet)` :
   une seule annulation remet le relief et l'objet.
+
+## 15. Lever la vue (0.16)
+
+- Le tangage de la caméra descend en jeu jusqu'à `LEVER` (−1,05 rad) ; en édition, il
+  s'arrête à `HORIZON` (−0,15).
+- Au-delà de `HORIZON`, `leve` va de 0 à 1 : la distance de la caméra se réduit (jusqu'à
+  −35 %), le champ s'élargit (`CHAMP_LEVE`, +0,3 rad). L'œil est posé au-dessus du sol
+  avant le lancer qui l'avance devant les obstacles (le sol ne le ramène pas contre le
+  personnage) ; la vue part de l'œil selon l'angle demandé plutôt que vers le personnage.

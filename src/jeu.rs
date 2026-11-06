@@ -73,6 +73,14 @@ fn erosion_relue(depot: &Depot, graine: u32) -> Option<Campagne> {
     Some(Campagne { graine, erosion: Some(Arc::new(e)) })
 }
 
+/// L'angle de vue le plus bas en édition, et celui où la vue commence à se lever en
+/// jeu (radians, négatif : l'œil sous la cible).
+const HORIZON: f32 = -0.15;
+/// Le plus loin que la vue se lève en jeu : environ 60° vers le ciel.
+pub const LEVER: f32 = -1.05;
+/// Le champ de vue s'élargit d'autant (radians), vue levée au plus.
+const CHAMP_LEVE: f32 = 0.3;
+
 /// Le joueur ne va pas là où l'eau est plus profonde que cela (m).
 pub const PROFONDEUR: f32 = 1.2;
 
@@ -660,11 +668,14 @@ impl App {
         };
         self.cam.2 = self.cam.2.min(loin);
         self.cam.1 = self.cam.1.min(haut);
+        // En jeu, la vue se lève vers le ciel ; en édition, pas sous l'horizon
+        let bas = if edite { HORIZON } else { LEVER };
+        self.cam.1 = self.cam.1.max(bas);
         // Un outil de topologie pris, le doigt seul dans la vue peint : il ne tourne pas
         let pinceau = if self.editeur.peint() && edite { cx.ui.doigt_seul().filter(|p| w.contains(p.0, p.1)) } else { None };
         if pinceau.is_none() {
             self.cam.0 -= g.orbit.0 * 0.006;
-            self.cam.1 = (self.cam.1 + g.orbit.1 * 0.004).clamp(-0.15, haut);
+            self.cam.1 = (self.cam.1 + g.orbit.1 * 0.004).clamp(bas, haut);
         }
         if g.zoom.is_finite() && g.zoom > 0.0 {
             self.cam.2 = (self.cam.2 / g.zoom).clamp(1.5, loin);
@@ -678,7 +689,7 @@ impl App {
         let (sens, inverser) = self.manettes.active().map_or((1.0, false), |a| (a.profil.sensibilite, a.profil.inverser));
         self.cam.0 -= c.vue[0] * VUE_LACET * sens * dt;
         let vy = if inverser { -c.vue[1] } else { c.vue[1] };
-        self.cam.1 = (self.cam.1 + vy * VUE_TANGAGE * sens * dt).clamp(-0.15, haut);
+        self.cam.1 = (self.cam.1 + vy * VUE_TANGAGE * sens * dt).clamp(bas, haut);
         if c.tenu("approcher") {
             self.cam.2 = (self.cam.2 * (-1.5 * dt).exp()).clamp(1.5, loin);
         }
@@ -828,12 +839,21 @@ impl App {
             }
             None => ([p[0], p[1] + hauteur * 0.6, p[2]], self.cam.2 * hauteur / 1.75),
         };
+        // Au-delà de l'horizon, la vue se lève : la caméra descend au ras du sol et se
+        // rapproche, le champ s'élargit (de 0 à 1)
+        let leve = if self.visee.is_none() { ((HORIZON - self.cam.1) / (HORIZON - LEVER)).clamp(0.0, 1.0) } else { 0.0 };
+        let d = d * (1.0 - 0.35 * leve);
         let p = if self.visee.is_some() { [cible[0], cible[1] - 1.0, cible[2]] } else { p };
         let (sy, cy) = self.cam.0.sin_cos();
         let (sp, cp) = self.cam.1.sin_cos();
         let mut oeil = [cible[0] + d * sy * cp, cible[1] + d * sp, cible[2] + d * cy * cp];
         // Le haut de la vue : penché avec elle, il reste juste même à la verticale
         let haut = [-sy * sp, cp, -cy * sp];
+        // Vue levée : l'œil glisse au ras du sol au lieu d'y entrer
+        if leve > 0.0 {
+            let sol = systemes::hauteur_sol(&self.monde, oeil[0], oeil[2]).unwrap_or(p[1]);
+            oeil[1] = oeil[1].max(sol + 0.4).max(MER + 0.4);
+        }
         // Rien entre le joueur et l'œil : la caméra s'avance devant ce qui le cacherait
         let vers = [oeil[0] - cible[0], oeil[1] - cible[1], oeil[2] - cible[2]];
         if let Some(i) = physique::lancer(&self.monde, cible, vers, d).filter(|_| self.visee.is_none()) {
@@ -843,10 +863,13 @@ impl App {
         // Jamais sous le sol
         let sol = systemes::hauteur_sol(&self.monde, oeil[0], oeil[2]).unwrap_or(p[1]);
         oeil[1] = oeil[1].max(sol + 0.4).max(MER + 0.4);
+        // Vue levée : l'œil, posé plus haut que son orbite, garde l'angle demandé ; le
+        // personnage glisse vers le bas de l'image
+        let vise = if self.visee.is_none() && self.cam.1 < 0.0 { [oeil[0] - sy * cp * d, oeil[1] - sp * d, oeil[2] - cy * cp * d] } else { cible };
         Camera {
-            vue: math::look_at(oeil, cible, haut),
+            vue: math::look_at(oeil, vise, haut),
             // En édition, on voit loin : le plan proche recule, la profondeur reste précise
-            proj: math::perspective(1.0, w.w / w.h.max(1.0), if self.visee.is_some() { (d * 0.002).max(0.5) } else { 0.1 }, ((self.rayon_vu() as f32 + 1.5) * crate::moteur::TAILLE * 1.5).max(500.0) + if self.visee.is_some() { d } else { 0.0 }),
+            proj: math::perspective(1.0 + CHAMP_LEVE * leve, w.w / w.h.max(1.0), if self.visee.is_some() { (d * 0.002).max(0.5) } else { 0.1 }, ((self.rayon_vu() as f32 + 1.5) * crate::moteur::TAILLE * 1.5).max(500.0) + if self.visee.is_some() { d } else { 0.0 }),
             oeil,
             fenetre: [w.x, w.y, w.w, w.h],
         }
@@ -1614,6 +1637,22 @@ mod tests {
         assert_eq!(isolignes(1000.0), 25.0);
         assert_eq!(isolignes(TOPO_LOIN), 50.0);
     }
+    #[test]
+    fn la_vue_se_leve_vers_le_ciel_en_jeu() {
+        let mut a = App::avec_dossier(1.0, None);
+        let w = Rect::new(0.0, 0.0, 800.0, 600.0);
+        a.cam.1 = LEVER;
+        let c = a.camera(w, 1.0);
+        let r = c.rayon(w.cx(), w.cy());
+        assert!(r[1] > 0.7, "la vue regarde en l'air : {r:?}");
+        let sol = systemes::hauteur_sol(&a.monde, c.oeil[0], c.oeil[2]).unwrap();
+        assert!(c.oeil[1] >= sol + 0.39, "l'œil reste au-dessus du sol");
+        // Le joueur est dans le bas de l'image
+        let p = a.lieu().pos;
+        let e = c.ecran([p[0], p[1] + 1.0, p[2]]).expect("le joueur se voit");
+        assert!(e[1] > w.cy(), "{e:?}");
+    }
+
     #[test]
     fn la_carte_teleporte_le_joueur_au_point_vise() {
         let mut a = App::avec_dossier(1.0, None);

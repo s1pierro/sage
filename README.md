@@ -6,6 +6,13 @@ Il vise un monde ouvert, avec d'autres valeurs que la violence.
 
 ![Le mannequin marche dans le décor de S.A.G.E.](docs/apercu.png)
 
+## Version 0.16 : lever la vue
+
+- En jeu, la vue se lève vers le ciel, jusqu'à environ 60°. Passé l'horizon, la
+  caméra descend au ras du sol derrière le personnage et s'en rapproche, garde l'angle
+  demandé (le personnage glisse vers le bas de l'image), et le champ s'élargit un peu :
+  une perspective en contre-plongée. En édition, la vue reste au-dessus de l'horizon.
+
 ## Version 0.15 : le terrassement
 
 - Dans Ajout, l'objet choisi (un bâtiment importé, un bloc…) a une section
