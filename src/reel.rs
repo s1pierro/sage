@@ -13,6 +13,9 @@
 //!   de la route) avec un genre et une largeur. Sur leur largeur, le sol prend la hauteur
 //!   de la chaussée et sa couleur ; sur les bas-côtés (`EPAULE`), il rejoint le relief.
 //!   Les ponts et les tunnels n'y sont pas.
+//! - Les bâtiments : un contour (x, z du jeu), un pied et un toit (hauteurs absolues) et
+//!   un genre. Chaque tuile monte en volumes, toits plats, ceux dont le centre est chez
+//!   elle (`Reel::bati`).
 //!
 //! Sources : relief © IGN (RGE ALTI, Licence Ouverte 2.0) ; eau © les contributeurs
 //! OpenStreetMap (ODbL). Un fichier préparé est une base de données dérivée d'OSM : il
@@ -22,10 +25,10 @@ use crate::moteur::tuiles::DEMI_CARTE;
 use crate::moteur::TAILLE;
 
 const MAGIQUE: &[u8; 8] = b"SAGEREEL";
-const FORMAT: u32 = 2;
+const FORMAT: u32 = 3;
 
 /// Le texte à citer.
-pub const SOURCES: &str = "Relief © IGN (RGE ALTI) · eau et routes © les contributeurs OpenStreetMap";
+pub const SOURCES: &str = "Relief © IGN (RGE ALTI) · eau, routes et bâtiments © les contributeurs OpenStreetMap";
 
 /// Les genres de routes : chacun sa couleur.
 pub const GRANDE: u8 = 0;
@@ -50,6 +53,100 @@ pub fn teinte(genre: u8) -> [f32; 3] {
 /// La largeur des bas-côtés, où le sol rejoint le relief, selon le genre.
 pub fn epaule(genre: u8) -> f32 {
     if genre <= SERVICE { 3.0 } else { 1.5 }
+}
+
+/// Les genres de bâtiments.
+pub const MAISON: u8 = 0;
+pub const IMMEUBLE: u8 = 1;
+pub const INDUSTRIEL: u8 = 2;
+pub const EDIFICE: u8 = 3;
+pub const ANNEXE: u8 = 4;
+
+/// Les couleurs d'un bâtiment de ce genre : ses murs, son toit.
+pub fn teintes_bati(genre: u8) -> ([f32; 3], [f32; 3]) {
+    match genre {
+        MAISON => ([0.84, 0.80, 0.72], [0.34, 0.35, 0.40]),
+        IMMEUBLE => ([0.78, 0.76, 0.72], [0.40, 0.40, 0.42]),
+        INDUSTRIEL => ([0.64, 0.66, 0.68], [0.50, 0.52, 0.54]),
+        EDIFICE => ([0.76, 0.72, 0.64], [0.36, 0.38, 0.40]),
+        _ => ([0.70, 0.66, 0.60], [0.45, 0.40, 0.36]),
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Batiment {
+    pub genre: u8,
+    /// Le pied des murs (un peu sous le sol) et le toit, en hauteurs absolues.
+    pub pied: f32,
+    pub toit: f32,
+    /// Le contour, x, z du jeu, sans répéter le premier point.
+    pub contour: Vec<[f32; 2]>,
+}
+
+impl Batiment {
+    /// Le centre du contour (la moyenne de ses points).
+    pub fn centre(&self) -> [f32; 2] {
+        let n = self.contour.len().max(1) as f32;
+        let s = self.contour.iter().fold([0.0, 0.0], |a, p| [a[0] + p[0], a[1] + p[1]]);
+        [s[0] / n, s[1] / n]
+    }
+}
+
+/// L'aire signée d'un contour (positive : sens inverse des aiguilles d'une montre, x vers
+/// la droite et z vers le bas, vu d'en haut).
+fn aire(c: &[[f32; 2]]) -> f32 {
+    let mut s = 0.0;
+    for i in 0..c.len() {
+        let (a, b) = (c[i], c[(i + 1) % c.len()]);
+        s += a[0] * b[1] - b[0] * a[1];
+    }
+    s / 2.0
+}
+
+/// Les triangles d'un polygone simple (oreilles), en indices, dans le sens de `c`.
+pub fn trianguler(c: &[[f32; 2]]) -> Vec<[usize; 3]> {
+    let n = c.len();
+    if n < 3 {
+        return Vec::new();
+    }
+    let sens = aire(c).signum();
+    let mut reste: Vec<usize> = (0..n).collect();
+    let mut t = Vec::with_capacity(n - 2);
+    let croix = |a: [f32; 2], b: [f32; 2], p: [f32; 2]| (b[0] - a[0]) * (p[1] - a[1]) - (b[1] - a[1]) * (p[0] - a[0]);
+    let mut garde = 0;
+    while reste.len() > 3 && garde < reste.len() {
+        let m = reste.len();
+        let mut coupe = false;
+        for k in 0..m {
+            let (i0, i1, i2) = (reste[(k + m - 1) % m], reste[k], reste[(k + 1) % m]);
+            let (a, b, d) = (c[i0], c[i1], c[i2]);
+            if croix(a, b, d) * sens <= 0.0 {
+                continue;
+            }
+            let dedans = reste.iter().any(|&j| {
+                if j == i0 || j == i1 || j == i2 {
+                    return false;
+                }
+                let p = c[j];
+                croix(a, b, p) * sens > 0.0 && croix(b, d, p) * sens > 0.0 && croix(d, a, p) * sens > 0.0
+            });
+            if !dedans {
+                t.push([i0, i1, i2]);
+                reste.remove(k);
+                coupe = true;
+                break;
+            }
+        }
+        garde = if coupe { 0 } else { garde + 1 };
+        if !coupe {
+            // Un contour croisé : le reste en éventail
+            break;
+        }
+    }
+    for k in 1..reste.len().saturating_sub(1) {
+        t.push([reste[0], reste[k], reste[k + 1]]);
+    }
+    t
 }
 
 /// Côté des cases de l'index des routes, en mètres.
@@ -101,6 +198,9 @@ pub struct Reel {
     pub routes: Vec<Route>,
     /// Pour chaque case, les segments (route, premier point) qui l'approchent.
     index: std::collections::HashMap<(i32, i32), Vec<(u32, u32)>>,
+    pub batiments: Vec<Batiment>,
+    /// Pour chaque tuile, les bâtiments dont le centre est chez elle.
+    par_tuile: std::collections::HashMap<(i32, i32), Vec<u32>>,
 }
 
 /// Le coin de la grille (au repère du jeu) : le coin de la première tuile de la carte.
@@ -136,7 +236,7 @@ impl Reel {
     /// Les hauteurs `h` (en mètres) et l'eau, d'une grille de `cote(pas)` points ; les
     /// hauteurs s'encodent sur 16 bits.
     #[allow(clippy::too_many_arguments)]
-    pub fn new(nom: &str, lat: f64, lon: f64, x0: f64, y0: f64, pas: f64, niveau: f32, h: &[f32], eau: &[bool], routes: Vec<Route>) -> Reel {
+    pub fn new(nom: &str, lat: f64, lon: f64, x0: f64, y0: f64, pas: f64, niveau: f32, h: &[f32], eau: &[bool], routes: Vec<Route>, batiments: Vec<Batiment>) -> Reel {
         let n = cote(pas);
         assert!(h.len() == n * n && eau.len() == n * n);
         let lo = h.iter().cloned().fold(f32::MAX, f32::min);
@@ -147,7 +247,7 @@ impl Reel {
         for (i, _) in eau.iter().enumerate().filter(|(_, e)| **e) {
             bits[i / 8] |= 1 << (i % 8);
         }
-        Reel { nom: nom.into(), lat, lon, x0, y0, pas, cote: n, niveau, base: lo, echelle, h: hv, eau: bits, routes, index: Default::default() }.indexe()
+        Reel { nom: nom.into(), lat, lon, x0, y0, pas, cote: n, niveau, base: lo, echelle, h: hv, eau: bits, routes, index: Default::default(), batiments, par_tuile: Default::default() }.indexe()
     }
 
     /// Range chaque segment de route dans les cases qu'il approche.
@@ -166,7 +266,64 @@ impl Reel {
             }
         }
         self.index = index;
+        let mut par_tuile: std::collections::HashMap<(i32, i32), Vec<u32>> = Default::default();
+        for (k, b) in self.batiments.iter().enumerate() {
+            let c = b.centre();
+            par_tuile.entry(((c[0] / TAILLE).floor() as i32, (c[1] / TAILLE).floor() as i32)).or_default().push(k as u32);
+        }
+        self.par_tuile = par_tuile;
         self
+    }
+
+    /// Les bâtiments de la tuile (i, j), en volumes, dans son repère : les sommets
+    /// (position, normale, couleur) et les triangles pour les collisions. Rien s'il n'y en
+    /// a pas.
+    pub fn bati(&self, i: i32, j: i32) -> Option<(Vec<f32>, Vec<[[f32; 3]; 3]>)> {
+        let l = self.par_tuile.get(&(i, j))?;
+        let (ox, oz) = (i as f32 * TAILLE, j as f32 * TAILLE);
+        let (mut v, mut t) = (Vec::new(), Vec::new());
+        for &k in l {
+            let b = &self.batiments[k as usize];
+            let c: Vec<[f32; 2]> = b.contour.iter().map(|p| [p[0] - ox, p[1] - oz]).collect();
+            let (murs, toit) = teintes_bati(b.genre);
+            let sens = aire(&c).signum();
+            let mut tri = |p: [[f32; 3]; 3], n: [f32; 3], couleur: [f32; 3]| {
+                for q in p {
+                    v.extend_from_slice(&q);
+                    v.extend_from_slice(&n);
+                    v.extend_from_slice(&couleur);
+                }
+                t.push(p);
+            };
+            // Les murs, tournés vers dehors (le contour peut aller dans les deux sens)
+            for s in 0..c.len() {
+                let (a, d) = (c[s], c[(s + 1) % c.len()]);
+                let (dx, dz) = (d[0] - a[0], d[1] - a[1]);
+                let l = dx.hypot(dz);
+                if l < 1e-3 {
+                    continue;
+                }
+                let n = [dz / l * sens, 0.0, -dx / l * sens];
+                let (a0, a1, d0, d1) = ([a[0], b.pied, a[1]], [a[0], b.toit, a[1]], [d[0], b.pied, d[1]], [d[0], b.toit, d[1]]);
+                if sens > 0.0 {
+                    tri([a0, a1, d1], n, murs);
+                    tri([a0, d1, d0], n, murs);
+                } else {
+                    tri([a0, d1, a1], n, murs);
+                    tri([a0, d0, d1], n, murs);
+                }
+            }
+            // Le toit, plat, tourné vers le haut
+            for [x, y, z] in trianguler(&c) {
+                let p = [x, y, z].map(|k| [c[k][0], b.toit, c[k][1]]);
+                if sens > 0.0 {
+                    tri([p[0], p[2], p[1]], [0.0, 1.0, 0.0], toit);
+                } else {
+                    tri(p, [0.0, 1.0, 0.0], toit);
+                }
+            }
+        }
+        (!v.is_empty()).then_some((v, t))
     }
 
     /// La route la plus proche de (x, z), si l'on est sur elle ou ses bas-côtés ; la plus
@@ -269,6 +426,17 @@ impl Reel {
                 }
             }
         }
+        o.extend_from_slice(&(self.batiments.len() as u32).to_le_bytes());
+        for b in &self.batiments {
+            o.push(b.genre);
+            o.extend_from_slice(&b.pied.to_le_bytes());
+            o.extend_from_slice(&b.toit.to_le_bytes());
+            o.extend_from_slice(&(b.contour.len() as u32).to_le_bytes());
+            for p in &b.contour {
+                o.extend_from_slice(&p[0].to_le_bytes());
+                o.extend_from_slice(&p[1].to_le_bytes());
+            }
+        }
         o
     }
 
@@ -318,10 +486,22 @@ impl Reel {
                 routes.push(Route { genre, largeur, points });
             }
         }
+        let mut batiments = Vec::new();
+        if format >= 3 {
+            let f32_ = |s: &[u8]| f32::from_le_bytes(s.try_into().unwrap());
+            for _ in 0..u32_(prendre(4)?) {
+                let genre = prendre(1)?[0];
+                let pied = f32_(prendre(4)?);
+                let toit = f32_(prendre(4)?);
+                let m = u32_(prendre(4)?) as usize;
+                let contour = prendre(m * 8)?.chunks(8).map(|c| [f32_(&c[0..4]), f32_(&c[4..8])]).collect();
+                batiments.push(Batiment { genre, pied, toit, contour });
+            }
+        }
         if k != o.len() {
             return None;
         }
-        Some(Reel { nom, lat, lon, x0, y0, pas, cote: n, niveau, base, echelle, h, eau, routes, index: Default::default() }.indexe())
+        Some(Reel { nom, lat, lon, x0, y0, pas, cote: n, niveau, base, echelle, h, eau, routes, index: Default::default(), batiments, par_tuile: Default::default() }.indexe())
     }
 }
 
@@ -345,7 +525,7 @@ mod tests {
         // Une pente vers l'est, de l'eau dans la moitié ouest
         let h: Vec<f32> = (0..n * n).map(|i| (i % n) as f32 * 2.0).collect();
         let eau: Vec<bool> = (0..n * n).map(|i| i % n < n / 2).collect();
-        let r = Reel::new("Essai", 49.0, 1.0, 1000.0, 2000.0, pas, 3.0, &h, &eau, Vec::new());
+        let r = Reel::new("Essai", 49.0, 1.0, 1000.0, 2000.0, pas, 3.0, &h, &eau, Vec::new(), Vec::new());
         let o = r.octets();
         assert_eq!(Reel::depuis_octets(&o), Some(r.clone()));
         assert!(Reel::depuis_octets(&o[..o.len() - 1]).is_none());
@@ -358,13 +538,48 @@ mod tests {
     }
 
     #[test]
+    fn un_batiment_se_monte_dans_sa_tuile() {
+        // Un L, dans les deux sens : 6 points, 4 triangles de toit, 6 murs
+        let l = vec![[10.0, 10.0], [30.0, 10.0], [30.0, 20.0], [20.0, 20.0], [20.0, 40.0], [10.0, 40.0]];
+        assert_eq!(trianguler(&l).len(), 4);
+        let pas = 64.0;
+        let n = cote(pas);
+        for c in [l.clone(), l.iter().rev().cloned().collect()] {
+            let b = Batiment { genre: MAISON, pied: -1.0, toit: 7.0, contour: c };
+            let r = Reel::new("Essai", 49.0, 1.0, 0.0, 0.0, pas, -50.0, &vec![0.0; n * n], &vec![false; n * n], Vec::new(), vec![b]);
+            assert!(r.bati(1, 0).is_none());
+            let (v, t) = r.bati(0, 0).expect("dans la tuile (0, 0)");
+            assert_eq!(t.len(), 6 * 2 + 4);
+            assert_eq!(v.len(), t.len() * 3 * 9);
+            // Les normales des murs regardent dehors, le toit vers le haut
+            for (k, tri) in t.iter().enumerate() {
+                let nm = &v[k * 27 + 3..k * 27 + 6];
+                let m = [(tri[0][0] + tri[1][0] + tri[2][0]) / 3.0, (tri[0][2] + tri[1][2] + tri[2][2]) / 3.0];
+                if nm[1] > 0.5 {
+                    assert!(tri.iter().all(|p| p[1] == 7.0));
+                    // Le sens des triangles suit leur normale
+                    let (a, b, c) = (tri[0], tri[1], tri[2]);
+                    let y = (b[2] - a[2]) * (c[0] - a[0]) - (b[0] - a[0]) * (c[2] - a[2]);
+                    assert!(y > 0.0, "toit {k}");
+                } else {
+                    let dehors = [m[0] + nm[0] * 0.5, m[1] + nm[2] * 0.5];
+                    let dedans = |p: [f32; 2]| (p[0] > 10.0 && p[0] < 20.0 && p[1] > 10.0 && p[1] < 40.0) || (p[0] > 10.0 && p[0] < 30.0 && p[1] > 10.0 && p[1] < 20.0);
+                    assert!(!dedans(dehors), "mur {k}");
+                }
+            }
+            let o = r.octets();
+            assert_eq!(Reel::depuis_octets(&o), Some(r));
+        }
+    }
+
+    #[test]
     fn une_route_aplanit_le_sol_et_se_relit() {
         let pas = 64.0;
         let n = cote(pas);
         // Un relief en pente vers l'est (10 cm par mètre), une route nord-sud à 5 m
         let h: Vec<f32> = (0..n * n).map(|i| (origine() + (i % n) as f64 * pas) as f32 * 0.1).collect();
         let route = Route { genre: ROUTE, largeur: 6.0, points: vec![[0.0, -200.0, 5.0], [0.0, 200.0, 5.0]] };
-        let r = Reel::new("Essai", 49.0, 1.0, 0.0, 0.0, pas, -50.0, &h, &vec![false; n * n], vec![route]);
+        let r = Reel::new("Essai", 49.0, 1.0, 0.0, 0.0, pas, -50.0, &h, &vec![false; n * n], vec![route], Vec::new());
         // Sur la chaussée, sa hauteur ; au-delà des bas-côtés, le relief
         for x in [-2.9, 0.0, 2.9] {
             assert!((r.hauteur(x, 10.0) - 5.0).abs() < 1e-4, "{x}");

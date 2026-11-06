@@ -6,6 +6,16 @@ Il vise un monde ouvert, avec d'autres valeurs que la violence.
 
 ![Le mannequin marche dans le décor de S.A.G.E.](docs/apercu.png)
 
+## Version 0.20 : les bâtiments
+
+- Le lieu réel porte les bâtiments d'OpenStreetMap, en volumes à toit plat : maisons,
+  immeubles, bâtiments industriels et commerciaux, édifices (églises, écoles…),
+  annexes, chacun ses couleurs de murs et de toit.
+- Leur hauteur vient d'OSM (`height`, ou les étages à 3 m), sinon de leur genre. Le pied
+  des murs descend un mètre sous le point le plus bas du sol : pas de jour sur une pente.
+- Ils se chargent avec les tuiles, ne se traversent pas, et la caméra ne passe pas au
+  travers. Ils ne se retouchent pas dans l'éditeur, et ne se voient pas en topologie.
+
 ## Version 0.19 : les routes
 
 - Le lieu réel porte les routes d'OpenStreetMap (hors ponts et tunnels) : grandes

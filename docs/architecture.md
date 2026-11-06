@@ -783,3 +783,20 @@ sur une grille qui déborde d'un point).
   `highway`, `surface`, `width`, `lanes`, écarte `bridge`, `tunnel`, `area`, `indoor` ;
   un point tous les 8 m, hauteur prise au relief (bilinéaire) puis moyenne glissante sur
   cinq points ; coupée au bord de la carte.
+
+## 19. Les bâtiments (0.20)
+
+- Format « SAGEREEL » 3 : après les routes, les bâtiments (genre, pied, toit, contour
+  x, z) ; les formats 1 et 2 se lisent encore.
+- `Reel::bati(i, j)` : les bâtiments dont le centre est dans la tuile, en murs (deux
+  triangles par côté, normales vers dehors quel que soit le sens du contour) et toit
+  plat (`trianguler` : par oreilles, l'éventail pour un contour croisé). Sommets au
+  format `Statique`, triangles pour les collisions.
+- `Source::bati` (rien par défaut ; la campagne le prend du lieu réel) : `Tuiles::poser`
+  crée une entité `bati/i/j` (maillage, lieu au coin de la tuile, obstacle
+  `Forme::Triangles`), indépendante du dépôt : une tuile retouchée garde ses
+  bâtiments. Elle part avec la tuile. Sans objet, l'éditeur ne la choisit pas ; hors de
+  « tuile/ », la topologie ne la montre pas.
+- `examples/lieu_reel.rs` : `building=*` (chemins et relations, contours `outer`) en
+  neuf requêtes ; `genre_bati` lit `building`, `height`, `building:levels`,
+  `roof:levels`.

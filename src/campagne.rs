@@ -236,6 +236,10 @@ impl Campagne {
 }
 
 impl Source for Campagne {
+    fn bati(&self, i: i32, j: i32) -> Option<(Vec<f32>, Vec<[[f32; 3]; 3]>)> {
+        self.reel.as_ref()?.bati(i, j)
+    }
+
     fn tuile(&self, i: i32, j: i32) -> Contenu {
         let (ox, oz) = (i as f64 * TAILLE as f64, j as f64 * TAILLE as f64);
         let n = GRILLE;

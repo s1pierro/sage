@@ -11,6 +11,11 @@
 //! service, voie piétonne, chemin, sentier) et une largeur (`width`, `lanes` ou selon le
 //! genre) ; un point tous les 8 m, la hauteur de la chaussée prise au relief et lissée.
 //!
+//! Les bâtiments : `building=*` (chemins et relations, leurs contours extérieurs), un
+//! genre (maison, immeuble, industriel, édifice, annexe) et une hauteur ; le pied au plus
+//! bas du sol sous le contour (un mètre dessous), le toit à la hauteur au-dessus du sol
+//! moyen. La requête se fait en neuf morceaux.
+//!
 //! L'eau : la Seine et les plans d'eau (`natural=water`, `waterway=riverbank`), leur
 //! surface au niveau médian du relief sous elles, leur fond creusé, plus profond loin des
 //! berges (jusqu'à 8 m). Un plan d'eau à un autre niveau (un étang sur le plateau) n'est
@@ -21,7 +26,7 @@
 
 use gda::json::{self, J};
 use sage::campagne::DEPART;
-use sage::reel::{cote, lambert93, origine, Reel, Route};
+use sage::reel::{cote, lambert93, origine, Batiment, Reel, Route};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -234,7 +239,44 @@ fn main() {
         }
     }
     println!("{} routes, {:.0} km", routes.len(), longueur / 1000.0);
-    let r = Reel::new(nom, lat, lon, x0, y0, pas, niveau, &h, &eau, routes);
+    // 5. Les bâtiments, en neuf morceaux (une réponse entière serait trop lourde à lire)
+    let mut batiments = Vec::new();
+    let mut vus = std::collections::HashSet::new();
+    for (bi, bj) in (0..3).flat_map(|j| (0..3).map(move |i| (i, j))) {
+        let (la0, lo0) = (cadre.0 + (cadre.2 - cadre.0) * bj as f64 / 3.0, cadre.1 + (cadre.3 - cadre.1) * bi as f64 / 3.0);
+        let (la1, lo1) = (cadre.0 + (cadre.2 - cadre.0) * (bj + 1) as f64 / 3.0, cadre.1 + (cadre.3 - cadre.1) * (bi + 1) as f64 / 3.0);
+        let b = format!("{la0:.5},{lo0:.5},{la1:.5},{lo1:.5}");
+        let jb = overpass(&cache.join(format!("osm_bati_{bi}_{bj}.json")), "bâtiments", &format!("(way[\"building\"]({b});relation[\"building\"]({b}););out tags geom;"));
+        for e in jb.get("elements").and_then(J::liste).unwrap_or(&[]) {
+            let id = (e.get("type").and_then(J::txt).unwrap_or("").to_string(), e.get("id").and_then(J::num).unwrap_or(0.0) as i64);
+            if !vus.insert(id) {
+                continue;
+            }
+            let Some((genre, hauteur)) = genre_bati(e.get("tags")) else { continue };
+            // Une relation : chacun de ses contours extérieurs (les cours intérieures se
+            // couvrent)
+            let contours: Vec<Vec<(f64, f64)>> = match e.get("type").and_then(J::txt) {
+                Some("way") => vec![ligne(e.get("geometry").unwrap_or(&J::Nul))],
+                _ => anneaux(e.get("members").and_then(J::liste).unwrap_or(&[]).iter().filter(|m| m.get("role").and_then(J::txt) == Some("outer")).map(|m| ligne(m.get("geometry").unwrap_or(&J::Nul))).filter(|l| l.len() > 1).collect()),
+            };
+            for mut c in contours {
+                if c.first() == c.last() {
+                    c.pop();
+                }
+                c.dedup();
+                if c.len() < 3 || !c.iter().all(|p| p.0 > 0.0 && p.1 > 0.0 && p.0 < (n - 1) as f64 && p.1 < (n - 1) as f64) {
+                    continue;
+                }
+                let sols: Vec<f32> = c.iter().map(|p| relief(p.0, p.1)).collect();
+                let (bas, haut) = (sols.iter().cloned().fold(f32::MAX, f32::min), sols.iter().cloned().fold(f32::MIN, f32::max));
+                let moyen = sols.iter().sum::<f32>() / sols.len() as f32;
+                let contour = c.iter().map(|p| [(origine() + p.0 * pas) as f32, (origine() + p.1 * pas) as f32]).collect();
+                batiments.push(Batiment { genre, pied: bas - 1.0, toit: (moyen + hauteur).max(haut + 2.0), contour });
+            }
+        }
+    }
+    println!("{} bâtiments", batiments.len());
+    let r = Reel::new(nom, lat, lon, x0, y0, pas, niveau, &h, &eau, routes, batiments);
     std::fs::write(&sortie, r.octets()).unwrap();
     println!("{} : {} Mo", sortie.display(), std::fs::metadata(&sortie).unwrap().len() / 1_000_000);
 }
@@ -297,6 +339,32 @@ fn genre_route(tags: Option<&J>) -> Option<(u8, f32)> {
     };
     let largeur = tag("width").and_then(|w| w.trim_end_matches(" m").trim_end_matches('m').trim().replace(',', ".").parse::<f32>().ok()).filter(|w| (0.5..60.0).contains(w)).or_else(|| tag("lanes").and_then(|l| l.parse::<f32>().ok()).filter(|l| (1.0..12.0).contains(l)).map(|l| l * 3.25 + 1.0)).unwrap_or(largeur);
     Some((genre, largeur))
+}
+
+/// Le genre et la hauteur (m) d'un bâtiment d'après ses étiquettes OSM : `height`, sinon
+/// ses étages (`building:levels`, 3 m chacun, plus les étages du toit), sinon selon son
+/// genre. Rien pour un toit seul (un auvent) ou ce qui n'est pas un bâtiment.
+fn genre_bati(tags: Option<&J>) -> Option<(u8, f32)> {
+    use sage::reel::{ANNEXE, EDIFICE, IMMEUBLE, INDUSTRIEL, MAISON};
+    let tag = |k: &str| tags.and_then(|t| t.get(k)).and_then(J::txt);
+    let b = tag("building")?;
+    if ["no", "roof", "canopy", "carport", "construction", "proposed", "demolished", "ruins"].contains(&b) {
+        return None;
+    }
+    let (genre, defaut) = match b {
+        "house" | "detached" | "semidetached_house" | "terrace" | "bungalow" | "farm" | "residential" => (MAISON, 7.0),
+        "apartments" | "dormitory" | "hotel" => (IMMEUBLE, 16.0),
+        "industrial" | "warehouse" | "retail" | "commercial" | "supermarket" | "office" | "manufacture" | "hangar" | "barn" | "farm_auxiliary" | "greenhouse" | "service" | "transportation" | "train_station" => (INDUSTRIEL, 8.0),
+        "church" | "cathedral" | "chapel" | "religious" | "public" | "civic" | "government" | "school" | "university" | "college" | "hospital" | "museum" | "townhall" | "castle" | "sports_hall" | "stadium" => (EDIFICE, 14.0),
+        "garage" | "garages" | "shed" | "hut" | "kiosk" | "toilets" | "cabin" | "storage_tank" | "bunker" => (ANNEXE, 3.0),
+        _ => (IMMEUBLE, 9.0),
+    };
+    let nombre = |k: &str| tag(k).and_then(|v| v.trim_end_matches(" m").trim_end_matches('m').trim().replace(',', ".").parse::<f32>().ok());
+    let h = nombre("height")
+        .filter(|h| (1.0..400.0).contains(h))
+        .or_else(|| nombre("building:levels").filter(|l| (0.5..100.0).contains(l)).map(|l| l * 3.0 + nombre("roof:levels").unwrap_or(0.0).clamp(0.0, 4.0) * 2.0 + 1.0))
+        .unwrap_or(defaut);
+    Some((genre, h))
 }
 
 /// Les morceaux d'une relation mis bout à bout en anneaux fermés.

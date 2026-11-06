@@ -199,6 +199,19 @@ pub struct Contenu {
 /// identifiant.
 pub trait Source: Send {
     fn tuile(&self, i: i32, j: i32) -> Contenu;
+
+    /// Les bâtiments de la tuile, s'il y en a, qui ne se retouchent pas : leurs sommets
+    /// (format `Statique`, repère de la tuile) et leurs triangles pour les collisions.
+    /// Ils viennent toujours de la source, que la tuile soit relue du dépôt ou non.
+    fn bati(&self, _i: i32, _j: i32) -> Option<(Vec<f32>, Vec<[[f32; 3]; 3]>)> {
+        None
+    }
+}
+
+/// L'identifiant du maillage des bâtiments d'une tuile (hors « tuile/ » : la topologie ne
+/// les montre pas).
+pub fn ident_bati(i: i32, j: i32) -> String {
+    format!("bati/{i}/{j}")
 }
 
 /// L'identifiant stable d'une tuile.
@@ -219,6 +232,8 @@ pub struct Chargee {
     loin: Option<MaillageId>,
     /// Lue d'un fichier plutôt que générée.
     pub lue: bool,
+    /// Ses bâtiments, s'il y en a.
+    pub bati: Option<Entite>,
 }
 
 /// Les tuiles chargées, et comment les choisir. Une tuile modifiée est écrite tout
@@ -293,6 +308,10 @@ impl Tuiles {
             maillages.ote(&id);
             maillages.ote(&format!("{id}/loin"));
             monde.detruire(c.terrain);
+            if let Some(b) = c.bati {
+                maillages.ote(&ident_bati(k.0, k.1));
+                monde.detruire(b);
+            }
             for e in self.objets_de(monde, k) {
                 monde.detruire(e);
             }
@@ -364,7 +383,16 @@ impl Tuiles {
             let p = [o[0] + el.pos[0], el.pos[1], o[2] + el.pos[2]];
             placer(monde, maillages, e, el.objet, Lieu::en(p, el.cap));
         }
-        self.chargees.insert((i, j), Chargee { terrain: t, couleurs: Arc::new(c.couleurs), proche, loin, lue });
+        // Les bâtiments : une entité de plus, son maillage et ses murs
+        let bati = self.source.bati(i, j).map(|(v, tri)| {
+            let b = monde.creer(&ident_bati(i, j));
+            let k = maillages.mettre(&ident_bati(i, j), Format::Statique, Arc::new(v));
+            monde.lieu.mettre(b, Lieu::en(o, 0.0));
+            monde.rendu.mettre(b, Rendu { maillage: k, local: math::scale(1.0) });
+            monde.obstacles.mettre(b, vec![super::physique::Forme::Triangles(Arc::new(super::physique::Triangles::new(tri)))]);
+            b
+        });
+        self.chargees.insert((i, j), Chargee { terrain: t, couleurs: Arc::new(c.couleurs), proche, loin, lue, bati });
     }
 
     /// Les objets dont la base est dans la tuile `k`.
@@ -512,6 +540,10 @@ impl Tuiles {
             maillages.ote(&id);
             maillages.ote(&format!("{id}/loin"));
             monde.detruire(c.terrain);
+            if let Some(b) = c.bati {
+                maillages.ote(&ident_bati(k.0, k.1));
+                monde.detruire(b);
+            }
         }
         let objets: Vec<Entite> = monde.objet.iter().map(|(e, _)| e).collect();
         for e in objets {

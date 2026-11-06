@@ -1716,7 +1716,7 @@ mod tests {
         let n = crate::reel::cote(pas);
         let h: Vec<f32> = (0..n * n).map(|i| if i % n < n / 2 { -2.0 } else { 10.0 }).collect();
         let eau: Vec<bool> = (0..n * n).map(|i| i % n < n / 2).collect();
-        let r = crate::reel::Reel::new("Essai", 49.0, 1.0, 0.0, 0.0, pas, 3.0, &h, &eau, Vec::new());
+        let r = crate::reel::Reel::new("Essai", 49.0, 1.0, 0.0, 0.0, pas, 3.0, &h, &eau, Vec::new(), Vec::new());
         a.charger("essai.reel", &r.octets());
         assert_eq!(a.campagne.mer(), 3.0);
         let p = a.lieu().pos;
