@@ -108,7 +108,9 @@ pub fn bati(c: &Campagne) -> Vec<f32> {
                 v.extend_from_slice(&co);
             }
         };
-        let haut = pied.map(|(u, w)| coin(u, w, b.toit));
+        // Un toit en pente : le bloc à mi-hauteur du toit
+        let sommet = (b.toit + b.egout) / 2.0;
+        let haut = pied.map(|(u, w)| coin(u, w, sommet));
         // Le toit, vers le haut (sens des triangles d'après sa normale)
         let e = |a: [f32; 3], b: [f32; 3], c: [f32; 3]| (b[2] - a[2]) * (c[0] - a[0]) - (b[0] - a[0]) * (c[2] - a[2]);
         let t = if e(haut[0], haut[1], haut[2]) > 0.0 { haut } else { [haut[0], haut[3], haut[2], haut[1]] };
@@ -117,7 +119,7 @@ pub fn bati(c: &Campagne) -> Vec<f32> {
         for i in 0..4 {
             let (a, b2) = (pied[i], pied[(i + 1) % 4]);
             let (p, q) = (coin(a.0, a.1, b.pied), coin(b2.0, b2.1, b.pied));
-            let (pp, qq) = (coin(a.0, a.1, b.toit), coin(b2.0, b2.1, b.toit));
+            let (pp, qq) = (coin(a.0, a.1, sommet), coin(b2.0, b2.1, sommet));
             let m = coin(um, wm, 0.0);
             let mut n = [q[2] - p[2], 0.0, p[0] - q[0]];
             let l = n[0].hypot(n[2]).max(1e-6);
@@ -162,8 +164,8 @@ mod tests {
         let n = cote(pas);
         let carre = |x: f32, l: f32| vec![[x, 0.0], [x + l, 0.0], [x + l, l], [x, l]];
         let b = vec![
-            Batiment { genre: MAISON, pied: -1.0, toit: 6.0, contour: carre(0.0, 8.0) },
-            Batiment { genre: MAISON, pied: -1.0, toit: 9.0, contour: carre(100.0, 20.0) },
+            Batiment::plat(MAISON, -1.0, 6.0, carre(0.0, 8.0)),
+            Batiment::plat(MAISON, -1.0, 9.0, carre(100.0, 20.0)),
         ];
         let r = Reel::new("Essai", 49.0, 1.0, 0.0, 0.0, pas, -50.0, &vec![0.0; n * n], &vec![false; n * n], Vec::new(), b, Vec::new());
         let v = bati(&Campagne::reelle(std::sync::Arc::new(r)));

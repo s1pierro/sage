@@ -6,6 +6,18 @@ Il vise un monde ouvert, avec d'autres valeurs que la violence.
 
 ![Le mannequin marche dans le décor de S.A.G.E.](docs/apercu.png)
 
+## Version 0.25 : les toits
+
+- Les bâtiments du lieu réel ont leur vrai toit : la hauteur et la forme sont mesurées
+  par le LiDAR HD de l'IGN (le modèle numérique de hauteur, à 50 cm). Un toit peut
+  être plat, à deux pans, en croupe ou en appentis ; il a son sens, son égout et son
+  faîtage. Les murs montent jusqu'au toit, pignons compris.
+- Un bâtiment absent des mesures (trop récent) garde la hauteur d'OSM, avec deux pans à
+  40° s'il est petit.
+- L'outil télécharge le MNH par blocs de 250 m là où il y a des bâtiments (environ
+  3,5 Go pour Rouen, gardés dans le cache), quatre à la fois, et affiche l'avancement
+  (aussi dans `<sortie>.cache/mnh/avancement.txt`).
+
 ## Version 0.24 : les bois au loin
 
 - Au-delà des tuiles chargées, les bois du lieu réel ont du volume : une canopée vert

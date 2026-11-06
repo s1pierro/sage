@@ -30,10 +30,10 @@ use crate::moteur::tuiles::DEMI_CARTE;
 use crate::moteur::TAILLE;
 
 const MAGIQUE: &[u8; 8] = b"SAGEREEL";
-const FORMAT: u32 = 5;
+const FORMAT: u32 = 6;
 
 /// Le texte à citer.
-pub const SOURCES: &str = "Relief © IGN (RGE ALTI) · eau, routes, bâtiments et occupation du sol © les contributeurs OpenStreetMap";
+pub const SOURCES: &str = "Relief et hauteurs © IGN (RGE ALTI, LiDAR HD) · eau, routes, bâtiments et occupation du sol © les contributeurs OpenStreetMap";
 
 /// Les classes d'occupation du sol (0 : rien de dit, de l'herbe).
 pub const BOIS: u8 = 1;
@@ -89,14 +89,24 @@ pub fn teintes_bati(genre: u8) -> ([f32; 3], [f32; 3]) {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Batiment {
     pub genre: u8,
-    /// Le pied des murs (un peu sous le sol) et le toit, en hauteurs absolues.
+    /// Le pied des murs (un peu sous le sol), le haut du toit (le faîtage) et l'égout, en
+    /// hauteurs absolues.
     pub pied: f32,
     pub toit: f32,
+    pub egout: f32,
+    /// La forme du toit (`toits::PLAT`…) et son axe (radians, dans le plan x, z).
+    pub forme: u8,
+    pub axe: f32,
     /// Le contour, x, z du jeu, sans répéter le premier point.
     pub contour: Vec<[f32; 2]>,
 }
 
 impl Batiment {
+    /// Un bâtiment à toit plat.
+    pub fn plat(genre: u8, pied: f32, toit: f32, contour: Vec<[f32; 2]>) -> Batiment {
+        Batiment { genre, pied, toit, egout: toit, forme: crate::toits::PLAT, axe: 0.0, contour }
+    }
+
     /// Le centre du contour (la moyenne de ses points).
     pub fn centre(&self) -> [f32; 2] {
         let n = self.contour.len().max(1) as f32;
@@ -422,10 +432,9 @@ impl Reel {
         }
         for &k in self.par_tuile.get(&(i, j)).map_or(&[][..], |l| l.as_slice()) {
             let b = &self.batiments[k as usize];
-            let c: Vec<[f32; 2]> = b.contour.iter().map(|p| [p[0] - ox, p[1] - oz]).collect();
             let (murs, toit) = teintes_bati(b.genre);
-            let sens = aire(&c).signum();
             let mut tri = |p: [[f32; 3]; 3], n: [f32; 3], couleur: [f32; 3]| {
+                let p = p.map(|q| [q[0] - ox, q[1], q[2] - oz]);
                 for q in p {
                     v.extend_from_slice(&q);
                     v.extend_from_slice(&n);
@@ -433,33 +442,7 @@ impl Reel {
                 }
                 t.push(p);
             };
-            // Les murs, tournés vers dehors (le contour peut aller dans les deux sens)
-            for s in 0..c.len() {
-                let (a, d) = (c[s], c[(s + 1) % c.len()]);
-                let (dx, dz) = (d[0] - a[0], d[1] - a[1]);
-                let l = dx.hypot(dz);
-                if l < 1e-3 {
-                    continue;
-                }
-                let n = [dz / l * sens, 0.0, -dx / l * sens];
-                let (a0, a1, d0, d1) = ([a[0], b.pied, a[1]], [a[0], b.toit, a[1]], [d[0], b.pied, d[1]], [d[0], b.toit, d[1]]);
-                if sens > 0.0 {
-                    tri([a0, a1, d1], n, murs);
-                    tri([a0, d1, d0], n, murs);
-                } else {
-                    tri([a0, d1, a1], n, murs);
-                    tri([a0, d0, d1], n, murs);
-                }
-            }
-            // Le toit, plat, tourné vers le haut
-            for [x, y, z] in trianguler(&c) {
-                let p = [x, y, z].map(|k| [c[k][0], b.toit, c[k][1]]);
-                if sens > 0.0 {
-                    tri([p[0], p[2], p[1]], [0.0, 1.0, 0.0], toit);
-                } else {
-                    tri(p, [0.0, 1.0, 0.0], toit);
-                }
-            }
+            crate::toits::monter(b, murs, toit, &mut tri);
         }
         (!v.is_empty()).then_some((v, t))
     }
@@ -629,6 +612,9 @@ impl Reel {
             o.push(b.genre);
             o.extend_from_slice(&b.pied.to_le_bytes());
             o.extend_from_slice(&b.toit.to_le_bytes());
+            o.push(b.forme);
+            o.extend_from_slice(&b.egout.to_le_bytes());
+            o.extend_from_slice(&b.axe.to_le_bytes());
             o.extend_from_slice(&(b.contour.len() as u32).to_le_bytes());
             for p in &b.contour {
                 o.extend_from_slice(&p[0].to_le_bytes());
@@ -707,9 +693,10 @@ impl Reel {
                 let genre = prendre(1)?[0];
                 let pied = f32_(prendre(4)?);
                 let toit = f32_(prendre(4)?);
+                let (forme, egout, axe) = if format >= 6 { (prendre(1)?[0], f32_(prendre(4)?), f32_(prendre(4)?)) } else { (crate::toits::PLAT, toit, 0.0) };
                 let m = u32_(prendre(4)?) as usize;
                 let contour = prendre(m * 8)?.chunks(8).map(|c| [f32_(&c[0..4]), f32_(&c[4..8])]).collect();
-                batiments.push(Batiment { genre, pied, toit, contour });
+                batiments.push(Batiment { genre, pied, toit, egout, forme, axe, contour });
             }
         }
         let ponts = if format >= 4 { lire_routes!() } else { Vec::new() };
@@ -778,7 +765,7 @@ mod tests {
         let pas = 64.0;
         let n = cote(pas);
         for c in [l.clone(), l.iter().rev().cloned().collect()] {
-            let b = Batiment { genre: MAISON, pied: -1.0, toit: 7.0, contour: c };
+            let b = Batiment::plat(MAISON, -1.0, 7.0, c);
             let r = Reel::new("Essai", 49.0, 1.0, 0.0, 0.0, pas, -50.0, &vec![0.0; n * n], &vec![false; n * n], Vec::new(), vec![b], Vec::new());
             assert!(r.bati(1, 0).is_none());
             let (v, t) = r.bati(0, 0).expect("dans la tuile (0, 0)");

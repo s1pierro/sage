@@ -879,3 +879,48 @@ sur une grille qui déborde d'un point).
   et bois) prend le trou du relief lointain : il s'efface sous les tuiles chargées.
   Le préfixe `bati/` le cache en topologie.
 
+## 24. Les toits (0.25)
+
+- **Données** : `Batiment` gagne `egout`, `forme` (`toits::PLAT`, `DEUX_PANS`,
+  `CROUPE`, `APPENTIS`) et `axe`. `toit` devient le faîtage. Le format SAGEREEL 6 les
+  écrit après `toit`. Les formats d'avant se lisent avec des toits plats.
+- **Géométrie** (`src/toits.rs`) :
+  - **Cadre** : le rectangle orienté selon l'axe qui enveloppe le contour (`Cadre`,
+    demi-côtés `a` le long et `b` en travers).
+  - **Surface** : le plus bas de quelques plans (`plans`). Deux pans : faîtage le long
+    de l'axe, au milieu du cadre. Croupe : égout + pente × distance au bord du cadre,
+    soit quatre plans. Appentis : un plan qui monte en travers (l'axe tourné d'un
+    demi-tour pour l'autre sens).
+  - **Montage** (`monter`) : chaque côté du contour est coupé là où le plan le plus bas
+    change, et le mur monte jusqu'au toit, ce qui fait les pignons. Chaque pan est le
+    contour découpé (Sutherland-Hodgman) par les demi-plans où il est le plus bas, puis
+    triangulé (`trianguler`). `Reel::bati` l'utilise pour les murs, les toits et les
+    collisions.
+- **Mesure** (`toits::ajuster`) :
+  - **Absence** : si la médiane des hauteurs est sous 2 m, le bâtiment est absent.
+  - **Modèles essayés**, sur l'axe du plus long côté et l'axe perpendiculaire : deux
+    pans (h = faîtage − pente × |w|), appentis (h linéaire en w) et croupe
+    (h = égout + pente × distance au bord du cadre).
+  - **Ajustement** : droite par moindres carrés, refaite sans les points à plus de
+    2,5 écarts médians (cheminées, arbres). L'erreur est la médiane des écarts.
+  - **Choix** : le meilleur modèle, avec des pentes de 10° à 68° et plus de 0,8 m de
+    toit, est pris s'il fait mieux que 75 % de l'erreur d'un toit plat ; sinon le toit
+    est plat à la médiane.
+- **Outil** :
+  - **Blocs** : les blocs de 250 m couvrant les emprises sont téléchargés en WMS
+    (`IGNF_LIDAR-HD_MNH_ELEVATION.ELEVATIONGRIDCOVERAGE.LAMB93`, 500 × 500 points
+    BIL 32 bits), par quatre fils, chaque bloc essayé quatre fois. L'avancement
+    s'affiche toutes les 10 s, dans la console et dans `mnh/avancement.txt`.
+  - **Mesures** : prises aux centres des points à plus de 60 cm des murs. Leur
+    hauteur absolue est le relief plus le MNH, ramenée au sol moyen de l'emprise. Les mesures à moins de 1,5 m du sol
+    (jardins, cours : les contours d'OSM sont souvent décalés d'un ou deux mètres) sont
+    écartées. Avant, le relevé est recalé sur le contour : de tous les décalages jusqu'à
+    2 m (pas de 50 cm), celui qui met le plus de points bâtis (≥ 1,5 m, grille de 1 m)
+    dans le contour, moins 1 % par mètre de décalage.
+  - **Lecture** : les blocs restent en mémoire, les 64 derniers lus, et les bâtiments
+    sont traités dans l'ordre de leur bloc.
+  - **Sans mesure** (`par_defaut`) : deux pans à 40° le long du plus long côté, d'au
+    plus 40 % de la hauteur ; toit plat pour les industriels, les emprises de plus de
+    1 500 m² et les immeubles de plus de 15 m.
+- Les blocs lointains prennent la mi-hauteur du toit.
+

@@ -20,6 +20,14 @@
 //! bas du sol sous le contour (un mètre dessous), le toit à la hauteur au-dessus du sol
 //! moyen. La requête se fait en neuf morceaux.
 //!
+//! Les toits : le MNH LiDAR HD de l'IGN (la hauteur au-dessus du sol, à 50 cm), par blocs
+//! de 250 m là où il y a des bâtiments (4 téléchargements à la fois, l'avancement affiché
+//! et écrit dans `<sortie>.cache/mnh/avancement.txt`). Dans chaque contour, les mesures
+//! à plus de 60 cm des murs et à plus de 1,5 m du sol, le relevé recalé sur le contour
+//! (jusqu'à 2 m), donnent la forme du toit (plat, deux pans, croupe, appentis),
+//! son axe, l'égout et le faîtage (`toits::ajuster`). Un bâtiment sans mesure (neuf, ou
+//! hors des blocs) garde la hauteur d'OSM, avec deux pans à 40° sur les maisons.
+//!
 //! L'occupation du sol : `landuse=*`, les bois, prés et landes (`natural=*`), les parcs
 //! et terrains (`leisure=*`), en cinq classes (bois, prés et parcs, champs, quartiers
 //! habités, zones d'activité), tramées sur une grille de 8 m ; là où elles se
@@ -36,6 +44,7 @@
 use gda::json::{self, J};
 use sage::campagne::DEPART;
 use sage::reel::{cote, lambert93, origine, Batiment, Reel, Route};
+use sage::toits;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -323,6 +332,7 @@ fn main() {
     println!("{} routes, {:.0} km", routes.len(), longueur / 1000.0);
     // 5. Les bâtiments, en neuf morceaux (une réponse entière serait trop lourde à lire)
     let mut batiments = Vec::new();
+    let mut sols_bati: Vec<(f32, f32)> = Vec::new();
     let mut vus = std::collections::HashSet::new();
     for (bi, bj) in (0..3).flat_map(|j| (0..3).map(move |i| (i, j))) {
         let (la0, lo0) = (cadre.0 + (cadre.2 - cadre.0) * bj as f64 / 3.0, cadre.1 + (cadre.3 - cadre.1) * bi as f64 / 3.0);
@@ -353,11 +363,105 @@ fn main() {
                 let (bas, haut) = (sols.iter().cloned().fold(f32::MAX, f32::min), sols.iter().cloned().fold(f32::MIN, f32::max));
                 let moyen = sols.iter().sum::<f32>() / sols.len() as f32;
                 let contour = c.iter().map(|p| [(origine() + p.0 * pas) as f32, (origine() + p.1 * pas) as f32]).collect();
-                batiments.push(Batiment { genre, pied: bas - 1.0, toit: (moyen + hauteur).max(haut + 2.0), contour });
+                batiments.push(par_defaut(genre, bas - 1.0, (moyen + hauteur).max(haut + 2.0), haut, contour));
+                sols_bati.push((moyen, haut));
             }
         }
     }
     println!("{} bâtiments", batiments.len());
+    // 5 bis. Les toits, d'après le MNH LiDAR HD
+    let dossier = cache.join("mnh");
+    std::fs::create_dir_all(&dossier).unwrap();
+    let mut blocs = std::collections::BTreeSet::new();
+    for b in &batiments {
+        let (mut x0b, mut z0b, mut x1b, mut z1b) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+        for p in &b.contour {
+            (x0b, z0b, x1b, z1b) = (x0b.min(p[0]), z0b.min(p[1]), x1b.max(p[0]), z1b.max(p[1]));
+        }
+        for j in (z0b as f64 / BLOC).floor() as i32..=(z1b as f64 / BLOC).floor() as i32 {
+            for i in (x0b as f64 / BLOC).floor() as i32..=(x1b as f64 / BLOC).floor() as i32 {
+                blocs.insert((i, j));
+            }
+        }
+    }
+    telecharger_mnh(&dossier, &blocs.iter().cloned().collect::<Vec<_>>(), x0, y0);
+    let mut mnh = Mnh { dossier: dossier.clone(), blocs: Default::default(), ordre: Default::default() };
+    let mut ordre: Vec<usize> = (0..batiments.len()).collect();
+    ordre.sort_by_key(|&k| {
+        let c = batiments[k].centre();
+        ((c[1] as f64 / BLOC).floor() as i32, (c[0] as f64 / BLOC).floor() as i32)
+    });
+    let mut formes = [0usize; 5];
+    for (fait, &k) in ordre.iter().enumerate() {
+        if fait % 20000 == 0 {
+            println!("toits : {fait}/{}", ordre.len());
+        }
+        let b = &batiments[k];
+        let (moyen, haut) = sols_bati[k];
+        let c = &b.contour;
+        let (mut x0b, mut z0b, mut x1b, mut z1b) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+        for p in c {
+            (x0b, z0b, x1b, z1b) = (x0b.min(p[0]), z0b.min(p[1]), x1b.max(p[0]), z1b.max(p[1]));
+        }
+        // Le recalage : le contour d'OSM est souvent décalé d'un ou deux mètres du relevé.
+        // Le décalage (jusqu'à 2 m, par pas de 50 cm) qui met le plus de points bâtis
+        // (au moins 1,5 m) dans le contour, à 1 m près ; à égalité, le plus petit
+        let mut dedans = Vec::new();
+        let mut z = z0b + 0.5;
+        while z < z1b {
+            let mut x = x0b + 0.5;
+            while x < x1b {
+                if dans_contour(c, x, z, 0.6) {
+                    dedans.push((x, z));
+                }
+                x += 1.0;
+            }
+            z += 1.0;
+        }
+        let mut decalage = (0.0f32, 0.0f32);
+        if !dedans.is_empty() {
+            let mut mieux = (-1.0f32, 0.0f32);
+            for dz in -4..=4 {
+                for dx in -4..=4 {
+                    let (ddx, ddz) = (dx as f32 * 0.5, dz as f32 * 0.5);
+                    let bati = dedans.iter().filter(|(x, z)| mnh.lire(x + ddx, z + ddz).is_some_and(|h| h >= 1.5)).count() as f32 / dedans.len() as f32;
+                    let d = ddx.hypot(ddz);
+                    let note = bati - 0.01 * d;
+                    if note > mieux.0 + 1e-6 || ((note - mieux.0).abs() <= 1e-6 && d < mieux.1) {
+                        mieux = (note, d);
+                        decalage = (ddx, ddz);
+                    }
+                }
+            }
+        }
+        // Les mesures, aux centres des points du MNH, dans le contour à 60 cm des murs
+        let mut m = Vec::new();
+        let (a0, a1) = ((x0b as f64 / RES).floor() as i64, (x1b as f64 / RES).ceil() as i64);
+        let (b0, b1) = ((z0b as f64 / RES).floor() as i64, (z1b as f64 / RES).ceil() as i64);
+        for bz in b0..b1 {
+            for ax in a0..a1 {
+                let (x, z) = (((ax as f64 + 0.5) * RES) as f32, ((bz as f64 + 0.5) * RES) as f32);
+                if !dans_contour(c, x, z, 0.6) {
+                    continue;
+                }
+                // Plus bas que 1,5 m : le jardin ou la cour (le contour d'OSM est souvent
+                // décalé d'un ou deux mètres), pas le toit
+                if let Some(h) = mnh.lire(x + decalage.0, z + decalage.1).filter(|h| *h >= 1.5) {
+                    let sol = relief(((x as f64) - origine()) / pas, ((z as f64) - origine()) / pas);
+                    m.push([x, z, sol + h - moyen]);
+                }
+            }
+        }
+        if let Some((forme, egout, toit, axe)) = toits::ajuster(c, &m) {
+            let egout = (moyen + egout).max(haut + 1.0);
+            let b = &mut batiments[k];
+            (b.forme, b.egout, b.toit, b.axe) = (forme, egout, (moyen + toit).max(egout), axe);
+            formes[forme as usize] += 1;
+        } else {
+            formes[4] += 1;
+        }
+    }
+    println!("toits mesurés : {} plats, {} à deux pans, {} en croupe, {} en appentis ; {} sans mesure", formes[0], formes[1], formes[2], formes[3], formes[4]);
     // 6. L'occupation du sol, en neuf morceaux, tramée classe après classe
     let m = sage::reel::cote_sol(n);
     let mut surfaces_sol: Vec<(u8, Vec<Vec<(f64, f64)>>)> = Vec::new();
@@ -483,6 +587,148 @@ fn genre_route(tags: Option<&J>) -> Option<(u8, f32, bool)> {
     };
     let largeur = tag("width").and_then(|w| w.trim_end_matches(" m").trim_end_matches('m').trim().replace(',', ".").parse::<f32>().ok()).filter(|w| (0.5..60.0).contains(w)).or_else(|| tag("lanes").and_then(|l| l.parse::<f32>().ok()).filter(|l| (1.0..12.0).contains(l)).map(|l| l * 3.25 + 1.0)).unwrap_or(largeur);
     Some((genre, largeur, pont))
+}
+
+/// Un bâtiment sans mesure : la hauteur d'OSM ; deux pans à 40° (au plus 40 % de la
+/// hauteur) sur les maisons, annexes, édifices et petits immeubles, plat sinon.
+fn par_defaut(genre: u8, pied: f32, toit: f32, haut: f32, contour: Vec<[f32; 2]>) -> Batiment {
+    use sage::reel::{aire, INDUSTRIEL, IMMEUBLE};
+    let hauteur = toit - haut;
+    if genre == INDUSTRIEL || aire(&contour).abs() > 1500.0 || (genre == IMMEUBLE && hauteur > 15.0) {
+        return Batiment::plat(genre, pied, toit, contour);
+    }
+    let axe = toits::axe_long(&contour);
+    let k = toits::Cadre::new(&contour, axe);
+    let pente = (0.4 * hauteur).min(40f32.to_radians().tan() * k.b);
+    Batiment { genre, pied, toit, egout: (toit - pente).max(haut + 1.5).min(toit), forme: toits::DEUX_PANS, axe, contour }
+}
+
+/// Le point (x, z) est-il dans le contour, à plus de `marge` mètres de ses côtés ?
+fn dans_contour(c: &[[f32; 2]], x: f32, z: f32, marge: f32) -> bool {
+    let mut dedans = false;
+    for e in 0..c.len() {
+        let (a, b) = (c[e], c[(e + 1) % c.len()]);
+        let (dx, dz) = (b[0] - a[0], b[1] - a[1]);
+        let l2 = dx * dx + dz * dz;
+        let t = if l2 > 0.0 { (((x - a[0]) * dx + (z - a[1]) * dz) / l2).clamp(0.0, 1.0) } else { 0.0 };
+        if (x - a[0] - dx * t).hypot(z - a[1] - dz * t) < marge {
+            return false;
+        }
+        if (a[1] > z) != (b[1] > z) && x < a[0] + (z - a[1]) / (b[1] - a[1]) * (b[0] - a[0]) {
+            dedans = !dedans;
+        }
+    }
+    dedans
+}
+
+/// Côté d'un bloc du MNH (m), sa résolution (m) et son nombre de points par côté.
+const BLOC: f64 = 250.0;
+const RES: f64 = 0.5;
+const POINTS: usize = 500;
+
+fn fichier_mnh(dossier: &Path, (i, j): (i32, i32)) -> PathBuf {
+    dossier.join(format!("{i}_{j}.bil"))
+}
+
+fn mnh_present(f: &Path) -> bool {
+    std::fs::metadata(f).is_ok_and(|m| m.len() == (POINTS * POINTS * 4) as u64)
+}
+
+/// Télécharge les blocs du MNH qui manquent, quatre à la fois, en affichant l'avancement
+/// (et en l'écrivant dans `avancement.txt`). Un bloc qui échoue quatre fois manque : ses
+/// bâtiments gardent leur toit par défaut.
+fn telecharger_mnh(dossier: &Path, blocs: &[(i32, i32)], x0: f64, y0: f64) {
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering::Relaxed};
+    use std::sync::Mutex;
+    let taille = (POINTS * POINTS * 4) as u64;
+    let reste: Vec<(i32, i32)> = blocs.iter().cloned().filter(|k| !mnh_present(&fichier_mnh(dossier, *k))).collect();
+    let total = reste.len();
+    println!("MNH : {} blocs de 250 m, {} déjà là, {:.2} Go à télécharger", blocs.len(), blocs.len() - total, (total as u64 * taille) as f64 / 1e9);
+    if total == 0 {
+        return;
+    }
+    let file = Mutex::new(reste);
+    let (faits, octets, rates) = (AtomicUsize::new(0), AtomicU64::new(0), AtomicUsize::new(0));
+    let debut = std::time::Instant::now();
+    let avancement = dossier.join("avancement.txt");
+    std::thread::scope(|s| {
+        for _ in 0..4 {
+            s.spawn(|| loop {
+                let Some((i, j)) = file.lock().unwrap().pop() else { break };
+                let (minx, maxy) = (x0 + i as f64 * BLOC, y0 - j as f64 * BLOC);
+                let url = format!(
+                    "https://data.geopf.fr/wms-r/wms?SERVICE=WMS&VERSION=1.3.0&REQUEST=GetMap&LAYERS=IGNF_LIDAR-HD_MNH_ELEVATION.ELEVATIONGRIDCOVERAGE.LAMB93&STYLES=&FORMAT=image/x-bil;bits=32&CRS=EPSG:2154&BBOX={minx},{},{},{maxy}&WIDTH={POINTS}&HEIGHT={POINTS}",
+                    maxy - BLOC,
+                    minx + BLOC
+                );
+                let f = fichier_mnh(dossier, (i, j));
+                let mut ok = false;
+                for essai in 0..4 {
+                    if curl(&[&url], &f) && mnh_present(&f) {
+                        ok = true;
+                        break;
+                    }
+                    let _ = std::fs::remove_file(&f);
+                    std::thread::sleep(std::time::Duration::from_secs(2 << essai));
+                }
+                if ok {
+                    octets.fetch_add(taille, Relaxed);
+                } else {
+                    rates.fetch_add(1, Relaxed);
+                }
+                faits.fetch_add(1, Relaxed);
+            });
+        }
+        // L'avancement, toutes les dix secondes
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(10));
+            let (f, o, r) = (faits.load(Relaxed), octets.load(Relaxed), rates.load(Relaxed));
+            let t = debut.elapsed().as_secs_f64();
+            let encore = if f > 0 { t / f as f64 * (total - f) as f64 / 60.0 } else { f64::NAN };
+            let ligne = format!(
+                "MNH : {f}/{total} blocs ({:.0} %), {:.2} Go sur {:.2}, {:.1} Mo/s, encore ~{encore:.0} min{}",
+                100.0 * f as f64 / total as f64,
+                o as f64 / 1e9,
+                (total as u64 * taille) as f64 / 1e9,
+                o as f64 / 1e6 / t,
+                if r > 0 { format!(", {r} en échec") } else { String::new() }
+            );
+            println!("{ligne}");
+            let _ = std::fs::write(&avancement, format!("{ligne}\n"));
+            if f == total {
+                break;
+            }
+        }
+    });
+}
+
+/// Les blocs du MNH lus, les 64 derniers gardés en mémoire.
+struct Mnh {
+    dossier: PathBuf,
+    blocs: std::collections::HashMap<(i32, i32), Option<Vec<f32>>>,
+    ordre: std::collections::VecDeque<(i32, i32)>,
+}
+
+impl Mnh {
+    /// La hauteur au-dessus du sol en (x, z) du jeu ; rien hors des blocs ou sans mesure.
+    fn lire(&mut self, x: f32, z: f32) -> Option<f32> {
+        let k = ((x as f64 / BLOC).floor() as i32, (z as f64 / BLOC).floor() as i32);
+        if !self.blocs.contains_key(&k) {
+            if self.ordre.len() >= 64 {
+                let vieux = self.ordre.pop_front().unwrap();
+                self.blocs.remove(&vieux);
+            }
+            let f = fichier_mnh(&self.dossier, k);
+            let v = std::fs::read(&f).ok().filter(|o| o.len() == POINTS * POINTS * 4).map(|o| o.chunks(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect());
+            self.blocs.insert(k, v);
+            self.ordre.push_back(k);
+        }
+        let v = self.blocs[&k].as_ref()?;
+        let c = ((x as f64 - k.0 as f64 * BLOC) / RES).floor().clamp(0.0, (POINTS - 1) as f64) as usize;
+        let r = ((z as f64 - k.1 as f64 * BLOC) / RES).floor().clamp(0.0, (POINTS - 1) as f64) as usize;
+        let h = v[r * POINTS + c];
+        (h > -100.0 && h < 500.0).then_some(h)
+    }
 }
 
 /// La classe d'occupation du sol d'une surface d'après ses étiquettes OSM.

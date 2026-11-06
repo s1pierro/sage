@@ -23,6 +23,7 @@ pub mod carte;
 pub mod erosion;
 pub mod lointain;
 pub mod reel;
+pub mod toits;
 pub mod vegetation;
 pub mod catalogue;
 pub mod draw;
