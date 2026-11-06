@@ -159,6 +159,121 @@ pub fn appliquer(monde: &mut Monde, maillages: &mut Maillages, tuiles: &mut Tuil
     avant
 }
 
+/// Un terrassement : une plateforme de niveau sous l'emprise d'un objet, en remblai,
+/// et la fosse d'un sous-sol si l'on en veut un.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Terrasse {
+    /// Le lieu de l'objet (au repère du monde) et son cap.
+    pub centre: [f32; 3],
+    pub cap: f32,
+    /// Son emprise dans son repère : (x, z) bas et haut.
+    pub lo: [f32; 2],
+    pub hi: [f32; 2],
+    /// La plateforme déborde de l'emprise de tant, de chaque côté.
+    pub marge: f32,
+    /// La pente du talus, en degrés.
+    pub talus: f32,
+    /// La profondeur de la fosse sous la plateforme, s'il y a un sous-sol.
+    pub sous_sol: Option<f32>,
+}
+
+/// Le talus ne va pas plus loin que cela de la plateforme.
+pub const TALUS_MAX: f32 = 80.0;
+/// La terre remuée, sa couleur.
+pub const TERRE: [f32; 3] = [0.55, 0.45, 0.33];
+
+impl Terrasse {
+    /// (x, z) du monde dans le repère de l'objet.
+    fn local(&self, x: f32, z: f32) -> [f32; 2] {
+        let p = crate::moteur::objets::tourner([x - self.centre[0], 0.0, z - self.centre[2]], -self.cap);
+        [p[0], p[2]]
+    }
+
+    /// La distance de `l` (repère de l'objet) à l'emprise élargie de `m`.
+    fn hors(&self, l: [f32; 2], m: f32) -> f32 {
+        let dx = (self.lo[0] - m - l[0]).max(l[0] - self.hi[0] - m).max(0.0);
+        let dz = (self.lo[1] - m - l[1]).max(l[1] - self.hi[1] - m).max(0.0);
+        dx.hypot(dz)
+    }
+
+    /// Le rayon d'un cercle qui contient la plateforme.
+    fn rayon(&self) -> f32 {
+        let m = self.marge;
+        [self.lo[0] - m, self.hi[0] + m].iter().flat_map(|x| [self.lo[1] - m, self.hi[1] + m].map(|z| x.hypot(z))).fold(0.0, f32::max)
+    }
+}
+
+/// Terrasse sous un objet : la plateforme, au niveau du point le plus haut du terrain
+/// sous elle, est remblayée et rejoint le terrain par un talus ; avec un sous-sol, une
+/// fosse au fond plat se creuse sous l'emprise. Le relief est une grille de 2 m : les
+/// bords de la fosse sont en retrait d'un pas à l'intérieur de l'emprise, pour que sa
+/// pente reste sous l'objet. Rend les tuiles d'avant et le niveau de la plateforme.
+pub fn terrasser(monde: &mut Monde, maillages: &mut Maillages, tuiles: &mut Tuiles, t: &Terrasse) -> (Avant, f32) {
+    let ks = touchees(monde, tuiles, t.centre, t.rayon() + TALUS_MAX);
+    let mut avant: Avant = Vec::new();
+    for &k in &ks {
+        let Some(c) = tuiles.chargees.get(&k) else { continue };
+        let (Some(rel), Some(cl)) = (monde.relief.get(c.terrain), tuiles.couleurs(k)) else { continue };
+        avant.push((k, rel.clone(), cl.to_vec()));
+    }
+    // Le niveau : le plus haut sous la plateforme, ses coins compris
+    let mut niveau = f32::MIN;
+    for (k, rel, _) in &avant {
+        let o = Tuiles::coin(monde, *k);
+        let pas = rel.pas();
+        for b in 0..=rel.n {
+            for a in 0..=rel.n {
+                if t.hors(t.local(o[0] + a as f32 * pas, o[2] + b as f32 * pas), t.marge) == 0.0 {
+                    niveau = niveau.max(rel.sommet(a, b));
+                }
+            }
+        }
+    }
+    let m = t.marge;
+    for x in [t.lo[0] - m, 0.5 * (t.lo[0] + t.hi[0]), t.hi[0] + m] {
+        for z in [t.lo[1] - m, 0.5 * (t.lo[1] + t.hi[1]), t.hi[1] + m] {
+            let p = crate::moteur::objets::tourner([x, 0.0, z], t.cap);
+            if let Some(h) = crate::moteur::systemes::hauteur_sol(monde, t.centre[0] + p[0], t.centre[2] + p[2]) {
+                niveau = niveau.max(h);
+            }
+        }
+    }
+    if niveau == f32::MIN {
+        return (Vec::new(), t.centre[1]);
+    }
+    let pente = t.talus.clamp(5.0, 85.0).to_radians().tan();
+    for (k, rel, cl) in &avant {
+        let o = Tuiles::coin(monde, *k);
+        let pas = rel.pas();
+        let (mut h, mut couleurs) = (rel.h.clone(), cl.clone());
+        let mut change = false;
+        for b in 0..=rel.n {
+            for a in 0..=rel.n {
+                let l = t.local(o[0] + a as f32 * pas, o[2] + b as f32 * pas);
+                let i = b * (rel.n + 1) + a;
+                let d = t.hors(l, t.marge);
+                let mut y = if d == 0.0 { niveau } else { h[i].max(niveau - d * pente) };
+                if let Some(p) = t.sous_sol {
+                    if t.hors(l, -pas) == 0.0 {
+                        y = niveau - p;
+                    }
+                }
+                if (y - h[i]).abs() > 1e-4 {
+                    let w = ((y - h[i]).abs() * 0.7).min(0.7);
+                    let x = &mut couleurs[i];
+                    *x = [0, 1, 2].map(|j| x[j] + (TERRE[j] - x[j]) * w);
+                    h[i] = y;
+                    change = true;
+                }
+            }
+        }
+        if change {
+            tuiles.retoucher(monde, maillages, *k, Relief { n: rel.n, h }, couleurs);
+        }
+    }
+    (avant, niveau)
+}
+
 /// Remet les tuiles comme elles étaient, celles encore chargées.
 pub fn remettre(monde: &mut Monde, maillages: &mut Maillages, tuiles: &mut Tuiles, avant: &Avant) {
     for (k, rel, cl) in avant {
@@ -210,6 +325,34 @@ mod tests {
         // Défait
         remettre(&mut m, &mut r, &mut t, &avant);
         assert_eq!(systemes::hauteur_sol(&m, TAILLE, 20.0), Some(0.0));
+    }
+
+    #[test]
+    fn terrasser_en_remblai_avec_ou_sans_sous_sol() {
+        let (mut m, mut r, mut t) = monde();
+        // Une bosse de 2 m sous un coin de l'emprise
+        let p = Pinceau { outil: Some(Outil::Monter), force: 1.0, rayon: 4.0, ..Default::default() };
+        appliquer(&mut m, &mut r, &mut t, &p, [34.0, 0.0, 34.0], 1.0);
+        let haut = systemes::hauteur_sol(&m, 34.0, 34.0).unwrap();
+        let mut x = Terrasse { centre: [32.0, 0.0, 32.0], cap: 0.3, lo: [-5.0, -4.0], hi: [5.0, 4.0], marge: 1.0, talus: 35.0, sous_sol: None };
+        let (avant, niveau) = terrasser(&mut m, &mut r, &mut t, &x);
+        assert!(niveau >= haut - 1e-4, "{niveau} {haut}");
+        // La plateforme est de niveau, le talus descend, au loin rien ne bouge
+        for (px, pz) in [(32.0, 32.0), (28.0, 30.0), (35.0, 33.0)] {
+            assert!((systemes::hauteur_sol(&m, px, pz).unwrap() - niveau).abs() < 1e-3);
+        }
+        let talus = systemes::hauteur_sol(&m, 32.0, 32.0 + 7.5).unwrap();
+        assert!(talus > 0.0 && talus < niveau, "{talus}");
+        assert_eq!(systemes::hauteur_sol(&m, 32.0, 32.0 + 7.0 + niveau / 0.7 + 4.0), Some(0.0));
+        // Défait, puis avec un sous-sol de 3 m
+        remettre(&mut m, &mut r, &mut t, &avant);
+        x.sous_sol = Some(3.0);
+        let (_, niveau) = terrasser(&mut m, &mut r, &mut t, &x);
+        assert!((systemes::hauteur_sol(&m, 32.0, 32.0).unwrap() - (niveau - 3.0)).abs() < 1e-3);
+        // Hors de l'emprise, la plateforme
+        let bord = crate::moteur::objets::tourner([4.6, 0.0, 0.0], 0.3);
+        let h = systemes::hauteur_sol(&m, 32.0 + bord[0], 32.0 + bord[2]).unwrap();
+        assert!(h > niveau - 0.3 && h < niveau + 1e-3, "{h} {niveau}");
     }
 
     #[test]

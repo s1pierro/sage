@@ -6,6 +6,18 @@ Il vise un monde ouvert, avec d'autres valeurs que la violence.
 
 ![Le mannequin marche dans le décor de S.A.G.E.](docs/apercu.png)
 
+## Version 0.15 : le terrassement
+
+- Dans Ajout, l'objet choisi (un bâtiment importé, un bloc…) a une section
+  « Terrassement » : sans ou avec sous-sol (profondeur de 1 à 8 m), la marge autour de
+  lui, la pente du talus.
+- « Terrasser » met la plateforme au niveau du point le plus haut du terrain sous elle
+  (en remblai : rien n'est creusé autour), la relie au terrain par un talus, creuse la
+  fosse du sous-sol sous l'objet s'il en a un, et y pose l'objet : sur la plateforme, ou
+  au fond de la fosse. La terre remuée prend une teinte de terre.
+- Une seule annulation défait le tout. Le relief étant une grille de 2 m, les bords de
+  la fosse sont en retrait d'un pas sous l'objet : sa pente reste cachée par lui.
+
 ## Version 0.14 : l'onglet Carte et la téléportation
 
 - La carte du monde a son onglet dans l'éditeur, « Carte », à côté d'Ajout et de

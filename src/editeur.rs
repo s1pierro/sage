@@ -58,6 +58,8 @@ enum Retour {
     },
     /// Les tuiles qu'un coup de pinceau a touchées, telles qu'elles étaient.
     Relief(Avant),
+    /// Un terrassement : le relief d'avant, et l'objet posé dessus.
+    Terrassement(Avant, Box<Retour>),
 }
 
 impl Retour {
@@ -65,6 +67,7 @@ impl Retour {
         match self {
             Retour::Objet { quoi, .. } => quoi,
             Retour::Relief(_) => "le coup de pinceau",
+            Retour::Terrassement(..) => "le terrassement",
         }
     }
 }
@@ -125,6 +128,26 @@ pub struct Editeur {
     pub regeneration: Option<u32>,
     /// L'érosion de cette graine se calcule : la carte se régénère quand elle est prête.
     pub erosion: Option<u32>,
+    /// Les réglages du terrassement sous l'objet choisi.
+    pub terrasse: Terrassement,
+}
+
+/// Comment terrasser sous un objet.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Terrassement {
+    pub sous_sol: bool,
+    /// La profondeur du sous-sol, en mètres.
+    pub profondeur: f32,
+    /// La plateforme déborde de l'objet de tant, de chaque côté.
+    pub marge: f32,
+    /// La pente du talus, en degrés.
+    pub talus: f32,
+}
+
+impl Default for Terrassement {
+    fn default() -> Terrassement {
+        Terrassement { sous_sol: false, profondeur: 3.0, marge: 1.0, talus: 35.0 }
+    }
 }
 
 /// Une graine tirée de l'heure.
@@ -135,7 +158,7 @@ fn graine_au_hasard() -> u32 {
 
 impl Default for Editeur {
     fn default() -> Editeur {
-        Editeur { mode: Mode::Choisir, retours: Vec::new(), remplacement: None, retournement: None, onglet: AJOUT, pinceau: Pinceau::default(), coup: None, saisie: None, gestes: 0, isolignes: 0.0, confirmer: None, regeneration: None, erosion: None }
+        Editeur { mode: Mode::Choisir, retours: Vec::new(), remplacement: None, retournement: None, onglet: AJOUT, pinceau: Pinceau::default(), coup: None, saisie: None, gestes: 0, isolignes: 0.0, confirmer: None, regeneration: None, erosion: None, terrasse: Terrassement::default() }
     }
 }
 
@@ -202,6 +225,11 @@ impl Editeur {
         let (id, avant, origine) = match r {
             Retour::Objet { id, avant, origine, .. } => (id, avant, origine),
             Retour::Relief(avant) => return terrain::remettre(monde, maillages, tuiles, &avant),
+            Retour::Terrassement(avant, objet) => {
+                terrain::remettre(monde, maillages, tuiles, &avant);
+                self.retours.push(*objet);
+                return self.annuler(monde, maillages, tuiles);
+            }
         };
         let r = (id, origine);
         let e = monde.trouver(&r.0);
@@ -394,6 +422,10 @@ impl Editeur {
             }
         }
 
+        self.terrassement(cx, b, monde, maillages, tuiles, e, o, l);
+        // L'objet a pu se poser sur la plateforme
+        let Some(l) = monde.lieu.get(e).copied() else { return };
+
         cx.section(b, "RÉGLAGES");
         let (mut x, mut lieu) = (o, l);
         let cle_cap = id("editeur-cap");
@@ -506,6 +538,50 @@ impl Editeur {
         }
         self.enregistrement(cx, b, monde, maillages, tuiles);
         self.regenerer(cx, b);
+    }
+
+    /// La section « Terrassement » de l'objet choisi : sans ou avec sous-sol, la marge,
+    /// le talus ; « Terrasser » fait la plateforme et y pose l'objet (une seule étape
+    /// d'annulation).
+    #[allow(clippy::too_many_arguments)]
+    fn terrassement(&mut self, cx: &mut Cx, b: &mut Body, monde: &mut Monde, maillages: &mut Maillages, tuiles: &mut Tuiles, e: Entite, o: Objet, l: Lieu) {
+        cx.section(b, "TERRASSEMENT");
+        let t = &mut self.terrasse;
+        if let Some(i) = cx.liens(b, id("terrasse-sous-sol"), &["Sans sous-sol", "Avec sous-sol"], Some(t.sous_sol as usize)) {
+            t.sous_sol = i == 1;
+        }
+        if t.sous_sol {
+            cx.slider(b, id("terrasse-profondeur"), "Profondeur", &format!("{} m", dec(t.profondeur, 1)), &mut t.profondeur, 1.0, 8.0);
+            t.profondeur = (t.profondeur * 2.0).round() / 2.0;
+        }
+        cx.slider(b, id("terrasse-marge"), "Marge", &format!("{} m", dec(t.marge, 1)), &mut t.marge, 0.0, 6.0);
+        t.marge = (t.marge * 2.0).round() / 2.0;
+        cx.slider(b, id("terrasse-talus"), "Talus", &format!("{} °", dec(t.talus, 0)), &mut t.talus, 15.0, 60.0);
+        t.talus = (t.talus / 5.0).round() * 5.0;
+        let texte = if t.sous_sol {
+            "La plateforme se met au niveau du point le plus haut du terrain sous elle, en remblai ; la fosse du sous-sol se creuse sous l'objet, qui se pose au fond."
+        } else {
+            "La plateforme se met au niveau du point le plus haut du terrain sous elle, en remblai, et l'objet s'y pose."
+        };
+        cx.paragraph(b, texte);
+        if cx.liens(b, id("terrasse-faire"), &["Terrasser"], None).is_none() {
+            return;
+        }
+        let t = *t;
+        let (lo, hi) = o.boite(&monde.modeles);
+        let x = terrain::Terrasse { centre: l.pos, cap: l.cap, lo: [lo[0], lo[2]], hi: [hi[0], hi[2]], marge: t.marge, talus: t.talus, sous_sol: t.sous_sol.then_some(t.profondeur) };
+        let objet = Retour::Objet { id: monde.ident.get(e).cloned().unwrap_or_default(), avant: Some((o, l)), origine: monde.origine, cle: 0, quoi: "le terrassement" };
+        let (avant, niveau) = terrain::terrasser(monde, maillages, tuiles, &x);
+        if avant.is_empty() {
+            return;
+        }
+        let fond = if t.sous_sol { niveau - t.profondeur } else { niveau };
+        let mut p = l.pos;
+        // Sa base sur le fond ; une rampe s'enfonce d'elle-même sous son départ
+        let bas = if o.genre == Genre::Rampe { 0.0 } else { lo[1] };
+        p[1] = fond - bas;
+        tuiles.modifier(monde, maillages, e, o, Lieu::en(p, l.cap));
+        self.pousser(Retour::Terrassement(avant, Box::new(objet)));
     }
 
     /// La carte repart de zéro : plus rien à annuler ni à tenir.

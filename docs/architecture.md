@@ -706,3 +706,20 @@ sur une grille qui déborde d'un point).
   le joueur, et `App::teleporter` : le joueur va au point visé, posé sur le sol
   (`hauteur_sol`), sa vitesse à zéro ; refusé sous `MER - PROFONDEUR` ou hors des tuiles
   chargées. L'origine suit le joueur quand le jeu reprend.
+
+## 14. Le terrassement (0.15)
+
+- `terrain::Terrasse` : le lieu et le cap de l'objet, son emprise (x, z de sa boîte),
+  la marge, le talus (degrés), la profondeur du sous-sol. `terrain::terrasser` :
+  - le niveau est le plus haut des points de grille sous la plateforme (emprise
+    élargie de la marge) et de neuf points de son contour échantillonnés au sol ;
+  - chaque point de grille, d'après sa distance `d` à la plateforme dans le repère de
+    l'objet : `niveau` dessous, sinon `max(h, niveau - d·tan(talus))` (remblai seul,
+    jusqu'à `TALUS_MAX` = 80 m) ; dans l'emprise rétrécie d'un pas, `niveau - profondeur`
+    s'il y a un sous-sol ;
+  - chaque point ne dépend que de lui et du niveau : les tuiles voisines restent
+    jointes. La couleur tire vers `TERRE` selon la hauteur remuée.
+- `Editeur::terrassement` (section de l'objet choisi) : ses réglages
+  (`editeur::Terrassement`), puis l'objet posé sur la plateforme ou au fond de la fosse
+  (sa boîte en bas ; une rampe à son départ). `Retour::Terrassement(avant, objet)` :
+  une seule annulation remet le relief et l'objet.
