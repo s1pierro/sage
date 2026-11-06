@@ -6,6 +6,16 @@ Il vise un monde ouvert, avec d'autres valeurs que la violence.
 
 ![Le mannequin marche dans le décor de S.A.G.E.](docs/apercu.png)
 
+## Version 0.19 : les routes
+
+- Le lieu réel porte les routes d'OpenStreetMap (hors ponts et tunnels) : grandes
+  routes, routes et rues, voies de service, voies piétonnes, chemins et sentiers, chacun
+  sa couleur et sa largeur (celle d'OSM quand elle est donnée).
+- Sous la chaussée, le sol est de niveau en travers et lissé le long de la route ; sur
+  les bas-côtés (3 m, 1,5 m pour les chemins), il rejoint le relief.
+- Un `.reel` d'avant se lit encore (sans routes) ; refaire celui de Rouen avec
+  `examples/lieu_reel.rs` les ajoute.
+
 ## Version 0.18 : un lieu réel (Rouen)
 
 - `examples/lieu_reel.rs` prépare 20 km autour d'un point de France : le relief de

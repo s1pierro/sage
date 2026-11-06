@@ -199,7 +199,12 @@ impl Campagne {
             let e = r.eau(x, z);
             let dessus = h - r.niveau as f64;
             c = melange(c, [0.50, 0.47, 0.38], e.max(rampe(1.0, 0.2, dessus)));
-            return melange(c, [0.36, 0.38, 0.34], rampe(-0.5, -4.0, dessus));
+            c = melange(c, [0.36, 0.38, 0.34], rampe(-0.5, -4.0, dessus));
+            // La chaussée, son bord en douceur sur un mètre
+            if let Some(p) = r.route(x, z) {
+                c = melange(c, crate::reel::teinte(p.genre), rampe(0.5, -0.5, p.hors() as f64));
+            }
+            return c;
         }
         let herbe = [0.47, 0.60, 0.36];
         let seche = [0.66, 0.65, 0.44];

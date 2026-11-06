@@ -9,6 +9,10 @@
 //!   (Catmull-Rom).
 //! - L'eau est un masque d'un bit par point ; sa surface est à `niveau`, et son fond déjà
 //!   creusé dans le relief, plus profond loin des berges.
+//! - Les routes sont des lignes (x, z du jeu, et la hauteur de la chaussée, lissée le long
+//!   de la route) avec un genre et une largeur. Sur leur largeur, le sol prend la hauteur
+//!   de la chaussée et sa couleur ; sur les bas-côtés (`EPAULE`), il rejoint le relief.
+//!   Les ponts et les tunnels n'y sont pas.
 //!
 //! Sources : relief © IGN (RGE ALTI, Licence Ouverte 2.0) ; eau © les contributeurs
 //! OpenStreetMap (ODbL). Un fichier préparé est une base de données dérivée d'OSM : il
@@ -18,10 +22,63 @@ use crate::moteur::tuiles::DEMI_CARTE;
 use crate::moteur::TAILLE;
 
 const MAGIQUE: &[u8; 8] = b"SAGEREEL";
-const FORMAT: u32 = 1;
+const FORMAT: u32 = 2;
 
 /// Le texte à citer.
-pub const SOURCES: &str = "Relief © IGN (RGE ALTI) · eau © les contributeurs OpenStreetMap";
+pub const SOURCES: &str = "Relief © IGN (RGE ALTI) · eau et routes © les contributeurs OpenStreetMap";
+
+/// Les genres de routes : chacun sa couleur.
+pub const GRANDE: u8 = 0;
+pub const ROUTE: u8 = 1;
+pub const SERVICE: u8 = 2;
+pub const PIETONNE: u8 = 3;
+pub const CHEMIN: u8 = 4;
+pub const SENTIER: u8 = 5;
+
+/// La couleur d'une route de ce genre.
+pub fn teinte(genre: u8) -> [f32; 3] {
+    match genre {
+        GRANDE => [0.27, 0.27, 0.29],
+        ROUTE => [0.32, 0.32, 0.34],
+        SERVICE => [0.38, 0.38, 0.39],
+        PIETONNE => [0.60, 0.58, 0.54],
+        CHEMIN => [0.56, 0.48, 0.37],
+        _ => [0.52, 0.45, 0.34],
+    }
+}
+
+/// La largeur des bas-côtés, où le sol rejoint le relief, selon le genre.
+pub fn epaule(genre: u8) -> f32 {
+    if genre <= SERVICE { 3.0 } else { 1.5 }
+}
+
+/// Côté des cases de l'index des routes, en mètres.
+const CASE: f32 = 32.0;
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Route {
+    pub genre: u8,
+    pub largeur: f32,
+    /// x, z du jeu, et la hauteur de la chaussée.
+    pub points: Vec<[f32; 3]>,
+}
+
+/// Le point de route le plus proche : son genre, sa largeur, la distance à l'axe et la
+/// hauteur de la chaussée.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Proche {
+    pub genre: u8,
+    pub largeur: f32,
+    pub distance: f32,
+    pub hauteur: f32,
+}
+
+impl Proche {
+    /// De combien on est hors de la chaussée (négatif : dessus).
+    pub fn hors(&self) -> f32 {
+        self.distance - self.largeur / 2.0
+    }
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Reel {
@@ -41,6 +98,9 @@ pub struct Reel {
     pub h: Vec<u16>,
     /// Un bit par point : de l'eau.
     pub eau: Vec<u8>,
+    pub routes: Vec<Route>,
+    /// Pour chaque case, les segments (route, premier point) qui l'approchent.
+    index: std::collections::HashMap<(i32, i32), Vec<(u32, u32)>>,
 }
 
 /// Le coin de la grille (au repère du jeu) : le coin de la première tuile de la carte.
@@ -76,7 +136,7 @@ impl Reel {
     /// Les hauteurs `h` (en mètres) et l'eau, d'une grille de `cote(pas)` points ; les
     /// hauteurs s'encodent sur 16 bits.
     #[allow(clippy::too_many_arguments)]
-    pub fn new(nom: &str, lat: f64, lon: f64, x0: f64, y0: f64, pas: f64, niveau: f32, h: &[f32], eau: &[bool]) -> Reel {
+    pub fn new(nom: &str, lat: f64, lon: f64, x0: f64, y0: f64, pas: f64, niveau: f32, h: &[f32], eau: &[bool], routes: Vec<Route>) -> Reel {
         let n = cote(pas);
         assert!(h.len() == n * n && eau.len() == n * n);
         let lo = h.iter().cloned().fold(f32::MAX, f32::min);
@@ -87,7 +147,57 @@ impl Reel {
         for (i, _) in eau.iter().enumerate().filter(|(_, e)| **e) {
             bits[i / 8] |= 1 << (i % 8);
         }
-        Reel { nom: nom.into(), lat, lon, x0, y0, pas, cote: n, niveau, base: lo, echelle, h: hv, eau: bits }
+        Reel { nom: nom.into(), lat, lon, x0, y0, pas, cote: n, niveau, base: lo, echelle, h: hv, eau: bits, routes, index: Default::default() }.indexe()
+    }
+
+    /// Range chaque segment de route dans les cases qu'il approche.
+    fn indexe(mut self) -> Reel {
+        let mut index: std::collections::HashMap<(i32, i32), Vec<(u32, u32)>> = Default::default();
+        for (k, r) in self.routes.iter().enumerate() {
+            let m = r.largeur / 2.0 + epaule(r.genre);
+            for (i, s) in r.points.windows(2).enumerate() {
+                let (x0, x1) = (s[0][0].min(s[1][0]) - m, s[0][0].max(s[1][0]) + m);
+                let (z0, z1) = (s[0][1].min(s[1][1]) - m, s[0][1].max(s[1][1]) + m);
+                for cz in (z0 / CASE).floor() as i32..=(z1 / CASE).floor() as i32 {
+                    for cx in (x0 / CASE).floor() as i32..=(x1 / CASE).floor() as i32 {
+                        index.entry((cx, cz)).or_default().push((k as u32, i as u32));
+                    }
+                }
+            }
+        }
+        self.index = index;
+        self
+    }
+
+    /// La route la plus proche de (x, z), si l'on est sur elle ou ses bas-côtés ; la plus
+    /// large l'emporte (on compte depuis son bord).
+    pub fn route(&self, x: f64, z: f64) -> Option<Proche> {
+        let (x, z) = (x as f32, z as f32);
+        let l = self.index.get(&((x / CASE).floor() as i32, (z / CASE).floor() as i32))?;
+        let mut mieux: Option<Proche> = None;
+        for &(k, i) in l {
+            let r = &self.routes[k as usize];
+            let (a, b) = (r.points[i as usize], r.points[i as usize + 1]);
+            let (dx, dz) = (b[0] - a[0], b[1] - a[1]);
+            let l2 = dx * dx + dz * dz;
+            let t = if l2 > 0.0 { (((x - a[0]) * dx + (z - a[1]) * dz) / l2).clamp(0.0, 1.0) } else { 0.0 };
+            let d = (x - a[0] - dx * t).hypot(z - a[1] - dz * t);
+            let p = Proche { genre: r.genre, largeur: r.largeur, distance: d, hauteur: a[2] + (b[2] - a[2]) * t };
+            if p.hors() < epaule(r.genre) && mieux.is_none_or(|m| p.hors() < m.hors()) {
+                mieux = Some(p);
+            }
+        }
+        mieux
+    }
+
+    /// La hauteur du relief seul, sans les routes.
+    pub fn relief(&self, x: f64, z: f64) -> f64 {
+        let (gx, gz) = ((x - origine()) / self.pas, (z - origine()) / self.pas);
+        let (a, b) = (gx.floor(), gz.floor());
+        let (u, v) = (gx - a, gz - b);
+        let (a, b) = (a as i64, b as i64);
+        let l = |j: i64| cr(self.point(a - 1, j), self.point(a, j), self.point(a + 1, j), self.point(a + 2, j), u);
+        cr(l(b - 1), l(b), l(b + 1), l(b + 2), v)
     }
 
     fn point(&self, a: i64, b: i64) -> f64 {
@@ -106,14 +216,17 @@ impl Reel {
         self.eau[i / 8] & (1 << (i % 8)) != 0
     }
 
-    /// La hauteur du sol en (x, z) du jeu.
+    /// La hauteur du sol en (x, z) du jeu : le relief, aplani sous les routes.
     pub fn hauteur(&self, x: f64, z: f64) -> f64 {
-        let (gx, gz) = ((x - origine()) / self.pas, (z - origine()) / self.pas);
-        let (a, b) = (gx.floor(), gz.floor());
-        let (u, v) = (gx - a, gz - b);
-        let (a, b) = (a as i64, b as i64);
-        let l = |j: i64| cr(self.point(a - 1, j), self.point(a, j), self.point(a + 1, j), self.point(a + 2, j), u);
-        cr(l(b - 1), l(b), l(b + 1), l(b + 2), v)
+        let h = self.relief(x, z);
+        match self.route(x, z) {
+            Some(p) => {
+                let t = (p.hors() / epaule(p.genre)).clamp(0.0, 1.0) as f64;
+                let t = t * t * (3.0 - 2.0 * t);
+                p.hauteur as f64 + (h - p.hauteur as f64) * t
+            }
+            None => h,
+        }
     }
 
     /// La part d'eau en (x, z), de 0 à 1 : 1 au milieu de la Seine, entre deux sur la
@@ -145,6 +258,17 @@ impl Reel {
             o.extend_from_slice(&v.to_le_bytes());
         }
         o.extend_from_slice(&self.eau);
+        o.extend_from_slice(&(self.routes.len() as u32).to_le_bytes());
+        for r in &self.routes {
+            o.push(r.genre);
+            o.extend_from_slice(&r.largeur.to_le_bytes());
+            o.extend_from_slice(&(r.points.len() as u32).to_le_bytes());
+            for p in &r.points {
+                for v in p {
+                    o.extend_from_slice(&v.to_le_bytes());
+                }
+            }
+        }
         o
     }
 
@@ -160,7 +284,8 @@ impl Reel {
             Some(s)
         };
         let u32_ = |s: &[u8]| u32::from_le_bytes(s.try_into().unwrap());
-        if u32_(prendre(4)?) != FORMAT {
+        let format = u32_(prendre(4)?);
+        if !(1..=FORMAT).contains(&format) {
             return None;
         }
         let l = u32_(prendre(4)?) as usize;
@@ -181,7 +306,22 @@ impl Reel {
         let [niveau, base, echelle] = g;
         let h = prendre(n * n * 2)?.chunks(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
         let eau = prendre((n * n).div_ceil(8))?.to_vec();
-        Some(Reel { nom, lat, lon, x0, y0, pas, cote: n, niveau, base, echelle, h, eau })
+        let mut routes = Vec::new();
+        if format >= 2 {
+            let f32_ = |s: &[u8]| f32::from_le_bytes(s.try_into().unwrap());
+            for _ in 0..u32_(prendre(4)?) {
+                let genre = prendre(1)?[0];
+                let largeur = f32_(prendre(4)?);
+                let m = u32_(prendre(4)?) as usize;
+                let o = prendre(m * 12)?;
+                let points = o.chunks(12).map(|c| [f32_(&c[0..4]), f32_(&c[4..8]), f32_(&c[8..12])]).collect();
+                routes.push(Route { genre, largeur, points });
+            }
+        }
+        if k != o.len() {
+            return None;
+        }
+        Some(Reel { nom, lat, lon, x0, y0, pas, cote: n, niveau, base, echelle, h, eau, routes, index: Default::default() }.indexe())
     }
 }
 
@@ -205,7 +345,7 @@ mod tests {
         // Une pente vers l'est, de l'eau dans la moitié ouest
         let h: Vec<f32> = (0..n * n).map(|i| (i % n) as f32 * 2.0).collect();
         let eau: Vec<bool> = (0..n * n).map(|i| i % n < n / 2).collect();
-        let r = Reel::new("Essai", 49.0, 1.0, 1000.0, 2000.0, pas, 3.0, &h, &eau);
+        let r = Reel::new("Essai", 49.0, 1.0, 1000.0, 2000.0, pas, 3.0, &h, &eau, Vec::new());
         let o = r.octets();
         assert_eq!(Reel::depuis_octets(&o), Some(r.clone()));
         assert!(Reel::depuis_octets(&o[..o.len() - 1]).is_none());
@@ -215,5 +355,26 @@ mod tests {
         assert!((r.hauteur(x + pas / 2.0, 0.0) - 21.0).abs() < 0.02);
         assert_eq!(r.eau(origine() + pas, 0.0), 1.0);
         assert_eq!(r.eau(-origine() - pas, 0.0), 0.0);
+    }
+
+    #[test]
+    fn une_route_aplanit_le_sol_et_se_relit() {
+        let pas = 64.0;
+        let n = cote(pas);
+        // Un relief en pente vers l'est (10 cm par mètre), une route nord-sud à 5 m
+        let h: Vec<f32> = (0..n * n).map(|i| (origine() + (i % n) as f64 * pas) as f32 * 0.1).collect();
+        let route = Route { genre: ROUTE, largeur: 6.0, points: vec![[0.0, -200.0, 5.0], [0.0, 200.0, 5.0]] };
+        let r = Reel::new("Essai", 49.0, 1.0, 0.0, 0.0, pas, -50.0, &h, &vec![false; n * n], vec![route]);
+        // Sur la chaussée, sa hauteur ; au-delà des bas-côtés, le relief
+        for x in [-2.9, 0.0, 2.9] {
+            assert!((r.hauteur(x, 10.0) - 5.0).abs() < 1e-4, "{x}");
+        }
+        assert!((r.hauteur(7.0, 10.0) - r.relief(7.0, 10.0)).abs() < 1e-6);
+        let mi = r.hauteur(4.5, 10.0);
+        assert!(mi < 5.0 && mi > r.relief(4.5, 10.0), "{mi}");
+        assert_eq!(r.route(0.0, 10.0).map(|p| p.genre), Some(ROUTE));
+        assert!(r.route(30.0, 10.0).is_none());
+        let o = r.octets();
+        assert_eq!(Reel::depuis_octets(&o), Some(r));
     }
 }

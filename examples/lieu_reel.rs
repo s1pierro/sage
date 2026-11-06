@@ -7,6 +7,10 @@
 //! `<sortie>.cache/` : relancer ne les refait pas. Le fichier produit s'ouvre dans le jeu
 //! (Éditeur › Topologie › Carte › « Importer un lieu réel… »).
 //!
+//! Les routes : `highway=*` hors ponts et tunnels, un genre (grande route, route, voie de
+//! service, voie piétonne, chemin, sentier) et une largeur (`width`, `lanes` ou selon le
+//! genre) ; un point tous les 8 m, la hauteur de la chaussée prise au relief et lissée.
+//!
 //! L'eau : la Seine et les plans d'eau (`natural=water`, `waterway=riverbank`), leur
 //! surface au niveau médian du relief sous elles, leur fond creusé, plus profond loin des
 //! berges (jusqu'à 8 m). Un plan d'eau à un autre niveau (un étang sur le plateau) n'est
@@ -17,7 +21,7 @@
 
 use gda::json::{self, J};
 use sage::campagne::DEPART;
-use sage::reel::{cote, lambert93, origine, Reel};
+use sage::reel::{cote, lambert93, origine, Reel, Route};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -95,25 +99,7 @@ fn main() {
     let (dlat, dlon) = (11_000.0 / 111_000.0, 11_000.0 / (111_000.0 * lat.to_radians().cos()));
     cadre = (cadre.0.min(lat - dlat), cadre.1.min(lon - dlon), cadre.2.max(lat + dlat), cadre.3.max(lon + dlon));
     let bb = format!("{:.5},{:.5},{:.5},{:.5}", cadre.0, cadre.1, cadre.2, cadre.3);
-    let f = cache.join("osm_eau.json");
-    if !f.exists() {
-        let q = format!("data=[out:json][timeout:180];(way[\"natural\"=\"water\"]({bb});relation[\"natural\"=\"water\"]({bb});way[\"waterway\"=\"riverbank\"]({bb});relation[\"waterway\"=\"riverbank\"]({bb}););out geom;");
-        let mut ok = false;
-        'essais: for essai in 0..4 {
-            for url in OVERPASS {
-                println!("eau OSM ({url})…");
-                if curl(&["--data-urlencode", &q, url], &f) && std::fs::read(&f).is_ok_and(|o| o.first() == Some(&b'{')) {
-                    ok = true;
-                    break 'essais;
-                }
-            }
-            let attente = 15 << essai;
-            println!("Overpass occupé, nouvel essai dans {attente} s");
-            std::thread::sleep(std::time::Duration::from_secs(attente));
-        }
-        assert!(ok, "Overpass ne répond pas : réessayez plus tard");
-    }
-    let j = json::lire(&std::fs::read_to_string(&f).unwrap()).expect("réponse d'Overpass illisible");
+    let j = overpass(&cache.join("osm_eau.json"), "eau", &format!("(way[\"natural\"=\"water\"]({bb});relation[\"natural\"=\"water\"]({bb});way[\"waterway\"=\"riverbank\"]({bb});relation[\"waterway\"=\"riverbank\"]({bb}););out geom;"));
     // Chaque surface : ses anneaux, en points de grille (fractionnaires)
     let vers_grille = |p: &J| -> Option<(f64, f64)> {
         let (la, lo) = (p.get("lat")?.num()?, p.get("lon")?.num()?);
@@ -197,9 +183,120 @@ fn main() {
         }
     }
     println!("eau à {niveau:.2} m ; relief de {:.1} à {:.1} m", h.iter().cloned().fold(f32::MAX, f32::min), h.iter().cloned().fold(f32::MIN, f32::max));
-    let r = Reel::new(nom, lat, lon, x0, y0, pas, niveau, &h, &eau);
+    // 4. Les routes, hors ponts et tunnels, la chaussée lissée le long de la route
+    let jr = overpass(&cache.join("osm_routes.json"), "routes", &format!("way[\"highway\"]({bb});out tags geom;"));
+    let relief = |gx: f64, gz: f64| -> f32 {
+        let (a, b) = (gx.clamp(0.0, (n - 1) as f64), gz.clamp(0.0, (n - 1) as f64));
+        let (a0, b0) = ((a as usize).min(n - 2), (b as usize).min(n - 2));
+        let (u, v) = ((a - a0 as f64) as f32, (b - b0 as f64) as f32);
+        let p = |a: usize, b: usize| h[b * n + a];
+        (p(a0, b0) * (1.0 - u) + p(a0 + 1, b0) * u) * (1.0 - v) + (p(a0, b0 + 1) * (1.0 - u) + p(a0 + 1, b0 + 1) * u) * v
+    };
+    let mut routes = Vec::new();
+    let mut longueur = 0.0;
+    for e in jr.get("elements").and_then(J::liste).unwrap_or(&[]) {
+        let Some((genre, largeur)) = genre_route(e.get("tags")) else { continue };
+        let l = ligne(e.get("geometry").unwrap_or(&J::Nul));
+        if l.len() < 2 {
+            continue;
+        }
+        // Un point tous les 8 m au plus, la hauteur prise au relief
+        let mut pts: Vec<(f64, f64)> = vec![l[0]];
+        for s in l.windows(2) {
+            let d = ((s[1].0 - s[0].0).hypot(s[1].1 - s[0].1)) * pas;
+            let k = (d / 8.0).ceil().max(1.0) as usize;
+            for i in 1..=k {
+                let t = i as f64 / k as f64;
+                pts.push((s[0].0 + (s[1].0 - s[0].0) * t, s[0].1 + (s[1].1 - s[0].1) * t));
+            }
+            longueur += d;
+        }
+        let hs: Vec<f32> = pts.iter().map(|p| relief(p.0, p.1)).collect();
+        // Moyenne glissante sur cinq points : une chaussée sans bosses
+        let lisse: Vec<f32> = (0..hs.len()).map(|i| {
+            let (a, b) = (i.saturating_sub(2), (i + 3).min(hs.len()));
+            hs[a..b].iter().sum::<f32>() / (b - a) as f32
+        }).collect();
+        // Hors de la carte, rien : la route se coupe à son bord (avec 20 m de marge)
+        let dans = |p: &(f64, f64)| p.0 * pas > -20.0 && p.1 * pas > -20.0 && p.0 < (n - 1) as f64 + 20.0 / pas && p.1 < (n - 1) as f64 + 20.0 / pas;
+        let mut morceau: Vec<[f32; 3]> = Vec::new();
+        for (p, y) in pts.iter().zip(&lisse) {
+            if dans(p) {
+                morceau.push([(origine() + p.0 * pas) as f32, (origine() + p.1 * pas) as f32, *y]);
+            } else if morceau.len() > 1 {
+                routes.push(Route { genre, largeur, points: std::mem::take(&mut morceau) });
+            } else {
+                morceau.clear();
+            }
+        }
+        if morceau.len() > 1 {
+            routes.push(Route { genre, largeur, points: morceau });
+        }
+    }
+    println!("{} routes, {:.0} km", routes.len(), longueur / 1000.0);
+    let r = Reel::new(nom, lat, lon, x0, y0, pas, niveau, &h, &eau, routes);
     std::fs::write(&sortie, r.octets()).unwrap();
     println!("{} : {} Mo", sortie.display(), std::fs::metadata(&sortie).unwrap().len() / 1_000_000);
+}
+
+/// Une requête Overpass (sa réponse gardée dans `f`), essayée sur plusieurs serveurs,
+/// plusieurs fois s'ils sont occupés.
+fn overpass(f: &Path, quoi: &str, requete: &str) -> J {
+    if !f.exists() {
+        let q = format!("data=[out:json][timeout:300];{requete}");
+        let mut ok = false;
+        'essais: for essai in 0..5 {
+            for url in OVERPASS {
+                println!("{quoi} OSM ({url})…");
+                if curl(&["--data-urlencode", &q, url], f) && std::fs::read(f).is_ok_and(|o| o.first() == Some(&b'{')) {
+                    ok = true;
+                    break 'essais;
+                }
+            }
+            let attente = 15 << essai;
+            println!("Overpass occupé, nouvel essai dans {attente} s");
+            std::thread::sleep(std::time::Duration::from_secs(attente));
+        }
+        assert!(ok, "Overpass ne répond pas : réessayez plus tard");
+    }
+    json::lire(&std::fs::read_to_string(f).unwrap()).expect("réponse d'Overpass illisible")
+}
+
+/// Le genre et la largeur (m) d'une route d'après ses étiquettes OSM ; rien pour ce qui
+/// n'est pas une voie au sol (ponts, tunnels, escaliers, projets, surfaces…).
+fn genre_route(tags: Option<&J>) -> Option<(u8, f32)> {
+    use sage::reel::{CHEMIN, GRANDE, PIETONNE, ROUTE, SENTIER, SERVICE};
+    let tag = |k: &str| tags.and_then(|t| t.get(k)).and_then(J::txt);
+    if tag("bridge").is_some_and(|v| v != "no") || tag("tunnel").is_some_and(|v| v != "no") || tag("area") == Some("yes") || tag("indoor").is_some_and(|v| v != "no") {
+        return None;
+    }
+    let (genre, largeur) = match tag("highway")? {
+        "motorway" => (GRANDE, 15.0),
+        "trunk" => (GRANDE, 12.0),
+        "primary" => (GRANDE, 10.0),
+        "secondary" => (GRANDE, 8.0),
+        "motorway_link" | "trunk_link" | "primary_link" | "secondary_link" => (GRANDE, 7.0),
+        "tertiary" | "tertiary_link" => (ROUTE, 7.0),
+        "residential" | "road" => (ROUTE, 6.0),
+        "unclassified" => (ROUTE, 5.5),
+        "living_street" => (ROUTE, 5.0),
+        "service" => (SERVICE, 4.0),
+        "pedestrian" => (PIETONNE, 6.0),
+        "cycleway" => (PIETONNE, 2.5),
+        "footway" => (PIETONNE, 2.0),
+        "track" => (CHEMIN, 3.0),
+        "path" | "bridleway" => (SENTIER, 1.5),
+        _ => return None,
+    };
+    // Une chaussée non revêtue est un chemin ; un sentier revêtu, une voie piétonne
+    let terre = tag("surface").is_some_and(|s| ["unpaved", "gravel", "fine_gravel", "dirt", "earth", "ground", "grass", "compacted", "mud", "sand"].contains(&s));
+    let genre = match (genre, terre) {
+        (ROUTE | SERVICE | PIETONNE, true) => CHEMIN,
+        (SENTIER, false) if tag("surface").is_some() => PIETONNE,
+        (g, _) => g,
+    };
+    let largeur = tag("width").and_then(|w| w.trim_end_matches(" m").trim_end_matches('m').trim().replace(',', ".").parse::<f32>().ok()).filter(|w| (0.5..60.0).contains(w)).or_else(|| tag("lanes").and_then(|l| l.parse::<f32>().ok()).filter(|l| (1.0..12.0).contains(l)).map(|l| l * 3.25 + 1.0)).unwrap_or(largeur);
+    Some((genre, largeur))
 }
 
 /// Les morceaux d'une relation mis bout à bout en anneaux fermés.

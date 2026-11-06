@@ -769,3 +769,17 @@ sur une grille qui déborde d'un point).
   relief sous l'eau, les plans d'eau à un autre niveau sont écartés, le fond descend
   avec la distance à la berge (chanfrein). Les téléchargements se gardent dans
   `<sortie>.cache/`, curl fait le réseau.
+
+## 18. Les routes (0.19)
+
+- Format « SAGEREEL » 2 : après l'eau, les routes (genre sur un octet, largeur, points
+  x, z, hauteur de la chaussée) ; le format 1 se lit encore, sans routes.
+- `Reel::route(x, z)` : un index de cases de 32 m donne les segments proches (rangés
+  avec leur demi-largeur et leurs bas-côtés) ; la plus proche compte depuis son bord, la
+  plus large l'emporte donc. `Reel::hauteur` = la chaussée sur sa largeur, puis un
+  raccord en douceur (`smoothstep`) sur `epaule(genre)` ; `Reel::relief` reste le sol
+  nu. `Campagne::couleur` y pose `teinte(genre)`, bord adouci sur un mètre.
+- `examples/lieu_reel.rs` : `way["highway"]` (`out tags geom`), `genre_route` lit
+  `highway`, `surface`, `width`, `lanes`, écarte `bridge`, `tunnel`, `area`, `indoor` ;
+  un point tous les 8 m, hauteur prise au relief (bilinéaire) puis moyenne glissante sur
+  cinq points ; coupée au bord de la carte.
