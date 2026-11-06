@@ -7,6 +7,10 @@
 //! `<sortie>.cache/` : relancer ne les refait pas. Le fichier produit s'ouvre dans le jeu
 //! (Éditeur › Topologie › Carte › « Importer un lieu réel… »).
 //!
+//! Les ponts : les `highway=*` en `bridge=*`, mis bout à bout ; le tablier va d'un bout à
+//! l'autre entre les hauteurs du sol à ses bouts (pondérées par la distance), sans
+//! toucher au relief dessous.
+//!
 //! Les routes : `highway=*` hors ponts et tunnels, un genre (grande route, route, voie de
 //! service, voie piétonne, chemin, sentier) et une largeur (`width`, `lanes` ou selon le
 //! genre) ; un point tous les 8 m, la hauteur de la chaussée prise au relief et lissée.
@@ -198,24 +202,98 @@ fn main() {
         (p(a0, b0) * (1.0 - u) + p(a0 + 1, b0) * u) * (1.0 - v) + (p(a0, b0 + 1) * (1.0 - u) + p(a0 + 1, b0 + 1) * u) * v
     };
     let mut routes = Vec::new();
+    let mut ponts = Vec::new();
     let mut longueur = 0.0;
+    // Les ponts d'abord : (genre, largeur, ligne) ; leurs bouts comptés, un bout partagé
+    // entre deux ponts n'est pas un vrai bout (le pont continue)
+    let cle = |p: (f64, f64)| ((p.0 * 100.0).round() as i64, (p.1 * 100.0).round() as i64);
+    let mut lignes_ponts = Vec::new();
+    let mut bouts: std::collections::HashMap<(i64, i64), u32> = Default::default();
     for e in jr.get("elements").and_then(J::liste).unwrap_or(&[]) {
-        let Some((genre, largeur)) = genre_route(e.get("tags")) else { continue };
+        let Some((genre, largeur, true)) = genre_route(e.get("tags")) else { continue };
+        let l = ligne(e.get("geometry").unwrap_or(&J::Nul));
+        if l.len() < 2 {
+            continue;
+        }
+        *bouts.entry(cle(l[0])).or_default() += 1;
+        *bouts.entry(cle(l[l.len() - 1])).or_default() += 1;
+        lignes_ponts.push((genre, largeur, l));
+    }
+    // Les ponts mis bout à bout : chaque groupe et ses vrais bouts
+    let mut groupe: Vec<usize> = (0..lignes_ponts.len()).collect();
+    fn racine(g: &mut [usize], mut i: usize) -> usize {
+        while g[i] != i {
+            g[i] = g[g[i]];
+            i = g[i];
+        }
+        i
+    }
+    let mut par_bout: std::collections::HashMap<(i64, i64), usize> = Default::default();
+    for (k, (_, _, l)) in lignes_ponts.iter().enumerate() {
+        for b in [l[0], l[l.len() - 1]] {
+            if let Some(&autre) = par_bout.get(&cle(b)) {
+                let (a, c) = (racine(&mut groupe, autre), racine(&mut groupe, k));
+                groupe[a] = c;
+            } else {
+                par_bout.insert(cle(b), k);
+            }
+        }
+    }
+    let mut culees: std::collections::HashMap<usize, Vec<(f64, f64, f32)>> = Default::default();
+    for (k, (_, _, l)) in lignes_ponts.iter().enumerate() {
+        let g = racine(&mut groupe, k);
+        for b in [l[0], l[l.len() - 1]] {
+            if bouts[&cle(b)] == 1 {
+                culees.entry(g).or_default().push((b.0, b.1, relief(b.0, b.1).max(niveau + 0.5)));
+            }
+        }
+    }
+    let dans = |p: &(f64, f64)| p.0 * pas > -20.0 && p.1 * pas > -20.0 && p.0 < (n - 1) as f64 + 20.0 / pas && p.1 < (n - 1) as f64 + 20.0 / pas;
+    for (k, (genre, largeur, l)) in lignes_ponts.iter().enumerate() {
+        let g = racine(&mut groupe, k);
+        let c = culees.get(&g).cloned().unwrap_or_default();
+        let pts = densifier(l, pas, 8.0);
+        let mut morceau: Vec<[f32; 3]> = Vec::new();
+        for p in &pts {
+            // Le tablier : la moyenne des hauteurs des bouts, pondérée par l'inverse du carré
+            // de la distance (sans bouts, le plus haut du sol sous le pont)
+            let y = if c.is_empty() {
+                l.iter().map(|q| relief(q.0, q.1)).fold(niveau + 0.5, f32::max)
+            } else {
+                let (mut s, mut w) = (0.0f64, 0.0f64);
+                for &(bx, bz, bh) in &c {
+                    let d2 = (bx - p.0).powi(2) + (bz - p.1).powi(2);
+                    if d2 < 1e-9 {
+                        (s, w) = (bh as f64, 1.0);
+                        break;
+                    }
+                    s += bh as f64 / d2;
+                    w += 1.0 / d2;
+                }
+                (s / w) as f32
+            };
+            if dans(p) {
+                morceau.push([(origine() + p.0 * pas) as f32, (origine() + p.1 * pas) as f32, y]);
+            } else if morceau.len() > 1 {
+                ponts.push(Route { genre: *genre, largeur: *largeur, points: std::mem::take(&mut morceau) });
+            } else {
+                morceau.clear();
+            }
+        }
+        if morceau.len() > 1 {
+            ponts.push(Route { genre: *genre, largeur: *largeur, points: morceau });
+        }
+    }
+    println!("{} ponts OSM, {} tabliers", lignes_ponts.len(), ponts.len());
+    for e in jr.get("elements").and_then(J::liste).unwrap_or(&[]) {
+        let Some((genre, largeur, false)) = genre_route(e.get("tags")) else { continue };
         let l = ligne(e.get("geometry").unwrap_or(&J::Nul));
         if l.len() < 2 {
             continue;
         }
         // Un point tous les 8 m au plus, la hauteur prise au relief
-        let mut pts: Vec<(f64, f64)> = vec![l[0]];
-        for s in l.windows(2) {
-            let d = ((s[1].0 - s[0].0).hypot(s[1].1 - s[0].1)) * pas;
-            let k = (d / 8.0).ceil().max(1.0) as usize;
-            for i in 1..=k {
-                let t = i as f64 / k as f64;
-                pts.push((s[0].0 + (s[1].0 - s[0].0) * t, s[0].1 + (s[1].1 - s[0].1) * t));
-            }
-            longueur += d;
-        }
+        let pts = densifier(&l, pas, 8.0);
+        longueur += l.windows(2).map(|s| (s[1].0 - s[0].0).hypot(s[1].1 - s[0].1) * pas).sum::<f64>();
         let hs: Vec<f32> = pts.iter().map(|p| relief(p.0, p.1)).collect();
         // Moyenne glissante sur cinq points : une chaussée sans bosses
         let lisse: Vec<f32> = (0..hs.len()).map(|i| {
@@ -223,7 +301,6 @@ fn main() {
             hs[a..b].iter().sum::<f32>() / (b - a) as f32
         }).collect();
         // Hors de la carte, rien : la route se coupe à son bord (avec 20 m de marge)
-        let dans = |p: &(f64, f64)| p.0 * pas > -20.0 && p.1 * pas > -20.0 && p.0 < (n - 1) as f64 + 20.0 / pas && p.1 < (n - 1) as f64 + 20.0 / pas;
         let mut morceau: Vec<[f32; 3]> = Vec::new();
         for (p, y) in pts.iter().zip(&lisse) {
             if dans(p) {
@@ -276,7 +353,7 @@ fn main() {
         }
     }
     println!("{} bâtiments", batiments.len());
-    let r = Reel::new(nom, lat, lon, x0, y0, pas, niveau, &h, &eau, routes, batiments);
+    let r = Reel::new(nom, lat, lon, x0, y0, pas, niveau, &h, &eau, routes, batiments, ponts);
     std::fs::write(&sortie, r.octets()).unwrap();
     println!("{} : {} Mo", sortie.display(), std::fs::metadata(&sortie).unwrap().len() / 1_000_000);
 }
@@ -304,12 +381,27 @@ fn overpass(f: &Path, quoi: &str, requete: &str) -> J {
     json::lire(&std::fs::read_to_string(f).unwrap()).expect("réponse d'Overpass illisible")
 }
 
-/// Le genre et la largeur (m) d'une route d'après ses étiquettes OSM ; rien pour ce qui
-/// n'est pas une voie au sol (ponts, tunnels, escaliers, projets, surfaces…).
-fn genre_route(tags: Option<&J>) -> Option<(u8, f32)> {
+/// Une ligne (en pas de grille) avec un point tous les `m` mètres au plus.
+fn densifier(l: &[(f64, f64)], pas: f64, m: f64) -> Vec<(f64, f64)> {
+    let mut pts = vec![l[0]];
+    for s in l.windows(2) {
+        let d = (s[1].0 - s[0].0).hypot(s[1].1 - s[0].1) * pas;
+        let k = (d / m).ceil().max(1.0) as usize;
+        for i in 1..=k {
+            let t = i as f64 / k as f64;
+            pts.push((s[0].0 + (s[1].0 - s[0].0) * t, s[0].1 + (s[1].1 - s[0].1) * t));
+        }
+    }
+    pts
+}
+
+/// Le genre et la largeur (m) d'une route d'après ses étiquettes OSM, et si c'est un pont ;
+/// rien pour ce qui n'est pas une voie (tunnels, escaliers, projets, surfaces…).
+fn genre_route(tags: Option<&J>) -> Option<(u8, f32, bool)> {
     use sage::reel::{CHEMIN, GRANDE, PIETONNE, ROUTE, SENTIER, SERVICE};
     let tag = |k: &str| tags.and_then(|t| t.get(k)).and_then(J::txt);
-    if tag("bridge").is_some_and(|v| v != "no") || tag("tunnel").is_some_and(|v| v != "no") || tag("area") == Some("yes") || tag("indoor").is_some_and(|v| v != "no") {
+    let pont = tag("bridge").is_some_and(|v| v != "no");
+    if tag("tunnel").is_some_and(|v| v != "no") || tag("area") == Some("yes") || tag("indoor").is_some_and(|v| v != "no") {
         return None;
     }
     let (genre, largeur) = match tag("highway")? {
@@ -338,7 +430,7 @@ fn genre_route(tags: Option<&J>) -> Option<(u8, f32)> {
         (g, _) => g,
     };
     let largeur = tag("width").and_then(|w| w.trim_end_matches(" m").trim_end_matches('m').trim().replace(',', ".").parse::<f32>().ok()).filter(|w| (0.5..60.0).contains(w)).or_else(|| tag("lanes").and_then(|l| l.parse::<f32>().ok()).filter(|l| (1.0..12.0).contains(l)).map(|l| l * 3.25 + 1.0)).unwrap_or(largeur);
-    Some((genre, largeur))
+    Some((genre, largeur, pont))
 }
 
 /// Le genre et la hauteur (m) d'un bâtiment d'après ses étiquettes OSM : `height`, sinon

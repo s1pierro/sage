@@ -6,6 +6,17 @@ Il vise un monde ouvert, avec d'autres valeurs que la violence.
 
 ![Le mannequin marche dans le décor de S.A.G.E.](docs/apercu.png)
 
+## Version 0.21 : les ponts
+
+- Le lieu réel porte les ponts d'OpenStreetMap (les voies en `bridge=*`) : la Seine se
+  franchit de nouveau, à pied comme sur les autres voies.
+- Un tablier de béton de 80 cm, la chaussée dessus à la couleur de la voie, un parapet
+  d'un mètre de chaque côté. Les morceaux d'un même pont se mettent bout à bout ; le
+  tablier va d'une culée à l'autre, à la hauteur du sol à ses bouts, sans toucher au
+  relief ni à l'eau dessous.
+- Un `.reel` d'avant se lit encore (sans ponts) ; refaire celui de Rouen avec
+  `examples/lieu_reel.rs` les ajoute.
+
 ## Version 0.20 : les bâtiments
 
 - Le lieu réel porte les bâtiments d'OpenStreetMap, en volumes à toit plat : maisons,

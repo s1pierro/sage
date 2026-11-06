@@ -800,3 +800,23 @@ sur une grille qui déborde d'un point).
 - `examples/lieu_reel.rs` : `building=*` (chemins et relations, contours `outer`) en
   neuf requêtes ; `genre_bati` lit `building`, `height`, `building:levels`,
   `roof:levels`.
+
+## 20. Les ponts (0.21)
+
+- **Outil** (`examples/lieu_reel.rs`) : `genre_route` dit aussi si la voie est un pont
+  (`bridge` ≠ `no`). Les ponts se lisent dans la même réponse Overpass que les routes.
+  Leurs bouts se comptent ; un bout partagé entre deux voies-ponts n'est pas une culée.
+  Les voies-ponts se groupent par bouts communs (union-find). Le tablier en chaque point
+  (densifié tous les 8 m) est la moyenne des hauteurs de culée du groupe, pondérée par
+  l'inverse du carré de la distance. La hauteur d'une culée est le relief, au moins
+  l'eau + 0,5 m. Un groupe sans culée prend le plus haut du sol sous lui.
+- **Format** : SAGEREEL 4 ajoute la liste des ponts après les bâtiments, écrite comme
+  les routes (`ecrire_routes`). Les formats 1 à 3 se lisent encore.
+- **Jeu** (`src/reel.rs`) : `Reel.ponts: Vec<Route>`, rangés par morceau (pont, premier
+  point) dans la tuile du milieu du morceau (`ponts_par_tuile`). `bati(i, j)` y ajoute,
+  pour chaque morceau, trois pavés (`pave`) : le tablier (dessus à la teinte de la voie,
+  80 cm de béton) et deux parapets de 1 m sur 30 cm. Les faces sont orientées dehors. Le
+  maillage et les triangles de collision sont ceux des bâtiments : `physique::sol` prend
+  le dessus du tablier pour sol, et les parapets arrêtent.
+- Les ponts ne sont pas des routes : le relief n'est ni aplani ni teinté sous eux.
+

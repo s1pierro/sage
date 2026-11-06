@@ -16,6 +16,8 @@
 //! - Les bâtiments : un contour (x, z du jeu), un pied et un toit (hauteurs absolues) et
 //!   un genre. Chaque tuile monte en volumes, toits plats, ceux dont le centre est chez
 //!   elle (`Reel::bati`).
+//! - Les ponts : des lignes comme les routes (la hauteur du tablier), montées en tabliers
+//!   avec leurs parapets, par morceaux, dans la tuile du milieu de chaque morceau.
 //!
 //! Sources : relief © IGN (RGE ALTI, Licence Ouverte 2.0) ; eau © les contributeurs
 //! OpenStreetMap (ODbL). Un fichier préparé est une base de données dérivée d'OSM : il
@@ -25,7 +27,7 @@ use crate::moteur::tuiles::DEMI_CARTE;
 use crate::moteur::TAILLE;
 
 const MAGIQUE: &[u8; 8] = b"SAGEREEL";
-const FORMAT: u32 = 3;
+const FORMAT: u32 = 4;
 
 /// Le texte à citer.
 pub const SOURCES: &str = "Relief © IGN (RGE ALTI) · eau, routes et bâtiments © les contributeurs OpenStreetMap";
@@ -201,6 +203,66 @@ pub struct Reel {
     pub batiments: Vec<Batiment>,
     /// Pour chaque tuile, les bâtiments dont le centre est chez elle.
     par_tuile: std::collections::HashMap<(i32, i32), Vec<u32>>,
+    /// Les ponts : une ligne par pont, la hauteur du tablier.
+    pub ponts: Vec<Route>,
+    /// Pour chaque tuile, les morceaux de pont (pont, premier point) dont le milieu est
+    /// chez elle.
+    ponts_par_tuile: std::collections::HashMap<(i32, i32), Vec<(u32, u32)>>,
+}
+
+/// L'épaisseur du tablier, la hauteur et l'épaisseur des parapets (m).
+const TABLIER: f32 = 0.8;
+const PARAPET: f32 = 1.0;
+const PARAPET_LARGE: f32 = 0.3;
+const BETON: [f32; 3] = [0.62, 0.60, 0.56];
+const GARDE_CORPS: [f32; 3] = [0.70, 0.68, 0.64];
+
+/// Un pavé le long d'un morceau de pont, de `a` à `b` (x, z, hauteur du tablier) : en
+/// travers de `u0` à `u1` (à droite positif), en hauteur de `v0` à `v1` au-dessus du
+/// tablier ; le dessus d'une couleur, le reste d'une autre. Chaque face regarde dehors.
+fn pave(v: &mut Vec<f32>, t: &mut Vec<[[f32; 3]; 3]>, a: [f32; 3], b: [f32; 3], (u0, u1): (f32, f32), (v0, v1): (f32, f32), dessus: [f32; 3], cotes: [f32; 3]) {
+    let (dx, dz) = (b[0] - a[0], b[1] - a[1]);
+    let l = dx.hypot(dz);
+    if l < 1e-3 {
+        return;
+    }
+    let (rx, rz) = (-dz / l, dx / l);
+    let p = |q: [f32; 3], u: f32, h: f32| [q[0] + rx * u, q[2] + h, q[1] + rz * u];
+    let c = [[p(a, u0, v0), p(a, u1, v0), p(b, u1, v0), p(b, u0, v0)], [p(a, u0, v1), p(a, u1, v1), p(b, u1, v1), p(b, u0, v1)]];
+    let centre = {
+        let m = c.iter().flatten().fold([0.0; 3], |s, q| [s[0] + q[0], s[1] + q[1], s[2] + q[2]]);
+        m.map(|x| x / 8.0)
+    };
+    let (bas, haut) = (c[0], c[1]);
+    let faces = [
+        (haut, dessus),
+        (bas, cotes),
+        ([bas[0], bas[1], haut[1], haut[0]], cotes),
+        ([bas[1], bas[2], haut[2], haut[1]], cotes),
+        ([bas[2], bas[3], haut[3], haut[2]], cotes),
+        ([bas[3], bas[0], haut[0], haut[3]], cotes),
+    ];
+    for (mut q, couleur) in faces {
+        let sub = |x: [f32; 3], y: [f32; 3]| [x[0] - y[0], x[1] - y[1], x[2] - y[2]];
+        let croix = |x: [f32; 3], y: [f32; 3]| [x[1] * y[2] - x[2] * y[1], x[2] * y[0] - x[0] * y[2], x[0] * y[1] - x[1] * y[0]];
+        let mut n = croix(sub(q[1], q[0]), sub(q[2], q[0]));
+        let m = q.iter().fold([0.0; 3], |s, x| [s[0] + x[0] / 4.0, s[1] + x[1] / 4.0, s[2] + x[2] / 4.0]);
+        let dehors = sub(m, centre);
+        if n[0] * dehors[0] + n[1] * dehors[1] + n[2] * dehors[2] < 0.0 {
+            q.reverse();
+            n = n.map(|x| -x);
+        }
+        let ln = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt().max(1e-9);
+        let n = n.map(|x| x / ln);
+        for tri in [[q[0], q[1], q[2]], [q[0], q[2], q[3]]] {
+            for x in tri {
+                v.extend_from_slice(&x);
+                v.extend_from_slice(&n);
+                v.extend_from_slice(&couleur);
+            }
+            t.push(tri);
+        }
+    }
 }
 
 /// Le coin de la grille (au repère du jeu) : le coin de la première tuile de la carte.
@@ -228,6 +290,20 @@ pub fn lambert93(lat: f64, lon: f64) -> (f64, f64) {
     (XS + r * g.sin(), YS - r * g.cos())
 }
 
+fn ecrire_routes(o: &mut Vec<u8>, routes: &[Route]) {
+    o.extend_from_slice(&(routes.len() as u32).to_le_bytes());
+    for r in routes {
+        o.push(r.genre);
+        o.extend_from_slice(&r.largeur.to_le_bytes());
+        o.extend_from_slice(&(r.points.len() as u32).to_le_bytes());
+        for p in &r.points {
+            for v in p {
+                o.extend_from_slice(&v.to_le_bytes());
+            }
+        }
+    }
+}
+
 fn cr(a: f64, b: f64, c: f64, d: f64, t: f64) -> f64 {
     b + 0.5 * t * (c - a + t * (2.0 * a - 5.0 * b + 4.0 * c - d + t * (3.0 * (b - c) + d - a)))
 }
@@ -236,7 +312,7 @@ impl Reel {
     /// Les hauteurs `h` (en mètres) et l'eau, d'une grille de `cote(pas)` points ; les
     /// hauteurs s'encodent sur 16 bits.
     #[allow(clippy::too_many_arguments)]
-    pub fn new(nom: &str, lat: f64, lon: f64, x0: f64, y0: f64, pas: f64, niveau: f32, h: &[f32], eau: &[bool], routes: Vec<Route>, batiments: Vec<Batiment>) -> Reel {
+    pub fn new(nom: &str, lat: f64, lon: f64, x0: f64, y0: f64, pas: f64, niveau: f32, h: &[f32], eau: &[bool], routes: Vec<Route>, batiments: Vec<Batiment>, ponts: Vec<Route>) -> Reel {
         let n = cote(pas);
         assert!(h.len() == n * n && eau.len() == n * n);
         let lo = h.iter().cloned().fold(f32::MAX, f32::min);
@@ -247,7 +323,7 @@ impl Reel {
         for (i, _) in eau.iter().enumerate().filter(|(_, e)| **e) {
             bits[i / 8] |= 1 << (i % 8);
         }
-        Reel { nom: nom.into(), lat, lon, x0, y0, pas, cote: n, niveau, base: lo, echelle, h: hv, eau: bits, routes, index: Default::default(), batiments, par_tuile: Default::default() }.indexe()
+        Reel { nom: nom.into(), lat, lon, x0, y0, pas, cote: n, niveau, base: lo, echelle, h: hv, eau: bits, routes, index: Default::default(), batiments, par_tuile: Default::default(), ponts, ponts_par_tuile: Default::default() }.indexe()
     }
 
     /// Range chaque segment de route dans les cases qu'il approche.
@@ -272,6 +348,14 @@ impl Reel {
             par_tuile.entry(((c[0] / TAILLE).floor() as i32, (c[1] / TAILLE).floor() as i32)).or_default().push(k as u32);
         }
         self.par_tuile = par_tuile;
+        let mut ponts: std::collections::HashMap<(i32, i32), Vec<(u32, u32)>> = Default::default();
+        for (k, p) in self.ponts.iter().enumerate() {
+            for (i, s) in p.points.windows(2).enumerate() {
+                let (x, z) = ((s[0][0] + s[1][0]) / 2.0, (s[0][1] + s[1][1]) / 2.0);
+                ponts.entry(((x / TAILLE).floor() as i32, (z / TAILLE).floor() as i32)).or_default().push((k as u32, i as u32));
+            }
+        }
+        self.ponts_par_tuile = ponts;
         self
     }
 
@@ -279,10 +363,21 @@ impl Reel {
     /// (position, normale, couleur) et les triangles pour les collisions. Rien s'il n'y en
     /// a pas.
     pub fn bati(&self, i: i32, j: i32) -> Option<(Vec<f32>, Vec<[[f32; 3]; 3]>)> {
-        let l = self.par_tuile.get(&(i, j))?;
         let (ox, oz) = (i as f32 * TAILLE, j as f32 * TAILLE);
         let (mut v, mut t) = (Vec::new(), Vec::new());
-        for &k in l {
+        // Les morceaux de pont : le tablier, et un parapet de chaque côté
+        for &(k, s) in self.ponts_par_tuile.get(&(i, j)).map_or(&[][..], |l| l.as_slice()) {
+            let p = &self.ponts[k as usize];
+            let (a, b) = (p.points[s as usize], p.points[s as usize + 1]);
+            let (a, b) = ([a[0] - ox, a[1] - oz, a[2]], [b[0] - ox, b[1] - oz, b[2]]);
+            let w = p.largeur / 2.0;
+            pave(&mut v, &mut t, a, b, (-w, w), (-TABLIER, 0.0), teinte(p.genre), BETON);
+            for cote in [-1.0, 1.0] {
+                let (u0, u1) = if cote < 0.0 { (-w - PARAPET_LARGE, -w) } else { (w, w + PARAPET_LARGE) };
+                pave(&mut v, &mut t, a, b, (u0, u1), (-TABLIER, PARAPET), GARDE_CORPS, GARDE_CORPS);
+            }
+        }
+        for &k in self.par_tuile.get(&(i, j)).map_or(&[][..], |l| l.as_slice()) {
             let b = &self.batiments[k as usize];
             let c: Vec<[f32; 2]> = b.contour.iter().map(|p| [p[0] - ox, p[1] - oz]).collect();
             let (murs, toit) = teintes_bati(b.genre);
@@ -415,17 +510,7 @@ impl Reel {
             o.extend_from_slice(&v.to_le_bytes());
         }
         o.extend_from_slice(&self.eau);
-        o.extend_from_slice(&(self.routes.len() as u32).to_le_bytes());
-        for r in &self.routes {
-            o.push(r.genre);
-            o.extend_from_slice(&r.largeur.to_le_bytes());
-            o.extend_from_slice(&(r.points.len() as u32).to_le_bytes());
-            for p in &r.points {
-                for v in p {
-                    o.extend_from_slice(&v.to_le_bytes());
-                }
-            }
-        }
+        ecrire_routes(&mut o, &self.routes);
         o.extend_from_slice(&(self.batiments.len() as u32).to_le_bytes());
         for b in &self.batiments {
             o.push(b.genre);
@@ -437,6 +522,7 @@ impl Reel {
                 o.extend_from_slice(&p[1].to_le_bytes());
             }
         }
+        ecrire_routes(&mut o, &self.ponts);
         o
     }
 
@@ -474,9 +560,9 @@ impl Reel {
         let [niveau, base, echelle] = g;
         let h = prendre(n * n * 2)?.chunks(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
         let eau = prendre((n * n).div_ceil(8))?.to_vec();
-        let mut routes = Vec::new();
-        if format >= 2 {
-            let f32_ = |s: &[u8]| f32::from_le_bytes(s.try_into().unwrap());
+        let f32_ = |s: &[u8]| f32::from_le_bytes(s.try_into().unwrap());
+        macro_rules! lire_routes { () => {{
+            let mut routes = Vec::new();
             for _ in 0..u32_(prendre(4)?) {
                 let genre = prendre(1)?[0];
                 let largeur = f32_(prendre(4)?);
@@ -485,10 +571,11 @@ impl Reel {
                 let points = o.chunks(12).map(|c| [f32_(&c[0..4]), f32_(&c[4..8]), f32_(&c[8..12])]).collect();
                 routes.push(Route { genre, largeur, points });
             }
-        }
+            routes
+        }}}
+        let routes = if format >= 2 { lire_routes!() } else { Vec::new() };
         let mut batiments = Vec::new();
         if format >= 3 {
-            let f32_ = |s: &[u8]| f32::from_le_bytes(s.try_into().unwrap());
             for _ in 0..u32_(prendre(4)?) {
                 let genre = prendre(1)?[0];
                 let pied = f32_(prendre(4)?);
@@ -498,10 +585,11 @@ impl Reel {
                 batiments.push(Batiment { genre, pied, toit, contour });
             }
         }
+        let ponts = if format >= 4 { lire_routes!() } else { Vec::new() };
         if k != o.len() {
             return None;
         }
-        Some(Reel { nom, lat, lon, x0, y0, pas, cote: n, niveau, base, echelle, h, eau, routes, index: Default::default(), batiments, par_tuile: Default::default() }.indexe())
+        Some(Reel { nom, lat, lon, x0, y0, pas, cote: n, niveau, base, echelle, h, eau, routes, index: Default::default(), batiments, par_tuile: Default::default(), ponts, ponts_par_tuile: Default::default() }.indexe())
     }
 }
 
@@ -525,7 +613,7 @@ mod tests {
         // Une pente vers l'est, de l'eau dans la moitié ouest
         let h: Vec<f32> = (0..n * n).map(|i| (i % n) as f32 * 2.0).collect();
         let eau: Vec<bool> = (0..n * n).map(|i| i % n < n / 2).collect();
-        let r = Reel::new("Essai", 49.0, 1.0, 1000.0, 2000.0, pas, 3.0, &h, &eau, Vec::new(), Vec::new());
+        let r = Reel::new("Essai", 49.0, 1.0, 1000.0, 2000.0, pas, 3.0, &h, &eau, Vec::new(), Vec::new(), Vec::new());
         let o = r.octets();
         assert_eq!(Reel::depuis_octets(&o), Some(r.clone()));
         assert!(Reel::depuis_octets(&o[..o.len() - 1]).is_none());
@@ -546,7 +634,7 @@ mod tests {
         let n = cote(pas);
         for c in [l.clone(), l.iter().rev().cloned().collect()] {
             let b = Batiment { genre: MAISON, pied: -1.0, toit: 7.0, contour: c };
-            let r = Reel::new("Essai", 49.0, 1.0, 0.0, 0.0, pas, -50.0, &vec![0.0; n * n], &vec![false; n * n], Vec::new(), vec![b]);
+            let r = Reel::new("Essai", 49.0, 1.0, 0.0, 0.0, pas, -50.0, &vec![0.0; n * n], &vec![false; n * n], Vec::new(), vec![b], Vec::new());
             assert!(r.bati(1, 0).is_none());
             let (v, t) = r.bati(0, 0).expect("dans la tuile (0, 0)");
             assert_eq!(t.len(), 6 * 2 + 4);
@@ -573,13 +661,39 @@ mod tests {
     }
 
     #[test]
+    fn un_pont_se_monte_et_se_franchit() {
+        let pas = 64.0;
+        let n = cote(pas);
+        // Un pont de 5 m sur deux tuiles, à 8 m de haut, au-dessus d'un sol à 0
+        let pont = Route { genre: ROUTE, largeur: 5.0, points: vec![[30.0, 20.0, 8.0], [60.0, 20.0, 8.0], [90.0, 20.0, 8.0]] };
+        let r = Reel::new("Essai", 49.0, 1.0, 0.0, 0.0, pas, -50.0, &vec![0.0; n * n], &vec![false; n * n], Vec::new(), Vec::new(), vec![pont]);
+        let (v, t) = r.bati(0, 0).expect("le premier morceau");
+        assert!(r.bati(1, 0).is_some() && r.bati(2, 0).is_none());
+        // Un tablier et deux parapets : trois pavés de douze triangles
+        assert_eq!(t.len(), 36);
+        assert_eq!(v.len(), t.len() * 27);
+        // Le dessus du tablier est à 8 m, normale en haut, et sens des triangles d'accord
+        let dessus: Vec<usize> = (0..t.len()).filter(|&k| v[k * 27 + 4] > 0.99 && t[k].iter().all(|p| (p[1] - 8.0).abs() < 1e-4)).collect();
+        assert_eq!(dessus.len(), 2);
+        for k in 0..t.len() {
+            let (a, b, c) = (t[k][0], t[k][1], t[k][2]);
+            let u = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+            let w = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+            let x = [u[1] * w[2] - u[2] * w[1], u[2] * w[0] - u[0] * w[2], u[0] * w[1] - u[1] * w[0]];
+            let n = &v[k * 27 + 3..k * 27 + 6];
+            assert!(x[0] * n[0] + x[1] * n[1] + x[2] * n[2] > 0.0, "triangle {k}");
+        }
+        assert_eq!(Reel::depuis_octets(&r.octets()), Some(r));
+    }
+
+    #[test]
     fn une_route_aplanit_le_sol_et_se_relit() {
         let pas = 64.0;
         let n = cote(pas);
         // Un relief en pente vers l'est (10 cm par mètre), une route nord-sud à 5 m
         let h: Vec<f32> = (0..n * n).map(|i| (origine() + (i % n) as f64 * pas) as f32 * 0.1).collect();
         let route = Route { genre: ROUTE, largeur: 6.0, points: vec![[0.0, -200.0, 5.0], [0.0, 200.0, 5.0]] };
-        let r = Reel::new("Essai", 49.0, 1.0, 0.0, 0.0, pas, -50.0, &h, &vec![false; n * n], vec![route], Vec::new());
+        let r = Reel::new("Essai", 49.0, 1.0, 0.0, 0.0, pas, -50.0, &h, &vec![false; n * n], vec![route], Vec::new(), Vec::new());
         // Sur la chaussée, sa hauteur ; au-delà des bas-côtés, le relief
         for x in [-2.9, 0.0, 2.9] {
             assert!((r.hauteur(x, 10.0) - 5.0).abs() < 1e-4, "{x}");
