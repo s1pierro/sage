@@ -99,18 +99,23 @@ pub struct Affichage {
     pub distance: i32,
     /// Là où le brouillard a tout recouvert, en mètres.
     pub brouillard: f32,
+    /// Pas de brouillard du tout : on voit jusqu'à `VISIBILITE`.
+    pub sans_brouillard: bool,
     fichier: Option<PathBuf>,
     pub erreur: Option<String>,
 }
 
 pub const DISTANCE_MAX: i32 = 5;
 pub const BROUILLARD_MIN: f32 = 30.0;
+/// Le plus loin que l'on voie en jeu, en mètres : au-delà des tuiles chargées, le relief
+/// lointain de toute la carte.
+pub const VISIBILITE: f32 = 3000.0;
 
 impl Affichage {
     /// Les réglages relus de `dossier`, ou ceux d'origine.
     pub fn ouvrir(dossier: Option<PathBuf>, distance: i32, brouillard: f32) -> Affichage {
         let fichier = dossier.map(|d| d.join("affichage.json"));
-        let mut a = Affichage { distance, brouillard, fichier, erreur: None };
+        let mut a = Affichage { distance, brouillard, sans_brouillard: false, fichier, erreur: None };
         if let Some(j) = a.fichier.as_ref().and_then(|f| std::fs::read_to_string(f).ok()).and_then(|s| json::lire(&s)) {
             if let Some(v) = j.get("distance").and_then(J::num) {
                 a.distance = v.round() as i32;
@@ -118,14 +123,23 @@ impl Affichage {
             if let Some(v) = j.get("brouillard").and_then(J::num) {
                 a.brouillard = v as f32;
             }
+            if let Some(J::Bool(v)) = j.get("sans_brouillard") {
+                a.sans_brouillard = *v;
+            }
         }
         a.borner();
         a
     }
 
-    /// Au-delà de ce qui est chargé, on verrait le bord du monde.
+    /// Le relief lointain prend le relais des tuiles chargées : le brouillard va jusqu'à
+    /// la limite de la vue.
     pub fn brouillard_max(&self) -> f32 {
-        (self.distance as f32 + 0.25) * TUILE
+        VISIBILITE
+    }
+
+    /// Là où le brouillard a tout recouvert, ou l'infini s'il n'y en a pas.
+    pub fn brouillard_vu(&self) -> f32 {
+        if self.sans_brouillard { 1.0e7 } else { self.brouillard }
     }
 
     fn borner(&mut self) {
@@ -138,6 +152,7 @@ impl Affichage {
             ("format".into(), J::Num(1.0)),
             ("distance".into(), J::Num(self.distance as f64)),
             ("brouillard".into(), J::Num(self.brouillard.round() as f64)),
+            ("sans_brouillard".into(), J::Bool(self.sans_brouillard)),
         ]);
         let mut s = String::new();
         json::indente(&o, 0, &mut s);
@@ -153,9 +168,16 @@ impl Affichage {
 
     /// Change les réglages et les garde.
     pub fn modifier(&mut self, distance: i32, brouillard: f32) {
+        let sans = self.sans_brouillard;
+        self.regler(distance, brouillard, sans);
+    }
+
+    /// Change les réglages, brouillard ou pas, et les garde.
+    pub fn regler(&mut self, distance: i32, brouillard: f32, sans_brouillard: bool) {
         let avant = self.clone();
         self.distance = distance;
         self.brouillard = brouillard;
+        self.sans_brouillard = sans_brouillard;
         self.borner();
         if *self != avant {
             self.ecrire();
@@ -170,18 +192,29 @@ pub fn affichage(cx: &mut Cx, b: &mut Body, a: &mut Affichage) {
     let metres = a.distance as f32 * TUILE;
     let n = (2 * a.distance + 1).pow(2);
     cx.slider(b, id("distance-affichage"), "Distance d'affichage", &format!("{} m", dec(metres, 0)), &mut d, 1.0, DISTANCE_MAX as f32);
-    let mut f = a.brouillard;
-    let max = a.brouillard_max();
-    cx.slider(b, id("distance-brouillard"), "Brouillard", &format!("{} m", dec(f.min(max), 0)), &mut f, BROUILLARD_MIN, max);
     let d = d.round() as i32;
-    // Le brouillard se fait au mètre près, à 5 m près au-delà de 100 m
-    let pas = if f < 100.0 { 1.0 } else { 5.0 };
-    let f = (f / pas).round() * pas;
-    // Plus loin, le brouillard garde sa part de la distance
-    let f = if d != a.distance { f * (d as f32 + 0.25) / (a.distance as f32 + 0.25) } else { f };
-    a.modifier(d, f);
     cx.mesure(b, "Tuiles autour du joueur", &format!("{n}"));
-    cx.paragraph(b, "Plus loin, plus de mémoire et de calcul. Le brouillard s'arrête au bord des tuiles chargées.");
+    cx.paragraph(b, &format!("Plus loin, plus de mémoire et de calcul. Au-delà des tuiles chargées, le relief de toute la carte, simplifié, se voit jusqu'à {} km.", dec(VISIBILITE / 1000.0, 0)));
+    cx.section(b, "BROUILLARD");
+    let mut sans = a.sans_brouillard;
+    if let Some(i) = cx.liens(b, id("brouillard-actif"), &["Avec brouillard", "Sans brouillard"], Some(sans as usize)) {
+        sans = i == 1;
+    }
+    let mut f = a.brouillard;
+    if !sans {
+        // Sur une règle logarithmique : de 30 m à 3 km
+        let (lo, hi) = (BROUILLARD_MIN.log10(), a.brouillard_max().log10());
+        let mut t = f.clamp(BROUILLARD_MIN, a.brouillard_max()).log10();
+        cx.slider(b, id("distance-brouillard"), "Brouillard", &format!("{} m", dec(f, 0)), &mut t, lo, hi);
+        let v = 10f32.powf(t);
+        // Au mètre près sous 100 m, à 5 m près sous 1 km, à 50 m près au-delà
+        let pas = if v < 100.0 { 1.0 } else if v < 1000.0 { 5.0 } else { 50.0 };
+        let v = (v / pas).round() * pas;
+        if (v - f).abs() >= pas * 0.5 {
+            f = v;
+        }
+    }
+    a.regler(d, f, sans);
     if let Some(e) = &a.erreur {
         cx.paragraph(b, e);
     }
@@ -200,11 +233,16 @@ mod tests {
         a.modifier(4, 240.0);
         let b = Affichage::ouvrir(Some(d.clone()), 2, 144.0);
         assert_eq!((b.distance, b.brouillard), (4, 240.0));
-        // Le brouillard ne dépasse pas les tuiles chargées, ni la distance ses bornes
-        a.modifier(9, 1000.0);
-        assert_eq!((a.distance, a.brouillard), (DISTANCE_MAX, (DISTANCE_MAX as f32 + 0.25) * TUILE));
+        // Le brouillard ne dépasse pas la limite de la vue, ni la distance ses bornes
+        a.modifier(9, 5000.0);
+        assert_eq!((a.distance, a.brouillard), (DISTANCE_MAX, VISIBILITE));
         a.modifier(1, 10.0);
         assert_eq!((a.distance, a.brouillard), (1, BROUILLARD_MIN));
+        // Sans brouillard : gardé, et la vue va à l'infini
+        a.regler(1, 300.0, true);
+        assert_eq!(a.brouillard_vu(), 1.0e7);
+        let c = Affichage::ouvrir(Some(d.clone()), 2, 144.0);
+        assert!(c.sans_brouillard && c.brouillard == 300.0);
         let _ = std::fs::remove_dir_all(&d);
     }
 }

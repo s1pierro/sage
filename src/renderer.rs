@@ -125,6 +125,7 @@ precision highp float;
 in vec3 v_monde; in vec3 v_normale; in vec3 v_couleur;
 out vec4 o_color;
 uniform float u_isolignes;
+uniform vec4 u_trou;
 #LUMIERE
 float niveau(float y, float pas, float large) {
   float q = y / pas;
@@ -133,11 +134,14 @@ float niveau(float y, float pas, float large) {
 }
 float trait(vec2 c, float pas) {
   vec2 q = c / pas;
-  vec2 g = abs(fract(q - 0.5) - 0.5) / max(fwidth(q), vec2(1e-4));
-  return 1.0 - min(min(g.x, g.y), 1.0);
+  vec2 f = fwidth(q);
+  vec2 g = abs(fract(q - 0.5) - 0.5) / max(f, vec2(1e-4));
+  // Au loin, quand les traits se serrent, ils s'effacent
+  return (1.0 - min(min(g.x, g.y), 1.0)) * clamp(1.5 - max(f.x, f.y) * 3.0, 0.0, 1.0);
 }
 void main() {
   vec2 c = v_monde.xz;
+  if (all(greaterThan(c, u_trou.xy)) && all(lessThan(c, u_trou.zw))) discard;
   vec3 base = v_couleur;
   if (u_isolignes > 0.0) {
     float y = v_monde.y;
@@ -749,6 +753,13 @@ impl Renderer {
                 }
                 let d = &scene.dessins[a.dessin];
                 (gl.glUniformMatrix4fv)(self.loc(programme, "u_place"), 1, 0, d.place.as_ptr());
+                if programme == self.terrain {
+                    let t = match scene.trou {
+                        Some((k, t)) if k == d.maillage => t,
+                        _ => [1.0, 1.0, -1.0, -1.0],
+                    };
+                    (gl.glUniform4f)(self.loc(programme, "u_trou"), t[0], t[1], t[2], t[3]);
+                }
                 if programme == self.bloc || programme == self.matiere || programme == self.peau {
                     (gl.glUniform1f)(self.loc(programme, "u_choisi"), if d.choisi { 1.0 } else { 0.0 });
                 }

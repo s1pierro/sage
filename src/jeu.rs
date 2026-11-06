@@ -73,6 +73,9 @@ fn erosion_relue(depot: &Depot, graine: u32) -> Option<Campagne> {
     Some(Campagne { graine, erosion: Some(Arc::new(e)) })
 }
 
+/// La caméra tourne autour de la tête du personnage : tant de sa hauteur (les yeux).
+const PIVOT: f32 = 0.92;
+
 /// L'angle de vue le plus bas en édition, et celui où la vue commence à se lever en
 /// jeu (radians, négatif : l'œil sous la cible).
 const HORIZON: f32 = -0.15;
@@ -140,6 +143,8 @@ pub struct App {
     /// L'érosion qui se calcule à part : sa graine, si la carte se régénère avec, et le
     /// relief qui en viendra.
     calcul: Option<(u32, bool, std::sync::mpsc::Receiver<Campagne>)>,
+    /// Le relief lointain de toute la carte, au-delà des tuiles chargées.
+    lointain: Option<crate::moteur::MaillageId>,
 }
 
 impl App {
@@ -213,6 +218,7 @@ impl App {
             carte_age: 0.0,
             campagne,
             calcul: None,
+            lointain: None,
         };
         // Les modèles du catalogue : les objets déjà posés les retrouvent
         let mut erreurs = Vec::new();
@@ -228,6 +234,7 @@ impl App {
             a.catalogue.erreur = Some(x.clone());
         }
         a.mettre(Modele::depuis_glb(&personnage::mannequin_glb()).expect("le mannequin se relit"));
+        a.refaire_lointain();
         if a_calculer {
             let g = a.tuiles.fiche.graine;
             a.lancer_erosion(g, false);
@@ -243,6 +250,16 @@ impl App {
             let _ = tx.send(Campagne::erodee(graine));
         });
         self.calcul = Some((graine, regenerer, rx));
+    }
+
+    /// Le relief lointain, refait pour le générateur de la carte (hors des tests : il
+    /// couvre toute la carte et se calcule en une fraction de seconde optimisé).
+    fn refaire_lointain(&mut self) {
+        if cfg!(test) {
+            return;
+        }
+        let v = crate::lointain::sommets(&self.campagne);
+        self.lointain = Some(self.maillages.mettre(crate::lointain::ID, Format::Terrain, Arc::new(v)));
     }
 
     /// La graine dont l'érosion se calcule.
@@ -288,6 +305,7 @@ impl App {
             x.retenir();
         }
         self.carte = None;
+        self.refaire_lointain();
         self.dire("Le relief est érodé".into());
     }
 
@@ -521,7 +539,7 @@ impl App {
     fn regarde(&self) -> Option<[f32; 3]> {
         let hauteur = self.modele().map_or(1.75, |m| m.hauteur);
         let p = self.lieu().pos;
-        let o = [p[0], p[1] + hauteur * 0.6, p[2]];
+        let o = [p[0], p[1] + hauteur * PIVOT, p[2]];
         let (sy, cy) = self.cam.0.sin_cos();
         // La caméra plonge vers le joueur : le regard, lui, est horizontal au tangage de
         // départ
@@ -535,7 +553,7 @@ impl App {
     fn vise(&self) -> Option<(String, f32)> {
         let hauteur = self.modele().map_or(1.75, |m| m.hauteur);
         let p = self.lieu().pos;
-        let cible = [p[0], p[1] + hauteur * 0.6, p[2]];
+        let cible = [p[0], p[1] + hauteur * PIVOT, p[2]];
         let (sy, cy) = self.cam.0.sin_cos();
         let (sp, cp) = self.cam.1.sin_cos();
         let i = physique::lancer(&self.monde, cible, [-sy * cp, -sp, -cy * cp], PORTEE)?;
@@ -590,6 +608,7 @@ impl App {
         let graine = c.graine;
         self.campagne = c.clone();
         self.tuiles.repartir(&mut self.monde, &mut self.maillages, Box::new(c));
+        self.refaire_lointain();
         self.tuiles.fiche.graine = graine;
         self.editeur.oublier();
         self.monde.choisie = None;
@@ -802,7 +821,21 @@ impl App {
         self.poignee(cx, &l, ecran);
         let mut scene = Scene::extraire(&self.monde, &self.maillages, &self.textures, camera, u);
         // En édition, pas de brouillard
-        scene.brouillard = if self.visee.is_some() { 1.0e7 } else { self.affichage.brouillard };
+        scene.brouillard = if self.visee.is_some() { 1.0e7 } else { self.affichage.brouillard_vu() };
+        // Le relief lointain, sauf sous les tuiles chargées (un mètre de recouvrement)
+        if let Some(k) = self.lointain {
+            let o = self.monde.origine;
+            let t = crate::moteur::TAILLE;
+            let place = translation([-(o[0] as f32) * t, 0.0, -(o[1] as f32) * t]);
+            scene.dessins.push(crate::moteur::scene::Dessin { maillage: k, place, os: Vec::new(), choisi: false });
+            let c = match self.visee {
+                Some(v) => Tuiles::tuile_de(&self.monde, v),
+                None => (o[0], o[1]),
+            };
+            let r = self.rayon_vu();
+            let (a, b) = (Tuiles::coin(&self.monde, (c.0 - r, c.1 - r)), Tuiles::coin(&self.monde, (c.0 + r + 1, c.1 + r + 1)));
+            scene.trou = Some((k, [a[0] + 1.0, a[2] + 1.0, b[0] - 1.0, b[2] - 1.0]));
+        }
         self.instant += dt;
         scene.mer = Some(MER);
         scene.temps = self.instant % 3600.0;
@@ -837,7 +870,7 @@ impl App {
                 let h = systemes::hauteur_sol(&self.monde, v[0], v[2]).unwrap_or(v[1]).max(MER);
                 ([v[0], h + 1.0, v[2]], self.cam.2)
             }
-            None => ([p[0], p[1] + hauteur * 0.6, p[2]], self.cam.2 * hauteur / 1.75),
+            None => ([p[0], p[1] + hauteur * PIVOT, p[2]], self.cam.2 * hauteur / 1.75),
         };
         // Au-delà de l'horizon, la vue se lève : la caméra descend au ras du sol et se
         // rapproche, le champ s'élargit (de 0 à 1)
@@ -869,7 +902,7 @@ impl App {
         Camera {
             vue: math::look_at(oeil, vise, haut),
             // En édition, on voit loin : le plan proche recule, la profondeur reste précise
-            proj: math::perspective(1.0 + CHAMP_LEVE * leve, w.w / w.h.max(1.0), if self.visee.is_some() { (d * 0.002).max(0.5) } else { 0.1 }, ((self.rayon_vu() as f32 + 1.5) * crate::moteur::TAILLE * 1.5).max(500.0) + if self.visee.is_some() { d } else { 0.0 }),
+            proj: math::perspective(1.0 + CHAMP_LEVE * leve, w.w / w.h.max(1.0), if self.visee.is_some() { (d * 0.002).max(0.5) } else { 0.1 }, if self.visee.is_some() { ((self.rayon_vu() as f32 + 1.5) * crate::moteur::TAILLE * 1.5).max(500.0) + d } else { crate::reglages::VISIBILITE * 1.1 }),
             oeil,
             fenetre: [w.x, w.y, w.w, w.h],
         }

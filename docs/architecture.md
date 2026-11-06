@@ -732,3 +732,19 @@ sur une grille qui déborde d'un point).
   −35 %), le champ s'élargit (`CHAMP_LEVE`, +0,3 rad). L'œil est posé au-dessus du sol
   avant le lancer qui l'avance devant les obstacles (le sol ne le ramène pas contre le
   personnage) ; la vue part de l'œil selon l'angle demandé plutôt que vers le personnage.
+
+## 16. Le lointain et le brouillard (0.17)
+
+- `src/lointain.rs` : un maillage de terrain (`tuile/lointain`) de toute la carte, un
+  point par coin de tuile, hauteurs et couleurs du générateur, normales entre voisins ;
+  les carrés de mer plus profonds que 12 m n'y sont pas. Refait au lancement, quand
+  l'érosion arrive et à « Régénérer » (pas dans les tests : il couvre toute la carte).
+- Il se dessine chaque image, placé selon l'origine du monde. `Scene::trou` : un
+  rectangle (les tuiles chargées autour du centre, moins un mètre) où le programme du
+  terrain l'écarte (`u_trou`, `discard`). Il ne porte pas d'ombre.
+- Les traits du quadrillage s'effacent quand ils se serrent au loin (`fwidth`).
+- `reglages::VISIBILITE` = 3 km : le plan lointain de la caméra en jeu (× 1,1) et le
+  brouillard le plus loin. `Affichage::sans_brouillard` (gardé dans `affichage.json`),
+  `brouillard_vu` ; le brouillard ne dépend plus de la distance des tuiles.
+- La caméra, le regard du personnage et la visée partent de sa tête : `PIVOT` = 0,92 de
+  sa hauteur (avant : 0,6, le nombril).

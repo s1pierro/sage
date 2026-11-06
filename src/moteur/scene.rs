@@ -96,6 +96,9 @@ pub struct Scene {
     pub mer: Option<f32>,
     /// Le temps qui passe, en secondes : la houle.
     pub temps: f32,
+    /// Un maillage du terrain qui ne se dessine pas dans un rectangle (x, z bas, x, z
+    /// haut) : le relief lointain, sous les tuiles chargées.
+    pub trou: Option<(MaillageId, [f32; 4])>,
 }
 
 /// Le brouillard d'origine.
@@ -118,7 +121,7 @@ impl Scene {
             dessins.push(Dessin { maillage: r.maillage, place, os, choisi: monde.choisie == Some(e) });
         }
         let soleil = Soleil { direction: SOLEIL, centre: camera.oeil, rayon: RAYON_OMBRES };
-        Scene { camera, dessins, soleil, maillages: maillages.tous(), textures: textures.toutes(), brouillard: BROUILLARD, isolignes: 0.0, mer: None, temps: 0.0 }
+        Scene { camera, dessins, soleil, maillages: maillages.tous(), textures: textures.toutes(), brouillard: BROUILLARD, isolignes: 0.0, mer: None, temps: 0.0, trou: None }
     }
 }
 

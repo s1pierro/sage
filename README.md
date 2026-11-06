@@ -6,6 +6,14 @@ Il vise un monde ouvert, avec d'autres valeurs que la violence.
 
 ![Le mannequin marche dans le décor de S.A.G.E.](docs/apercu.png)
 
+## Version 0.17 : voir à 3 km, avec ou sans brouillard
+
+- Au-delà des tuiles chargées, le relief de toute la carte se voit, simplifié (un point
+  tous les 64 m) : les montagnes et les côtes de l'île jusqu'à 3 km.
+- La caméra tourne autour de la tête du personnage, et non plus de sa taille.
+- Réglages › Affichage : « Avec brouillard / Sans brouillard », et le brouillard réglable
+  de 30 m à 3 km (règle logarithmique). Sans brouillard, la vue s'arrête net à 3 km.
+
 ## Version 0.16 : lever la vue
 
 - En jeu, la vue se lève vers le ciel, jusqu'à environ 60°. Passé l'horizon, la
