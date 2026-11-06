@@ -657,3 +657,22 @@ sur une grille qui déborde d'un point).
 - `Scene::temps` fait avancer la houle, même en pause.
 - Le joueur n'avance pas là où le fond est à plus de `PROFONDEUR` (1,2 m) sous l'eau,
   sauf vers moins profond. La caméra reste au-dessus de l'eau.
+
+## 11. La carte du monde (0.12)
+
+- `src/carte.rs` : une image de 313 × 313, un pixel par tuile. Le fond vient du
+  générateur, une hauteur au centre de chaque tuile (la pente, pour la couleur, se lit
+  entre voisines) : il se calcule une fois par graine. Les tuiles retouchées s'y posent :
+  celles du dépôt à la construction (`Depot::tuiles_ecrites`), celles chargées et
+  retouchées ensuite.
+- L'image ombre le relief (lumière du nord-ouest) ; la mer va du turquoise au bleu
+  sombre jusqu'à 30 m de fond.
+- `Tuiles::retouches` compte les retouches ; l'image se refait quand il change, au plus
+  deux fois par seconde. Régénérer la carte la refait de zéro.
+- L'image est une texture du moteur (`carte`) ; l'interface sait en dessiner une
+  (`DrawList::image`, `Cmd::image`, forme −2 dans le programme de l'interface).
+- `Shell::carte` : en paysage, le panneau de début s'élargit de la hauteur de son corps
+  (dans la limite de 70 % de l'écran). L'onglet Topologie s'y scinde : outils à gauche,
+  carte carrée à droite.
+- La carte porte la zone chargée, le point visé et la direction de la vue, le joueur.
+  Un doigt qui la touche ou y glisse place le point visé.

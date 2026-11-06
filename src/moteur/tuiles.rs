@@ -241,6 +241,8 @@ pub struct Tuiles {
     pub ecrites: usize,
     /// La dernière erreur du dépôt.
     pub erreur: Option<String>,
+    /// Compte les retouches du relief et les cartes refaites : la carte du monde suit.
+    pub retouches: u64,
 }
 
 impl Tuiles {
@@ -262,6 +264,7 @@ impl Tuiles {
             derniere_ms: 0.0,
             ecrites: 0,
             erreur: None,
+            retouches: 0,
         }
     }
 
@@ -393,6 +396,11 @@ impl Tuiles {
         }
     }
 
+    /// La tuile `k` attend d'être écrite.
+    pub fn est_sale(&self, k: (i32, i32)) -> bool {
+        self.sales.contains_key(&k)
+    }
+
     /// Combien de tuiles attendent d'être écrites.
     pub fn a_ecrire(&self) -> usize {
         self.sales.len() + self.fiche_sale as usize
@@ -490,6 +498,7 @@ impl Tuiles {
         balayer(monde, maillages);
         self.sales.clear();
         self.source = source;
+        self.retouches += 1;
         if let Err(e) = self.depot.effacer_tuiles() {
             self.erreur = Some(format!("tuiles : {e}"));
         }
@@ -519,6 +528,7 @@ impl Tuiles {
         c.couleurs = Arc::new(couleurs);
         monde.relief.mettre(c.terrain, relief);
         self.marquer(k);
+        self.retouches += 1;
     }
 
     /// Ôte l'objet `e` du monde.

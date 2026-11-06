@@ -50,14 +50,20 @@ pub struct Shell {
     pub start: Panel,
     pub end: Panel,
     pub dp: f32,
+    /// Le panneau de début porte une carte carrée à sa droite : en paysage, il s'élargit
+    /// de la hauteur de son corps (sous son en-tête de `TETE_DP`).
+    pub carte: bool,
 }
+
+/// La hauteur de l'en-tête d'un panneau.
+pub const TETE_DP: f32 = 60.0;
 
 const MIN_PANEL_DP: f32 = 200.0;
 const HANDLE_DP: f32 = 28.0;
 
 impl Shell {
     pub fn new(dp: f32) -> Shell {
-        Shell { start: Panel::default(), end: Panel::default(), dp }
+        Shell { start: Panel::default(), end: Panel::default(), dp, carte: false }
     }
 
     pub fn animating(&self) -> bool {
@@ -75,7 +81,8 @@ impl Shell {
         let both = self.start.open && self.end.open;
         let (max_start, max_end) = if both { (0.28, 0.42) } else { (0.70, 0.70) };
         let o = if landscape { 0 } else { 1 };
-        (self.start.custom[o].unwrap_or(def_start).min(max_start * avail), self.end.custom[o].unwrap_or(def_end).min(max_end * avail))
+        let carte = if self.carte && landscape { screen.h - TETE_DP * self.dp } else { 0.0 };
+        ((self.start.custom[o].unwrap_or(def_start) + carte).min(max_start * avail), self.end.custom[o].unwrap_or(def_end).min(max_end * avail))
     }
 
     /// Avance les animations de `dt` secondes et place chaque zone.

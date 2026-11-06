@@ -58,6 +58,12 @@ in vec2 v_local; in vec4 v_shape; in vec2 v_uv; in vec4 v_color;
 uniform sampler2D u_atlas;
 out vec4 o_color;
 void main() {
+  // Une image : ses couleurs telles quelles
+  if (v_shape.z < -1.5) {
+    vec4 t = texture(u_atlas, v_uv);
+    o_color = vec4(t.rgb * t.a * v_color.a, t.a * v_color.a);
+    return;
+  }
   float a;
   if (v_shape.z < 0.0) {
     a = texture(u_atlas, v_uv).r;
@@ -808,6 +814,9 @@ impl Renderer {
                     }
                     None => (gl.glDisable)(SCISSOR),
                 }
+                // Une image se lit dans sa texture, le reste dans l'atlas
+                let t = c.image.and_then(|k| self.textures.get(&crate::moteur::TextureId(k))).map_or(self.atlas, |x| x.1);
+                (gl.glBindTexture)(TEXTURE_2D, t);
                 (gl.glDrawArrays)(TRIANGLES, c.first as i32, c.count as i32);
             }
             (gl.glBindVertexArray)(0);

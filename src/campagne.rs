@@ -148,7 +148,7 @@ impl Campagne {
 
     /// Le sable des plages, l'herbe plus ou moins sèche, la lande en altitude, la roche
     /// dans les pentes et vers les sommets, le fond de la mer.
-    fn couleur(&self, x: f64, z: f64, h: f64, n: [f32; 3]) -> [f32; 3] {
+    pub fn couleur(&self, x: f64, z: f64, h: f64, n: [f32; 3]) -> [f32; 3] {
         let melange = |a: [f32; 3], b: [f32; 3], t: f64| -> [f32; 3] { [0, 1, 2].map(|k| a[k] + (b[k] - a[k]) * t as f32) };
         let herbe = [0.47, 0.60, 0.36];
         let seche = [0.66, 0.65, 0.44];

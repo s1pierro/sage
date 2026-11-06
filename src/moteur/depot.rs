@@ -110,6 +110,18 @@ impl Depot {
         self.ecrire(&Depot::chemin(i, j), s)
     }
 
+    /// Les tuiles écrites, (i, j).
+    pub fn tuiles_ecrites(&self) -> Vec<(i32, i32)> {
+        let lire = |nom: &str| -> Option<(i32, i32)> {
+            let (i, j) = nom.strip_suffix(".json")?.split_once('_')?;
+            Some((i.parse().ok()?, j.parse().ok()?))
+        };
+        match &self.dossier {
+            None => self.memoire.keys().filter_map(|k| lire(k.strip_prefix("tuiles/")?)).collect(),
+            Some(d) => std::fs::read_dir(d.join("tuiles")).map(|l| l.filter_map(|e| lire(e.ok()?.file_name().to_str()?)).collect()).unwrap_or_default(),
+        }
+    }
+
     /// Efface toutes les tuiles écrites.
     pub fn effacer_tuiles(&mut self) -> std::io::Result<()> {
         let Some(d) = &self.dossier else {

@@ -113,6 +113,11 @@ pub struct App {
     pub visee: Option<[f32; 3]>,
     /// Le temps qui passe, même en pause : la houle.
     instant: f32,
+    /// La carte du monde de l'onglet Topologie, sa texture, et depuis quand son image
+    /// n'a pas été refaite.
+    carte: Option<crate::carte::Carte>,
+    carte_texture: Option<crate::moteur::TextureId>,
+    carte_age: f32,
 }
 
 impl App {
@@ -177,6 +182,9 @@ impl App {
             affichage,
             visee: None,
             instant: 0.0,
+            carte: None,
+            carte_texture: None,
+            carte_age: 0.0,
         };
         // Les modèles du catalogue : les objets déjà posés les retrouvent
         let mut erreurs = Vec::new();
@@ -513,12 +521,16 @@ impl App {
         }
         self.tuiles.fiche.joueur = Some((self.monde.origine, l.pos, l.cap));
         self.tuiles.tout_ecrire(&self.monde);
+        self.carte = None;
         self.dire(format!("Carte régénérée, nue : graine {graine}"));
     }
 
     /// Une image : commandes, pas de simulation, animation, caméra, interface.
     pub fn frame(&mut self, cx: &mut Cx, ecran: Rect, dt: f32) -> Scene {
         let dp = cx.dp;
+        // En topologie, le panneau s'élargit d'une carte du monde
+        self.shell.carte = self.edite() && self.editeur.onglet == editeur::TOPOLOGIE;
+        self.carte_age += dt;
         let l = self.shell.layout(ecran, dt);
         let w = l.workspace;
         // Manette : un doigt posé dans la moitié gauche de l'espace de travail
@@ -756,6 +768,58 @@ impl App {
         }
     }
 
+    /// La carte du monde dans `r` : refaite quand une tuile a été retouchée (au plus deux
+    /// fois par seconde), avec le point visé, la zone chargée, la direction de la vue et
+    /// le joueur. La toucher ou y glisser y emmène le point visé.
+    fn dessiner_carte(&mut self, cx: &mut Cx, r: Rect) {
+        use crate::carte::{depuis_carte, vers_carte, Carte};
+        let d = cx.dp;
+        let graine = self.tuiles.fiche.graine;
+        if self.carte.as_ref().is_none_or(|c| c.graine != graine) {
+            self.carte = Some(Carte::new(graine, &mut self.monde, &self.tuiles));
+        }
+        let carte = self.carte.as_mut().expect("faite");
+        if carte.vue != self.tuiles.retouches && (self.carte_texture.is_none() || self.carte_age > 0.5) {
+            carte.suivre(&self.monde, &self.tuiles);
+            self.carte_texture = Some(self.textures.mettre("carte", Arc::new(carte.image())));
+            self.carte_age = 0.0;
+        }
+        let Some(tex) = self.carte_texture else { return };
+        cx.dl.rrect(Rect::new(r.x - d, r.y - d, r.w + 2.0 * d, r.h + 2.0 * d), 0.0, widgets::LINE);
+        cx.dl.image(r, tex.0);
+        let ecran = |p: [f64; 3]| {
+            let q = vers_carte(p[0], p[2]);
+            [r.x + q[0] * r.w, r.y + q[1] * r.h]
+        };
+        // La zone chargée autour du centre, et le point visé avec la direction de la vue
+        let centre = self.visee.unwrap_or(self.lieu().pos);
+        let c = self.monde.absolu(centre);
+        let demi = (self.rayon_vu() as f64 + 0.5) * crate::moteur::TAILLE as f64;
+        let (a, b) = (ecran([c[0] - demi, 0.0, c[2] - demi]), ecran([c[0] + demi, 0.0, c[2] + demi]));
+        let blanc: Color = [255, 255, 255, 200];
+        for (p, q) in [([a[0], a[1]], [b[0], a[1]]), ([b[0], a[1]], [b[0], b[1]]), ([b[0], b[1]], [a[0], b[1]]), ([a[0], b[1]], [a[0], a[1]])] {
+            cx.dl.line(p, q, 1.5 * d, blanc);
+        }
+        let v = ecran(c);
+        let (s, co) = self.cam.0.sin_cos();
+        cx.dl.line(v, [v[0] - s * 18.0 * d, v[1] - co * 18.0 * d], 2.5 * d, [0xF0, 0xC0, 0x40, 255]);
+        cx.dl.rrect(Rect::new(v[0] - 5.0 * d, v[1] - 5.0 * d, 10.0 * d, 10.0 * d), 5.0 * d, [0x1B, 0x1B, 0x24, 230]);
+        cx.dl.rrect(Rect::new(v[0] - 3.5 * d, v[1] - 3.5 * d, 7.0 * d, 7.0 * d), 3.5 * d, [255, 255, 255, 255]);
+        // Le joueur, s'il n'est pas au point visé
+        let j = ecran(self.monde.absolu(self.lieu().pos));
+        if (j[0] - v[0]).hypot(j[1] - v[1]) > 6.0 * d {
+            cx.dl.rrect(Rect::new(j[0] - 4.0 * d, j[1] - 4.0 * d, 8.0 * d, 8.0 * d), 4.0 * d, [0xE0, 0x55, 0x50, 255]);
+        }
+        // Le doigt y emmène le point visé
+        if let (Some(g), Some(v)) = (cx.ui.drag(id("carte-du-monde"), r), self.visee.as_mut()) {
+            let p = depuis_carte(((g.x - r.x) / r.w).clamp(0.0, 1.0), ((g.y - r.y) / r.h).clamp(0.0, 1.0));
+            let o = self.monde.origine;
+            let t = crate::moteur::TAILLE as f64;
+            v[0] = (p[0] - o[0] as f64 * t) as f32;
+            v[2] = (p[1] - o[1] as f64 * t) as f32;
+        }
+    }
+
     /// Les tuiles chargées autour du centre : la distance d'affichage, ou celle de
     /// l'édition en pause.
     fn rayon_vu(&self) -> i32 {
@@ -913,6 +977,17 @@ impl App {
             return;
         }
         if self.onglet == ONGLET_EDITEUR {
+            // En topologie : les outils à gauche, la carte à droite, sur toute la hauteur
+            let mut corps = corps;
+            if self.editeur.onglet == editeur::TOPOLOGIE {
+                let c = (corps.h - 16.0 * d).min(corps.w - 240.0 * d);
+                if c >= 120.0 * d {
+                    let outils = Rect::new(corps.x, corps.y, corps.w - c - 16.0 * d, corps.h);
+                    cx.dl.rrect(Rect::new(outils.right(), corps.y, t, corps.h), 0.0, widgets::LINE);
+                    self.dessiner_carte(cx, Rect::new(corps.right() - c - 8.0 * d, corps.y + (corps.h - c) / 2.0, c, c));
+                    corps = outils;
+                }
+            }
             let mut b = cx.body(crate::ui::sub_id(id("corps-editeur"), self.editeur.onglet), corps, &self.scrolls);
             if self.editeur.onglet == editeur::TOPOLOGIE {
                 self.editeur.panneau_topologie(cx, &mut b, &mut self.monde, &mut self.maillages, &mut self.tuiles);

@@ -6,6 +6,16 @@ Il vise un monde ouvert, avec d'autres valeurs que la violence.
 
 ![Le mannequin marche dans le décor de S.A.G.E.](docs/apercu.png)
 
+## Version 0.12 : la carte du monde
+
+- En Topologie, le panneau s'élargit et se scinde : les outils à gauche, à droite la
+  carte du monde entier sur toute la hauteur. Un pixel par tuile, la couleur du sol
+  ombrée par le relief, la mer plus sombre au large.
+- Elle montre le point visé et la direction de la vue, la zone chargée autour, et le
+  joueur. La toucher ou y glisser y emmène le point visé.
+- Les retouches du relief s'y voient (l'image se refait au plus deux fois par seconde),
+  celles déjà enregistrées comprises.
+
 ## Version 0.11 : une île
 
 - La carte porte une île d'environ 15 km, au contour découpé de caps et de baies, au
