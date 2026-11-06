@@ -148,6 +148,8 @@ pub struct App {
     calcul: Option<(u32, bool, std::sync::mpsc::Receiver<Campagne>)>,
     /// Le relief lointain de toute la carte, au-delà des tuiles chargées.
     lointain: Option<crate::moteur::MaillageId>,
+    /// Les bâtiments lointains d'un lieu réel, en blocs.
+    lointain_bati: Option<crate::moteur::MaillageId>,
 }
 
 impl App {
@@ -226,6 +228,7 @@ impl App {
             campagne,
             calcul: None,
             lointain: None,
+            lointain_bati: None,
         };
         // Les modèles du catalogue : les objets déjà posés les retrouvent
         let mut erreurs = Vec::new();
@@ -267,6 +270,8 @@ impl App {
         }
         let v = crate::lointain::sommets(&self.campagne);
         self.lointain = Some(self.maillages.mettre(crate::lointain::ID, Format::Terrain, Arc::new(v)));
+        let v = crate::lointain::bati(&self.campagne);
+        self.lointain_bati = (!v.is_empty()).then(|| self.maillages.mettre(crate::lointain::ID_BATI, Format::Terrain, Arc::new(v)));
     }
 
     /// La graine dont l'érosion se calcule.
@@ -860,13 +865,19 @@ impl App {
             let t = crate::moteur::TAILLE;
             let place = translation([-(o[0] as f32) * t, 0.0, -(o[1] as f32) * t]);
             scene.dessins.push(crate::moteur::scene::Dessin { maillage: k, place, os: Vec::new(), choisi: false });
+            let mut trouees = vec![k];
+            // Les bâtiments lointains (« bati/ » : la topologie ne les garde pas)
+            if let Some(b) = self.lointain_bati {
+                scene.dessins.push(crate::moteur::scene::Dessin { maillage: b, place, os: Vec::new(), choisi: false });
+                trouees.push(b);
+            }
             let c = match self.visee {
                 Some(v) => Tuiles::tuile_de(&self.monde, v),
                 None => (o[0], o[1]),
             };
             let r = self.rayon_vu();
             let (a, b) = (Tuiles::coin(&self.monde, (c.0 - r, c.1 - r)), Tuiles::coin(&self.monde, (c.0 + r + 1, c.1 + r + 1)));
-            scene.trou = Some((k, [a[0] + 1.0, a[2] + 1.0, b[0] - 1.0, b[2] - 1.0]));
+            scene.trou = Some((trouees, [a[0] + 1.0, a[2] + 1.0, b[0] - 1.0, b[2] - 1.0]));
         }
         self.instant += dt;
         scene.mer = Some(self.campagne.mer());

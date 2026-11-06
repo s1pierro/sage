@@ -190,10 +190,17 @@ impl Campagne {
     pub fn couleur(&self, x: f64, z: f64, h: f64, n: [f32; 3]) -> [f32; 3] {
         let melange = |a: [f32; 3], b: [f32; 3], t: f64| -> [f32; 3] { [0, 1, 2].map(|k| a[k] + (b[k] - a[k]) * t as f32) };
         if let Some(r) = &self.reel {
-            // Un lieu réel : de l'herbe plus ou moins sèche, la craie dans les pentes
+            // Un lieu réel : selon l'occupation du sol, de l'herbe plus ou moins sèche, des
+            // bois, des prés, des champs, des quartiers ; puis la craie dans les pentes
             // raides (les coteaux de la Seine), la vase des berges, le fond de l'eau
             let s = bruit(0xA5A5, x / 60.0, z / 60.0);
-            let mut c = melange([0.45, 0.58, 0.34], [0.60, 0.62, 0.42], s * 0.8);
+            let mut c = [0.0f32; 3];
+            for (classe, poids) in r.occupation(x, z) {
+                if poids > 0.0 {
+                    let t = occupation(classe, x, z, s);
+                    c = [0, 1, 2].map(|k| c[k] + t[k] * poids as f32);
+                }
+            }
             c = melange(c, [0.52, 0.50, 0.44], ((0.85 - n[1] as f64) / 0.15).clamp(0.0, 1.0));
             c = melange(c, [0.86, 0.85, 0.80], ((0.62 - n[1] as f64) / 0.15).clamp(0.0, 1.0));
             let e = r.eau(x, z);
@@ -232,6 +239,26 @@ impl Campagne {
         c = melange(c, sable, rampe(4.0, 2.0, h) * rampe(0.80, 0.95, n[1] as f64));
         c = melange(c, mouille, rampe(0.3, -0.8, h));
         melange(c, [0.40, 0.44, 0.40], rampe(-2.0, -15.0, h))
+    }
+}
+
+/// La teinte du sol d'une classe d'occupation (`reel::BOIS`…) en (x, z) ; `s`, le bruit
+/// de l'herbe.
+fn occupation(classe: u8, x: f64, z: f64, s: f64) -> [f32; 3] {
+    use crate::reel::{BOIS, CHAMP, HABITE, PRE, ZONE};
+    let melange = |a: [f32; 3], b: [f32; 3], t: f64| -> [f32; 3] { [0, 1, 2].map(|k| a[k] + (b[k] - a[k]) * t as f32) };
+    match classe {
+        BOIS => melange([0.20, 0.31, 0.16], [0.27, 0.36, 0.19], s),
+        PRE => melange([0.38, 0.58, 0.28], [0.46, 0.60, 0.32], s * 0.7),
+        // Des parcelles : des blés, des labours, des cultures vertes, en taches de 150 m
+        CHAMP => {
+            let p = bruit(0x5EED, x / 150.0, z / 150.0);
+            let c = melange([0.52, 0.62, 0.32], [0.74, 0.68, 0.42], rampe(0.35, 0.45, p));
+            melange(c, [0.52, 0.44, 0.32], rampe(0.62, 0.70, p))
+        }
+        HABITE => melange([0.50, 0.53, 0.42], [0.56, 0.56, 0.50], s),
+        ZONE => melange([0.55, 0.54, 0.50], [0.60, 0.58, 0.54], s),
+        _ => melange([0.45, 0.58, 0.34], [0.60, 0.62, 0.42], s * 0.8),
     }
 }
 

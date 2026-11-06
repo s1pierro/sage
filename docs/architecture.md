@@ -820,3 +820,24 @@ sur une grille qui déborde d'un point).
   le dessus du tablier pour sol, et les parapets arrêtent.
 - Les ponts ne sont pas des routes : le relief n'est ni aplani ni teinté sous eux.
 
+## 21. L'occupation du sol et les bâtiments lointains (0.22)
+
+- **Outil** : `landuse=*`, `natural=wood|scrub|grassland|heath` et quelques `leisure=*`
+  (parcs, jardins, terrains), en neuf requêtes dédoublonnées. `classe_sol` les range en
+  cinq classes : `BOIS`, `PRE`, `CHAMP`, `HABITE`, `ZONE` (0 : rien de dit). Elles sont
+  tramées (`remplir_avec`, pair-impair) sur une grille de 8 m (`cote_sol(n)` points),
+  des moins précises aux plus précises : habité, zones, champs, prés, bois.
+- **Format** : SAGEREEL 5 ajoute l'occupation par plages (classe, longueur ≤ 255).
+  Les formats 1 à 4 se lisent encore, sans occupation.
+- **Couleur** (`campagne.rs`) : `Reel::occupation(x, z)` donne les classes des quatre
+  points autour et leurs poids. La teinte de chaque classe (`occupation`) se mêle
+  bilinéairement. Les champs se tachent de parcelles par un bruit de 150 m. La craie,
+  l'eau et les routes se posent ensuite par-dessus, comme avant.
+- **Bâtiments lointains** (`lointain::bati`) : un bâtiment d'au moins `BATI_AIRE`
+  (100 m²) ou `BATI_HAUT` (15 m) devient un pavé. Le pavé est orienté selon le plus long
+  côté et réduit à l'aire du contour. Il a un toit et quatre murs, sans fond, aux
+  couleurs du genre. Le maillage `bati/lointain` est au format Terrain : il prend le même
+  trou que le relief lointain (`Scene::trou` est maintenant une liste de maillages). Le
+  préfixe `bati/` le fait disparaître en topologie. Le format Terrain ne porte pas
+  d'ombre.
+

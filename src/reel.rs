@@ -18,6 +18,9 @@
 //!   elle (`Reel::bati`).
 //! - Les ponts : des lignes comme les routes (la hauteur du tablier), montées en tabliers
 //!   avec leurs parapets, par morceaux, dans la tuile du milieu de chaque morceau.
+//! - L'occupation du sol (bois, prés et parcs, champs, quartiers habités, zones
+//!   industrielles) : une classe par point d'une grille deux fois plus lâche que le
+//!   relief, qui teinte le sol (`Reel::occupation`).
 //!
 //! Sources : relief © IGN (RGE ALTI, Licence Ouverte 2.0) ; eau © les contributeurs
 //! OpenStreetMap (ODbL). Un fichier préparé est une base de données dérivée d'OSM : il
@@ -27,10 +30,18 @@ use crate::moteur::tuiles::DEMI_CARTE;
 use crate::moteur::TAILLE;
 
 const MAGIQUE: &[u8; 8] = b"SAGEREEL";
-const FORMAT: u32 = 4;
+const FORMAT: u32 = 5;
 
 /// Le texte à citer.
-pub const SOURCES: &str = "Relief © IGN (RGE ALTI) · eau, routes et bâtiments © les contributeurs OpenStreetMap";
+pub const SOURCES: &str = "Relief © IGN (RGE ALTI) · eau, routes, bâtiments et occupation du sol © les contributeurs OpenStreetMap";
+
+/// Les classes d'occupation du sol (0 : rien de dit, de l'herbe).
+pub const BOIS: u8 = 1;
+pub const PRE: u8 = 2;
+pub const CHAMP: u8 = 3;
+pub const HABITE: u8 = 4;
+pub const ZONE: u8 = 5;
+pub const CLASSES: u8 = 6;
 
 /// Les genres de routes : chacun sa couleur.
 pub const GRANDE: u8 = 0;
@@ -96,7 +107,7 @@ impl Batiment {
 
 /// L'aire signée d'un contour (positive : sens inverse des aiguilles d'une montre, x vers
 /// la droite et z vers le bas, vu d'en haut).
-fn aire(c: &[[f32; 2]]) -> f32 {
+pub fn aire(c: &[[f32; 2]]) -> f32 {
     let mut s = 0.0;
     for i in 0..c.len() {
         let (a, b) = (c[i], c[(i + 1) % c.len()]);
@@ -208,6 +219,14 @@ pub struct Reel {
     /// Pour chaque tuile, les morceaux de pont (pont, premier point) dont le milieu est
     /// chez elle.
     ponts_par_tuile: std::collections::HashMap<(i32, i32), Vec<(u32, u32)>>,
+    /// L'occupation du sol, une classe par point de la grille de `2 × pas` (`cote_sol`
+    /// points de côté) ; vide : rien de dit.
+    pub sol: Vec<u8>,
+}
+
+/// Le côté de la grille de l'occupation du sol pour un relief de `n` points de côté.
+pub fn cote_sol(n: usize) -> usize {
+    (n - 1) / 2 + 1
 }
 
 /// L'épaisseur du tablier, la hauteur et l'épaisseur des parapets (m).
@@ -323,7 +342,31 @@ impl Reel {
         for (i, _) in eau.iter().enumerate().filter(|(_, e)| **e) {
             bits[i / 8] |= 1 << (i % 8);
         }
-        Reel { nom: nom.into(), lat, lon, x0, y0, pas, cote: n, niveau, base: lo, echelle, h: hv, eau: bits, routes, index: Default::default(), batiments, par_tuile: Default::default(), ponts, ponts_par_tuile: Default::default() }.indexe()
+        Reel { nom: nom.into(), lat, lon, x0, y0, pas, cote: n, niveau, base: lo, echelle, h: hv, eau: bits, routes, index: Default::default(), batiments, par_tuile: Default::default(), ponts, ponts_par_tuile: Default::default(), sol: Vec::new() }.indexe()
+    }
+
+    /// Avec son occupation du sol (`cote_sol(cote)²` classes).
+    pub fn avec_sol(mut self, sol: Vec<u8>) -> Reel {
+        let m = cote_sol(self.cote);
+        assert_eq!(sol.len(), m * m);
+        self.sol = sol;
+        self
+    }
+
+    /// L'occupation du sol en (x, z) : les classes des quatre points autour et leurs
+    /// poids.
+    pub fn occupation(&self, x: f64, z: f64) -> [(u8, f64); 4] {
+        if self.sol.is_empty() {
+            return [(0, 1.0), (0, 0.0), (0, 0.0), (0, 0.0)];
+        }
+        let m = cote_sol(self.cote) as i64;
+        let p = self.pas * 2.0;
+        let (gx, gz) = ((x - origine()) / p, (z - origine()) / p);
+        let (a, b) = (gx.floor(), gz.floor());
+        let (u, v) = (gx - a, gz - b);
+        let (a, b) = (a as i64, b as i64);
+        let c = |a: i64, b: i64| self.sol[(b.clamp(0, m - 1) * m + a.clamp(0, m - 1)) as usize];
+        [(c(a, b), (1.0 - u) * (1.0 - v)), (c(a + 1, b), u * (1.0 - v)), (c(a, b + 1), (1.0 - u) * v), (c(a + 1, b + 1), u * v)]
     }
 
     /// Range chaque segment de route dans les cases qu'il approche.
@@ -523,6 +566,20 @@ impl Reel {
             }
         }
         ecrire_routes(&mut o, &self.ponts);
+        // L'occupation du sol, par plages (classe, longueur de 1 à 255)
+        let mut plages = Vec::new();
+        let mut it = self.sol.iter().peekable();
+        while let Some(&c) = it.next() {
+            let mut l = 1u8;
+            while l < 255 && it.peek() == Some(&&c) {
+                it.next();
+                l += 1;
+            }
+            plages.push(c);
+            plages.push(l);
+        }
+        o.extend_from_slice(&(plages.len() as u32 / 2).to_le_bytes());
+        o.extend_from_slice(&plages);
         o
     }
 
@@ -586,10 +643,21 @@ impl Reel {
             }
         }
         let ponts = if format >= 4 { lire_routes!() } else { Vec::new() };
+        let mut sol = Vec::new();
+        if format >= 5 {
+            let l = u32_(prendre(4)?) as usize;
+            for c in prendre(l * 2)?.chunks(2) {
+                sol.extend(std::iter::repeat_n(c[0], c[1] as usize));
+            }
+            let m = cote_sol(n);
+            if !sol.is_empty() && sol.len() != m * m {
+                return None;
+            }
+        }
         if k != o.len() {
             return None;
         }
-        Some(Reel { nom, lat, lon, x0, y0, pas, cote: n, niveau, base, echelle, h, eau, routes, index: Default::default(), batiments, par_tuile: Default::default(), ponts, ponts_par_tuile: Default::default() }.indexe())
+        Some(Reel { nom, lat, lon, x0, y0, pas, cote: n, niveau, base, echelle, h, eau, routes, index: Default::default(), batiments, par_tuile: Default::default(), ponts, ponts_par_tuile: Default::default(), sol }.indexe())
     }
 }
 
@@ -623,6 +691,13 @@ mod tests {
         assert!((r.hauteur(x + pas / 2.0, 0.0) - 21.0).abs() < 0.02);
         assert_eq!(r.eau(origine() + pas, 0.0), 1.0);
         assert_eq!(r.eau(-origine() - pas, 0.0), 0.0);
+        // L'occupation du sol : des bois au nord, des champs au sud, relue telle quelle
+        let m = cote_sol(n);
+        let sol: Vec<u8> = (0..m * m).map(|i| if i / m < m / 2 { BOIS } else { CHAMP }).collect();
+        let r = r.avec_sol(sol);
+        assert_eq!(Reel::depuis_octets(&r.octets()), Some(r.clone()));
+        assert_eq!(r.occupation(0.0, origine() + 2.0 * pas)[0], (BOIS, 1.0));
+        assert_eq!(r.occupation(0.0, -origine() - 2.0 * pas)[0], (CHAMP, 1.0));
     }
 
     #[test]

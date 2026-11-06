@@ -6,6 +6,17 @@ Il vise un monde ouvert, avec d'autres valeurs que la violence.
 
 ![Le mannequin marche dans le décor de S.A.G.E.](docs/apercu.png)
 
+## Version 0.22 : l'occupation du sol, les bâtiments au loin
+
+- Le sol du lieu réel suit l'occupation d'OpenStreetMap : bois, prés et parcs, champs
+  en parcelles de couleurs (blés, labours, cultures vertes), quartiers habités, zones
+  d'activité. Ça se voit de près, au loin et sur l'onglet Carte.
+- Les grands bâtiments (au moins 100 m² au sol ou 15 m de haut) se voient au-delà des
+  tuiles chargées, en blocs à leur hauteur et à leurs couleurs : la ville a une
+  silhouette jusqu'à l'horizon. Près du joueur, les vrais bâtiments prennent la place.
+- Un `.reel` d'avant se lit encore (sans occupation du sol) ; refaire celui de Rouen avec
+  `examples/lieu_reel.rs` l'ajoute.
+
 ## Version 0.21 : les ponts
 
 - Le lieu réel porte les ponts d'OpenStreetMap (les voies en `bridge=*`) : la Seine se

@@ -754,8 +754,8 @@ impl Renderer {
                 let d = &scene.dessins[a.dessin];
                 (gl.glUniformMatrix4fv)(self.loc(programme, "u_place"), 1, 0, d.place.as_ptr());
                 if programme == self.terrain {
-                    let t = match scene.trou {
-                        Some((k, t)) if k == d.maillage => t,
+                    let t = match &scene.trou {
+                        Some((k, t)) if k.contains(&d.maillage) => *t,
                         _ => [1.0, 1.0, -1.0, -1.0],
                     };
                     (gl.glUniform4f)(self.loc(programme, "u_trou"), t[0], t[1], t[2], t[3]);

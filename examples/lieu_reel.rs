@@ -20,6 +20,11 @@
 //! bas du sol sous le contour (un mètre dessous), le toit à la hauteur au-dessus du sol
 //! moyen. La requête se fait en neuf morceaux.
 //!
+//! L'occupation du sol : `landuse=*`, les bois, prés et landes (`natural=*`), les parcs
+//! et terrains (`leisure=*`), en cinq classes (bois, prés et parcs, champs, quartiers
+//! habités, zones d'activité), tramées sur une grille de 8 m ; là où elles se
+//! recouvrent, la plus précise l'emporte (un parc dans un quartier). En neuf morceaux.
+//!
 //! L'eau : la Seine et les plans d'eau (`natural=water`, `waterway=riverbank`), leur
 //! surface au niveau médian du relief sous elles, leur fond creusé, plus profond loin des
 //! berges (jusqu'à 8 m). Un plan d'eau à un autre niveau (un étang sur le plateau) n'est
@@ -353,7 +358,54 @@ fn main() {
         }
     }
     println!("{} bâtiments", batiments.len());
-    let r = Reel::new(nom, lat, lon, x0, y0, pas, niveau, &h, &eau, routes, batiments, ponts);
+    // 6. L'occupation du sol, en neuf morceaux, tramée classe après classe
+    let m = sage::reel::cote_sol(n);
+    let mut surfaces_sol: Vec<(u8, Vec<Vec<(f64, f64)>>)> = Vec::new();
+    let mut vus = std::collections::HashSet::new();
+    let filtre = "[\"natural\"~\"^(wood|scrub|grassland|heath)$\"]";
+    let loisirs = "[\"leisure\"~\"^(park|garden|pitch|golf_course|recreation_ground|playground)$\"]";
+    for (bi, bj) in (0..3).flat_map(|j| (0..3).map(move |i| (i, j))) {
+        let (la0, lo0) = (cadre.0 + (cadre.2 - cadre.0) * bj as f64 / 3.0, cadre.1 + (cadre.3 - cadre.1) * bi as f64 / 3.0);
+        let (la1, lo1) = (cadre.0 + (cadre.2 - cadre.0) * (bj + 1) as f64 / 3.0, cadre.1 + (cadre.3 - cadre.1) * (bi + 1) as f64 / 3.0);
+        let b = format!("{la0:.5},{lo0:.5},{la1:.5},{lo1:.5}");
+        let q = format!("(way[\"landuse\"]({b});relation[\"landuse\"]({b});way{filtre}({b});relation{filtre}({b});way{loisirs}({b});relation{loisirs}({b}););out geom;");
+        let js = overpass(&cache.join(format!("osm_sol_{bi}_{bj}.json")), "occupation du sol", &q);
+        for e in js.get("elements").and_then(J::liste).unwrap_or(&[]) {
+            let id = (e.get("type").and_then(J::txt).unwrap_or("").to_string(), e.get("id").and_then(J::num).unwrap_or(0.0) as i64);
+            if !vus.insert(id) {
+                continue;
+            }
+            let Some(classe) = classe_sol(e.get("tags")) else { continue };
+            // En points de la grille de 8 m
+            let demi = |l: Vec<(f64, f64)>| l.into_iter().map(|p| (p.0 / 2.0, p.1 / 2.0)).collect::<Vec<_>>();
+            let anneaux_ = match e.get("type").and_then(J::txt) {
+                Some("way") => {
+                    let l = ligne(e.get("geometry").unwrap_or(&J::Nul));
+                    if l.len() < 4 || l.first() != l.last() {
+                        continue;
+                    }
+                    vec![demi(l)]
+                }
+                _ => anneaux(e.get("members").and_then(J::liste).unwrap_or(&[]).iter().filter(|m| m.get("type").and_then(J::txt) == Some("way")).map(|m| ligne(m.get("geometry").unwrap_or(&J::Nul))).filter(|l| l.len() > 1).collect()).into_iter().map(demi).collect(),
+            };
+            surfaces_sol.push((classe, anneaux_));
+        }
+    }
+    // Les moins précises d'abord : les quartiers, puis les champs, les prés, les bois
+    use sage::reel::{BOIS, CHAMP, HABITE, PRE, ZONE};
+    let mut sol = vec![0u8; m * m];
+    let mut compte = [0usize; 6];
+    for classe in [HABITE, ZONE, CHAMP, PRE, BOIS] {
+        for (_, a) in surfaces_sol.iter().filter(|(c, _)| *c == classe) {
+            remplir_avec(a, m, |i| sol[i] = classe);
+        }
+    }
+    for c in &sol {
+        compte[*c as usize] += 1;
+    }
+    let km2 = |k: usize| compte[k] as f64 * (pas * 2.0).powi(2) / 1e6;
+    println!("{} surfaces d'occupation : bois {:.0} km², prés {:.0}, champs {:.0}, habité {:.0}, zones {:.0}", surfaces_sol.len(), km2(1), km2(2), km2(3), km2(4), km2(5));
+    let r = Reel::new(nom, lat, lon, x0, y0, pas, niveau, &h, &eau, routes, batiments, ponts).avec_sol(sol);
     std::fs::write(&sortie, r.octets()).unwrap();
     println!("{} : {} Mo", sortie.display(), std::fs::metadata(&sortie).unwrap().len() / 1_000_000);
 }
@@ -433,6 +485,30 @@ fn genre_route(tags: Option<&J>) -> Option<(u8, f32, bool)> {
     Some((genre, largeur, pont))
 }
 
+/// La classe d'occupation du sol d'une surface d'après ses étiquettes OSM.
+fn classe_sol(tags: Option<&J>) -> Option<u8> {
+    use sage::reel::{BOIS, CHAMP, HABITE, PRE, ZONE};
+    let tag = |k: &str| tags.and_then(|t| t.get(k)).and_then(J::txt);
+    if let Some(n) = tag("natural") {
+        return match n {
+            "wood" | "scrub" => Some(BOIS),
+            "grassland" | "heath" => Some(PRE),
+            _ => None,
+        };
+    }
+    if tag("leisure").is_some() && tag("landuse").is_none() {
+        return Some(PRE);
+    }
+    match tag("landuse")? {
+        "forest" => Some(BOIS),
+        "meadow" | "grass" | "recreation_ground" | "village_green" | "cemetery" | "allotments" | "orchard" | "vineyard" | "plant_nursery" | "greenfield" => Some(PRE),
+        "farmland" | "farmyard" => Some(CHAMP),
+        "residential" => Some(HABITE),
+        "industrial" | "commercial" | "retail" | "railway" | "construction" | "brownfield" | "garages" | "military" | "quarry" | "landfill" | "depot" | "port" => Some(ZONE),
+        _ => None,
+    }
+}
+
 /// Le genre et la hauteur (m) d'un bâtiment d'après ses étiquettes OSM : `height`, sinon
 /// ses étages (`building:levels`, 3 m chacun, plus les étages du toit), sinon selon son
 /// genre. Rien pour un toit seul (un auvent) ou ce qui n'est pas un bâtiment.
@@ -487,6 +563,11 @@ fn anneaux(mut morceaux: Vec<Vec<(f64, f64)>>) -> Vec<Vec<(f64, f64)>> {
 /// Remplit, pair-impair, les points de grille dans les anneaux d'une surface (ses trous
 /// restent vides).
 fn remplir(anneaux: &[Vec<(f64, f64)>], n: usize, eau: &mut [bool]) {
+    remplir_avec(anneaux, n, |i| eau[i] = true);
+}
+
+/// Pareil, en appelant `f` pour chaque point dedans (son indice dans la grille de `n`).
+fn remplir_avec(anneaux: &[Vec<(f64, f64)>], n: usize, mut f: impl FnMut(usize)) {
     let (mut b0, mut b1) = (f64::MAX, f64::MIN);
     for r in anneaux {
         for p in r {
@@ -513,7 +594,7 @@ fn remplir(anneaux: &[Vec<(f64, f64)>], n: usize, eau: &mut [bool]) {
             }
             let (a0, a1) = (p[0].ceil().max(0.0) as i64, p[1].floor().min(n as f64 - 1.0) as i64);
             for a in a0..=a1 {
-                eau[b as usize * n + a as usize] = true;
+                f(b as usize * n + a as usize);
             }
         }
     }

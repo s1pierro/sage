@@ -96,9 +96,9 @@ pub struct Scene {
     pub mer: Option<f32>,
     /// Le temps qui passe, en secondes : la houle.
     pub temps: f32,
-    /// Un maillage du terrain qui ne se dessine pas dans un rectangle (x, z bas, x, z
-    /// haut) : le relief lointain, sous les tuiles chargées.
-    pub trou: Option<(MaillageId, [f32; 4])>,
+    /// Des maillages du terrain qui ne se dessinent pas dans un rectangle (x, z bas, x, z
+    /// haut) : le relief et les bâtiments lointains, sous les tuiles chargées.
+    pub trou: Option<(Vec<MaillageId>, [f32; 4])>,
 }
 
 /// Le brouillard d'origine.
