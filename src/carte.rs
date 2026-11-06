@@ -40,9 +40,9 @@ fn centre(r: &Relief, couleurs: &[[f32; 3]]) -> Point {
 }
 
 impl Carte {
-    /// Le fond de la carte pour `graine`, et les tuiles écrites du dépôt.
-    pub fn new(graine: u32, monde: &mut Monde, tuiles: &Tuiles) -> Carte {
-        let c = Campagne { graine };
+    /// Le fond de la carte du relief `c`, et les tuiles écrites du dépôt.
+    pub fn new(c: &Campagne, monde: &mut Monde, tuiles: &Tuiles) -> Carte {
+        let graine = c.graine;
         let d = DEMI_CARTE;
         let t = TAILLE as f64;
         // Une hauteur par tuile ; la pente, pour la couleur, se lit entre voisines
@@ -149,8 +149,8 @@ mod tests {
     #[test]
     fn l_image_montre_l_ile_et_la_mer() {
         let mut m = Monde::default();
-        let t = Tuiles::new(Box::new(Campagne { graine: 1 }), 1, 1);
-        let c = Carte::new(1, &mut m, &t);
+        let t = Tuiles::new(Box::new(Campagne::brute(1)), 1, 1);
+        let c = Carte::new(&Campagne::brute(1), &mut m, &t);
         let im = c.image();
         assert_eq!((im.l, im.h, im.rgba.len()), (COTE as u32, COTE as u32, COTE * COTE * 4));
         let px = |a: usize, b: usize| &im.rgba[(b * COTE + a) * 4..(b * COTE + a) * 4 + 3];

@@ -72,7 +72,8 @@ impl Retour {
 /// Les onglets de l'éditeur.
 pub const AJOUT: usize = 0;
 pub const TOPOLOGIE: usize = 1;
-pub const ONGLETS: [&str; 2] = ["Ajout", "Topologie"];
+pub const CARTE: usize = 2;
+pub const ONGLETS: [&str; 3] = ["Ajout", "Topologie", "Carte"];
 
 /// Les poignées de l'objet choisi.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -108,7 +109,7 @@ pub struct Editeur {
     pub remplacement: Option<String>,
     /// Le modèle dont il faut retourner les faces.
     pub retournement: Option<String>,
-    /// L'onglet ouvert : `AJOUT` ou `TOPOLOGIE`.
+    /// L'onglet ouvert : `AJOUT`, `TOPOLOGIE` ou `CARTE`.
     pub onglet: usize,
     pub pinceau: Pinceau,
     /// Le coup de pinceau en cours : les tuiles touchées, telles qu'avant lui.
@@ -122,6 +123,8 @@ pub struct Editeur {
     confirmer: Option<u32>,
     /// La carte à régénérer avec cette graine (l'application le fait).
     pub regeneration: Option<u32>,
+    /// L'érosion de cette graine se calcule : la carte se régénère quand elle est prête.
+    pub erosion: Option<u32>,
 }
 
 /// Une graine tirée de l'heure.
@@ -132,7 +135,7 @@ fn graine_au_hasard() -> u32 {
 
 impl Default for Editeur {
     fn default() -> Editeur {
-        Editeur { mode: Mode::Choisir, retours: Vec::new(), remplacement: None, retournement: None, onglet: AJOUT, pinceau: Pinceau::default(), coup: None, saisie: None, gestes: 0, isolignes: 0.0, confirmer: None, regeneration: None }
+        Editeur { mode: Mode::Choisir, retours: Vec::new(), remplacement: None, retournement: None, onglet: AJOUT, pinceau: Pinceau::default(), coup: None, saisie: None, gestes: 0, isolignes: 0.0, confirmer: None, regeneration: None, erosion: None }
     }
 }
 
@@ -518,6 +521,10 @@ impl Editeur {
     fn regenerer(&mut self, cx: &mut Cx, b: &mut Body) {
         cx.section(b, "CARTE");
         cx.mesure(b, "Taille", "20 km de côté");
+        if let Some(g) = self.erosion {
+            cx.paragraph(b, &format!("Érosion du relief de la graine {g}… quelques secondes. La carte se régénère ensuite."));
+            return;
+        }
         let Some(g) = self.confirmer else {
             if cx.liens(b, id("carte-regenerer"), &["Régénérer la carte…"], None).is_some() {
                 self.confirmer = Some(graine_au_hasard());

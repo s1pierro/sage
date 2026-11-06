@@ -20,6 +20,7 @@
 pub mod android;
 pub mod campagne;
 pub mod carte;
+pub mod erosion;
 pub mod catalogue;
 pub mod draw;
 pub mod editeur;

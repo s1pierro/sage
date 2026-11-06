@@ -6,6 +6,28 @@ Il vise un monde ouvert, avec d'autres valeurs que la violence.
 
 ![Le mannequin marche dans le décor de S.A.G.E.](docs/apercu.png)
 
+## Version 0.14 : l'onglet Carte et la téléportation
+
+- La carte du monde a son onglet dans l'éditeur, « Carte », à côté d'Ajout et de
+  Topologie (qui retrouve toute la largeur). À gauche le point visé (position, sol) et
+  le joueur ; à droite la carte, sur toute la hauteur.
+- Le bouton « Téléporter le joueur ici » le pose au point visé, sur le sol ; pas en eau
+  profonde, ni là où le sol n'est pas encore chargé. « Viser le joueur » ramène la vue
+  sur lui.
+
+## Version 0.13 : l'érosion
+
+- Le relief de l'île passe par une érosion hydraulique : des centaines de milliers de
+  gouttes coulent selon la pente, arrachent la terre où elles vont vite et la déposent
+  où elles ralentissent. Les montagnes se ravinent, les vallées se creusent et leurs
+  fonds se comblent, la terre emportée finit en deltas.
+- Elle se calcule une fois par graine, en quelques secondes et à part du jeu, puis
+  s'enregistre (`erosion.bin`, environ 7,5 Mo). « Régénérer la carte… » attend
+  qu'elle soit prête ; un monde d'avant la 0.13 s'érode au premier lancement.
+- Les couleurs s'en ressentent : fonds de vallée plus verts, ravines rocheuses, terre
+  déposée plus brune.
+- `examples/erosion.rs` essaie d'autres réglages et en fait une image.
+
 ## Version 0.12 : la carte du monde
 
 - En Topologie, le panneau s'élargit et se scinde : les outils à gauche, à droite la

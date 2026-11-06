@@ -64,6 +64,15 @@ pub fn isolignes(d: f32) -> f32 {
     [100.0, 50.0, 25.0, 10.0, 5.0, 2.0].into_iter().find(|p| *p <= d / 40.0).unwrap_or(1.0)
 }
 
+/// Le fichier de l'érosion, dans le dossier du monde.
+pub const EROSION: &str = "erosion.bin";
+
+/// Le relief érodé de `graine`, s'il a été enregistré.
+fn erosion_relue(depot: &Depot, graine: u32) -> Option<Campagne> {
+    let e = crate::erosion::Erosion::depuis_octets(&depot.lire_octets(EROSION)?, graine)?;
+    Some(Campagne { graine, erosion: Some(Arc::new(e)) })
+}
+
 /// Le joueur ne va pas là où l'eau est plus profonde que cela (m).
 pub const PROFONDEUR: f32 = 1.2;
 
@@ -118,6 +127,11 @@ pub struct App {
     carte: Option<crate::carte::Carte>,
     carte_texture: Option<crate::moteur::TextureId>,
     carte_age: f32,
+    /// Le générateur de la carte, érodé ou pas encore.
+    campagne: Campagne,
+    /// L'érosion qui se calcule à part : sa graine, si la carte se régénère avec, et le
+    /// relief qui en viendra.
+    calcul: Option<(u32, bool, std::sync::mpsc::Receiver<Campagne>)>,
 }
 
 impl App {
@@ -149,7 +163,11 @@ impl App {
         monde.mobile.mettre(joueur, Mobile { vitesse: 0.0, elan: [cap.sin(), cap.cos()], rayon: CORPS });
         monde.corps.mettre(joueur, Corps::new(1.75));
         // Le monde autour du joueur, tout de suite ; la suite se charge en marchant
-        let source = Box::new(Campagne { graine: fiche.graine });
+        // Le relief érodé, s'il a déjà été calculé ; sinon le brut, le temps du calcul
+        let relue = erosion_relue(&depot, fiche.graine);
+        let a_calculer = relue.is_none() && depot.ou().is_some() && !cfg!(test);
+        let campagne = relue.unwrap_or_else(|| Campagne::brute(fiche.graine));
+        let source = Box::new(campagne.clone());
         let mut tuiles = Tuiles::avec(source, depot, fiche, affichage.distance, affichage.distance + GARDE_TUILES - RAYON_TUILES);
         let o = monde.origine;
         tuiles.suivre(&mut monde, &mut maillages, (o[0], o[1]), usize::MAX);
@@ -185,6 +203,8 @@ impl App {
             carte: None,
             carte_texture: None,
             carte_age: 0.0,
+            campagne,
+            calcul: None,
         };
         // Les modèles du catalogue : les objets déjà posés les retrouvent
         let mut erreurs = Vec::new();
@@ -200,7 +220,67 @@ impl App {
             a.catalogue.erreur = Some(x.clone());
         }
         a.mettre(Modele::depuis_glb(&personnage::mannequin_glb()).expect("le mannequin se relit"));
+        if a_calculer {
+            let g = a.tuiles.fiche.graine;
+            a.lancer_erosion(g, false);
+        }
         a
+    }
+
+    /// L'érosion de `graine` se calcule dans un autre fil ; `regenerer` : la carte se
+    /// régénère avec, une fois prête.
+    pub fn lancer_erosion(&mut self, graine: u32, regenerer: bool) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(Campagne::erodee(graine));
+        });
+        self.calcul = Some((graine, regenerer, rx));
+    }
+
+    /// La graine dont l'érosion se calcule.
+    pub fn erosion_en_cours(&self) -> Option<u32> {
+        self.calcul.as_ref().map(|c| c.0)
+    }
+
+    /// L'érosion calculée arrive : elle s'enregistre, puis la carte se régénère avec, ou
+    /// remplace le relief brut de la carte actuelle.
+    fn suivre_erosion(&mut self) {
+        let Some((g, regen, rx)) = &self.calcul else { return };
+        let (g, regen) = (*g, *regen);
+        let c = match rx.try_recv() {
+            Ok(c) => c,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.calcul = None;
+                return;
+            }
+        };
+        self.calcul = None;
+        if let Some(e) = &c.erosion {
+            if let Err(x) = self.tuiles.depot.ecrire_octets(EROSION, &e.octets()) {
+                self.dire(format!("{EROSION} : {x}"));
+            }
+        }
+        if regen {
+            self.regenerer(c);
+        } else if g == self.tuiles.fiche.graine {
+            self.prendre_campagne(c);
+        }
+    }
+
+    /// Le relief de la carte change de générateur (le même, érodé) : les tuiles se
+    /// rechargent, le joueur se repose sur le sol.
+    pub fn prendre_campagne(&mut self, c: Campagne) {
+        self.campagne = c.clone();
+        self.tuiles.changer_source(&mut self.monde, &mut self.maillages, Box::new(c));
+        let o = self.monde.origine;
+        self.tuiles.suivre(&mut self.monde, &mut self.maillages, (o[0], o[1]), 9);
+        physique::poser(&mut self.monde);
+        if let Some(x) = self.monde.lieu.get_mut(self.joueur) {
+            x.retenir();
+        }
+        self.carte = None;
+        self.dire("Le relief est érodé".into());
     }
 
     /// Le joueur prend ce personnage : son maillage est enregistré sous l'identifiant du
@@ -498,8 +578,10 @@ impl App {
 
     /// Une carte neuve, nue, tirée de `graine` : tout ce qui a été retouché ou posé est
     /// effacé, le catalogue des modèles reste. Le joueur revient au départ.
-    pub fn regenerer(&mut self, graine: u32) {
-        self.tuiles.repartir(&mut self.monde, &mut self.maillages, Box::new(Campagne { graine }));
+    pub fn regenerer(&mut self, c: Campagne) {
+        let graine = c.graine;
+        self.campagne = c.clone();
+        self.tuiles.repartir(&mut self.monde, &mut self.maillages, Box::new(c));
         self.tuiles.fiche.graine = graine;
         self.editeur.oublier();
         self.monde.choisie = None;
@@ -528,9 +610,11 @@ impl App {
     /// Une image : commandes, pas de simulation, animation, caméra, interface.
     pub fn frame(&mut self, cx: &mut Cx, ecran: Rect, dt: f32) -> Scene {
         let dp = cx.dp;
-        // En topologie, le panneau s'élargit d'une carte du monde
-        self.shell.carte = self.edite() && self.editeur.onglet == editeur::TOPOLOGIE;
+        // L'onglet Carte : le panneau s'élargit d'une carte du monde
+        self.shell.carte = self.edite() && self.editeur.onglet == editeur::CARTE;
         self.carte_age += dt;
+        self.suivre_erosion();
+        self.editeur.erosion = self.erosion_en_cours();
         let l = self.shell.layout(ecran, dt);
         let w = l.workspace;
         // Manette : un doigt posé dans la moitié gauche de l'espace de travail
@@ -774,9 +858,9 @@ impl App {
     fn dessiner_carte(&mut self, cx: &mut Cx, r: Rect) {
         use crate::carte::{depuis_carte, vers_carte, Carte};
         let d = cx.dp;
-        let graine = self.tuiles.fiche.graine;
+        let graine = self.campagne.graine;
         if self.carte.as_ref().is_none_or(|c| c.graine != graine) {
-            self.carte = Some(Carte::new(graine, &mut self.monde, &self.tuiles));
+            self.carte = Some(Carte::new(&self.campagne, &mut self.monde, &self.tuiles));
         }
         let carte = self.carte.as_mut().expect("faite");
         if carte.vue != self.tuiles.retouches && (self.carte_texture.is_none() || self.carte_age > 0.5) {
@@ -818,6 +902,57 @@ impl App {
             v[0] = (p[0] - o[0] as f64 * t) as f32;
             v[2] = (p[1] - o[1] as f64 * t) as f32;
         }
+    }
+
+    /// L'onglet Carte, à côté de la carte : le point visé, où le joueur peut être
+    /// téléporté, et le joueur.
+    fn panneau_carte(&mut self, cx: &mut Cx, b: &mut widgets::Body) {
+        let km = |p: [f64; 3]| format!("{} · {} km", dec((p[0] / 1000.0) as f32, 2), dec((p[2] / 1000.0) as f32, 2));
+        cx.section(b, "POINT VISÉ");
+        if let Some(v) = self.visee {
+            cx.mesure(b, "Position", &km(self.monde.absolu(v)));
+            let sol = systemes::hauteur_sol(&self.monde, v[0], v[2]);
+            let alt = match sol {
+                None => "pas encore chargé".to_string(),
+                Some(h) if h < MER => format!("sous la mer, fond à {} m", dec(MER - h, 1)),
+                Some(h) => format!("{} m", dec(h, 1)),
+            };
+            cx.mesure(b, "Sol", &alt);
+            if cx.button(b, id("carte-teleporter"), "Téléporter le joueur ici") {
+                self.teleporter();
+            }
+        }
+        cx.paragraph(b, "Touchez la carte ou glissez-y le doigt pour viser ailleurs.");
+        cx.section(b, "JOUEUR");
+        let p = self.lieu().pos;
+        cx.mesure(b, "Position", &km(self.monde.absolu(p)));
+        cx.mesure(b, "Altitude", &format!("{} m", dec(p[1], 1)));
+        if cx.liens(b, id("carte-au-joueur"), &["Viser le joueur"], None).is_some() {
+            self.visee = Some(p);
+        }
+    }
+
+    /// Le joueur va au point visé, posé sur le sol ; pas en eau profonde, ni là où le sol
+    /// n'est pas encore chargé.
+    pub fn teleporter(&mut self) {
+        let Some(v) = self.visee else { return };
+        let Some(h) = systemes::hauteur_sol(&self.monde, v[0], v[2]) else {
+            self.dire("Le sol n'est pas encore chargé là : attendez un instant".into());
+            return;
+        };
+        if h < MER - PROFONDEUR {
+            self.dire("L'eau est trop profonde là".into());
+            return;
+        }
+        if let Some(l) = self.monde.lieu.get_mut(self.joueur) {
+            l.pos = [v[0], h, v[2]];
+            l.retenir();
+        }
+        if let Some(m) = self.monde.mobile.get_mut(self.joueur) {
+            m.vitesse = 0.0;
+        }
+        self.visee = Some([v[0], h, v[2]]);
+        self.dire("Joueur téléporté".into());
     }
 
     /// Les tuiles chargées autour du centre : la distance d'affichage, ou celle de
@@ -977,9 +1112,10 @@ impl App {
             return;
         }
         if self.onglet == ONGLET_EDITEUR {
-            // En topologie : les outils à gauche, la carte à droite, sur toute la hauteur
+            // L'onglet Carte : le point visé et le joueur à gauche, la carte à droite, sur
+            // toute la hauteur
             let mut corps = corps;
-            if self.editeur.onglet == editeur::TOPOLOGIE {
+            if self.editeur.onglet == editeur::CARTE {
                 let c = (corps.h - 16.0 * d).min(corps.w - 240.0 * d);
                 if c >= 120.0 * d {
                     let outils = Rect::new(corps.x, corps.y, corps.w - c - 16.0 * d, corps.h);
@@ -989,7 +1125,9 @@ impl App {
                 }
             }
             let mut b = cx.body(crate::ui::sub_id(id("corps-editeur"), self.editeur.onglet), corps, &self.scrolls);
-            if self.editeur.onglet == editeur::TOPOLOGIE {
+            if self.editeur.onglet == editeur::CARTE {
+                self.panneau_carte(cx, &mut b);
+            } else if self.editeur.onglet == editeur::TOPOLOGIE {
                 self.editeur.panneau_topologie(cx, &mut b, &mut self.monde, &mut self.maillages, &mut self.tuiles);
             } else {
                 self.editeur.panneau(cx, &mut b, &mut self.monde, &mut self.maillages, &mut self.tuiles);
@@ -1001,7 +1139,7 @@ impl App {
                 self.retourner_modele(&id);
             }
             if let Some(g) = self.editeur.regeneration.take() {
-                self.regenerer(g);
+                self.lancer_erosion(g, true);
             }
             cx.body_end(b, &mut self.scrolls);
             return;
@@ -1477,6 +1615,24 @@ mod tests {
         assert_eq!(isolignes(TOPO_LOIN), 50.0);
     }
     #[test]
+    fn la_carte_teleporte_le_joueur_au_point_vise() {
+        let mut a = App::avec_dossier(1.0, None);
+        let p = a.lieu().pos;
+        // Un point chargé, à terre : le joueur y va, posé sur le sol
+        let v = [p[0] + 40.0, 0.0, p[2] - 25.0];
+        a.visee = Some(v);
+        a.teleporter();
+        let q = a.lieu().pos;
+        let sol = systemes::hauteur_sol(&a.monde, v[0], v[2]).unwrap();
+        assert_eq!((q[0], q[2]), (v[0], v[2]));
+        assert!((q[1] - sol).abs() < 1e-4);
+        // Hors des tuiles chargées : il ne bouge pas
+        a.visee = Some([p[0] + 5000.0, 0.0, p[2]]);
+        a.teleporter();
+        assert_eq!(a.lieu().pos, q);
+    }
+
+    #[test]
     fn la_carte_est_finie_et_se_regenere_nue() {
         use crate::moteur::tuiles::{dans_la_carte, DEMI_CARTE};
         use crate::moteur::{Genre, Objet};
@@ -1490,7 +1646,7 @@ mod tests {
         a.enregistrer();
         assert!(d.join("monde/tuiles").read_dir().unwrap().next().is_some());
         // Au bord de la carte : le joueur s'arrête au mur, rien n'est chargé au-delà
-        a.regenerer(42);
+        a.regenerer(Campagne::brute(42));
         assert!(a.monde.objet.iter().next().is_none() && !d.join("monde/tuiles").exists());
         assert_eq!(App::avec_dossier(1.0, Some(d.clone())).tuiles.fiche.graine, 42);
         a.monde.origine = [DEMI_CARTE, 0];

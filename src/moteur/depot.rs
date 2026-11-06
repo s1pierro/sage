@@ -110,6 +110,22 @@ impl Depot {
         self.ecrire(&Depot::chemin(i, j), s)
     }
 
+    /// Un fichier binaire du dossier ; rien en mémoire seule.
+    pub fn lire_octets(&self, nom: &str) -> Option<Vec<u8>> {
+        std::fs::read(self.dossier.as_ref()?.join(nom)).ok()
+    }
+
+    /// Écrit un fichier binaire dans le dossier (par un fichier temporaire renommé) ; en
+    /// mémoire seule, rien.
+    pub fn ecrire_octets(&mut self, nom: &str, o: &[u8]) -> std::io::Result<()> {
+        let Some(d) = &self.dossier else { return Ok(()) };
+        std::fs::create_dir_all(d)?;
+        let f = d.join(nom);
+        let tmp = f.with_extension("tmp");
+        std::fs::write(&tmp, o)?;
+        std::fs::rename(&tmp, &f)
+    }
+
     /// Les tuiles écrites, (i, j).
     pub fn tuiles_ecrites(&self) -> Vec<(i32, i32)> {
         let lire = |nom: &str| -> Option<(i32, i32)> {

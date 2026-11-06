@@ -485,6 +485,28 @@ impl Tuiles {
     /// Repart de zéro : toutes les tuiles se déchargent sans s'écrire, celles du dépôt
     /// sont effacées, et la carte se régénère de `source`.
     pub fn repartir(&mut self, monde: &mut Monde, maillages: &mut Maillages, source: Box<dyn Source>) {
+        self.vider(monde, maillages);
+        self.sales.clear();
+        self.source = source;
+        self.retouches += 1;
+        if let Err(e) = self.depot.effacer_tuiles() {
+            self.erreur = Some(format!("tuiles : {e}"));
+        }
+        self.fiche_sale = true;
+    }
+
+    /// Un autre générateur pour la même carte (le même relief, érodé) : ce qui attend
+    /// s'écrit, toutes les tuiles se déchargent ; les retouchées reviendront du dépôt, les
+    /// autres du générateur.
+    pub fn changer_source(&mut self, monde: &mut Monde, maillages: &mut Maillages, source: Box<dyn Source>) {
+        self.tout_ecrire(monde);
+        self.vider(monde, maillages);
+        self.source = source;
+        self.retouches += 1;
+    }
+
+    /// Décharge toutes les tuiles et leurs objets.
+    fn vider(&mut self, monde: &mut Monde, maillages: &mut Maillages) {
         for (k, c) in std::mem::take(&mut self.chargees) {
             let id = ident(k.0, k.1);
             maillages.ote(&id);
@@ -496,13 +518,6 @@ impl Tuiles {
             monde.detruire(e);
         }
         balayer(monde, maillages);
-        self.sales.clear();
-        self.source = source;
-        self.retouches += 1;
-        if let Err(e) = self.depot.effacer_tuiles() {
-            self.erreur = Some(format!("tuiles : {e}"));
-        }
-        self.fiche_sale = true;
     }
 
     /// Les couleurs de la grille de la tuile `k`, si elle est chargée.

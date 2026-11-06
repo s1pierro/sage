@@ -676,3 +676,33 @@ sur une grille qui déborde d'un point).
   carte carrée à droite.
 - La carte porte la zone chargée, le point visé et la direction de la vue, le joueur.
   Un doigt qui la touche ou y glisse place le point visé.
+
+## 12. L'érosion (0.13)
+
+- `src/erosion.rs` : une grille de 16 m sur toute la carte (1253 × 1253 points). Les
+  hauteurs de départ (`Campagne::relief`, sans le détail de 40 m) se calculent sur
+  plusieurs fils ; les gouttes (0,35 par point de terre, 80 pas au plus) se suivent une à
+  une, à partir de points tirés de la graine : le résultat est toujours le même.
+- Une goutte suit la pente avec un peu d'inertie ; sa capacité dépend de la pente, de sa
+  vitesse et de son eau. Sous sa capacité, elle arrache autour d'elle (pinceau de 2
+  points, jamais plus que la descente du pas, 40 m au plus par point) ; au-dessus, ou dans
+  un creux, elle dépose. À la mer, elle dépose tout. Les hauteurs comptent pour un quart
+  dans les pentes (`Reglage::echelle`) : l'eau voit un relief plus doux.
+- Il en reste l'écart à la hauteur (adouci d'un flou 3 × 3) et l'eau passée (échelle
+  logarithmique). `Campagne::hauteur` = relief + écart (Catmull-Rom, pente continue) +
+  détail ; `Campagne::couleur` lit l'eau et l'écart.
+- Le calcul se fait dans un fil (`App::lancer_erosion`), environ 4,5 s sur le téléphone ;
+  le résultat s'écrit dans `monde/erosion.bin` (graine, écart au centimètre sur 24 bits,
+  eau sur 16 bits). Au lancement, il est relu ; absent ou d'une autre graine, le relief
+  brut sert le temps du calcul, puis `Tuiles::changer_source` recharge les tuiles (les
+  retouchées reviennent du dépôt) et le joueur se repose sur le sol.
+- À « Régénérer », la carte attend l'érosion, puis repart de zéro avec elle.
+
+## 13. L'onglet Carte (0.14)
+
+- `editeur::CARTE` : troisième onglet de l'éditeur. `Shell::carte` (le panneau élargi)
+  suit cet onglet, plus Topologie ; la scission outils/carte de la 0.12 y est passée.
+- `App::panneau_carte` : le point visé (position absolue en km, sol ou fond de la mer),
+  le joueur, et `App::teleporter` : le joueur va au point visé, posé sur le sol
+  (`hauteur_sol`), sa vitesse à zéro ; refusé sous `MER - PROFONDEUR` ou hors des tuiles
+  chargées. L'origine suit le joueur quand le jeu reprend.

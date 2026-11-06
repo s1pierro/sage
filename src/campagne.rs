@@ -12,7 +12,9 @@
 //! tuiles voisines s'accordent exactement sur leur bord, normales comprises.
 
 use crate::moteur::{Contenu, Relief, Source, TAILLE};
+use crate::erosion::Erosion;
 use std::f64::consts::TAU;
+use std::sync::Arc;
 
 /// Points de grille par côté de tuile : un pas de 2 m.
 pub const GRILLE: usize = 32;
@@ -32,8 +34,11 @@ const CHAINE_DECALAGE: f64 = 2800.0;
 const CHAINE_LARGE: f64 = 1700.0;
 const CHAINE_LONG: f64 = 5200.0;
 
+#[derive(Clone)]
 pub struct Campagne {
     pub graine: u32,
+    /// L'érosion de ce relief, calculée pour cette graine ; sans elle, le relief brut.
+    pub erosion: Option<Arc<Erosion>>,
 }
 
 /// Un nombre de 0 à 1, toujours le même pour (graine, x, z).
@@ -95,6 +100,18 @@ fn rampe(a: f64, b: f64, x: f64) -> f64 {
 }
 
 impl Campagne {
+    /// Le relief brut de `graine`, sans érosion.
+    pub fn brute(graine: u32) -> Campagne {
+        Campagne { graine, erosion: None }
+    }
+
+    /// Le relief de `graine`, érodé : le calcul prend quelques secondes.
+    pub fn erodee(graine: u32) -> Campagne {
+        let c = Campagne::brute(graine);
+        let e = Erosion::calculer(graine, MER, &|x, z| c.relief(x, z));
+        Campagne { graine, erosion: Some(Arc::new(e)) }
+    }
+
     /// Le centre de l'île, en absolu.
     fn centre(&self) -> (f64, f64) {
         (DEPART[0] as f64, DEPART[1] as f64)
@@ -121,8 +138,16 @@ impl Campagne {
         (-(travers / CHAINE_LARGE).powi(2)).exp() * rampe(CHAINE_LONG, CHAINE_LONG * 0.45, le_long.abs())
     }
 
-    /// La hauteur du sol en un point absolu.
+    /// La hauteur du sol en un point absolu : le relief, son érosion, le détail qui se
+    /// voit à pied.
     pub fn hauteur(&self, x: f64, z: f64) -> f64 {
+        let ecart = self.erosion.as_ref().map_or(0.0, |e| e.ecart(x, z));
+        let detail = fbm(self.graine ^ 0x59, x / 40.0, z / 40.0, 2) * 1.2 * self.terre(x, z);
+        self.relief(x, z) + ecart + detail
+    }
+
+    /// Le relief à grande échelle, avant l'érosion et sans le détail.
+    pub fn relief(&self, x: f64, z: f64) -> f64 {
         let g = self.graine;
         let terre = self.terre(x, z);
         // Le fond de la mer, un peu inégal
@@ -138,11 +163,9 @@ impl Campagne {
         // La chaîne, en crêtes
         let w = self.chaine(x, z);
         let mont = if w > 1e-3 { SOMMET * 1.22 * w * cretes(g ^ 0x58, ux / 1500.0, uz / 1500.0, 6).powf(1.2) } else { 0.0 };
-        // Le détail, qui se voit à pied
-        let detail = fbm(g ^ 0x59, x / 40.0, z / 40.0, 2) * 1.2;
         // Vers le rivage, le relief s'efface : des plages en pente douce
         let t3 = terre * terre * terre;
-        let sol = 2.5 + (collines + mont) * t3 + detail * terre;
+        let sol = 2.5 + (collines + mont) * t3;
         fond + (sol - fond) * terre
     }
 
@@ -164,6 +187,14 @@ impl Campagne {
         c = melange(c, claire, rampe(760.0, 880.0, h));
         // La roche dans les pentes
         c = melange(c, roche, ((0.90 - n[1] as f64) / 0.12).clamp(0.0, 1.0));
+        // Ce qu'a laissé l'érosion : les fonds de vallée plus verts (sous la lande), la
+        // roche à nu dans les ravines, la terre déposée plus brune
+        if let Some(e) = &self.erosion {
+            let (w, d) = (e.eau(x, z), e.ecart(x, z));
+            c = melange(c, [0.36, 0.54, 0.29], rampe(0.62, 0.80, w) * rampe(500.0, 300.0, h) * 0.75);
+            c = melange(c, [0.50, 0.48, 0.45], rampe(-3.0, -18.0, d) * 0.6);
+            c = melange(c, [0.55, 0.50, 0.38], rampe(3.0, 14.0, d) * 0.35);
+        }
         // Le sable au bord de l'eau, mouillé dessous, puis le fond
         c = melange(c, sable, rampe(4.0, 2.0, h) * rampe(0.80, 0.95, n[1] as f64));
         c = melange(c, mouille, rampe(0.3, -0.8, h));
@@ -210,7 +241,7 @@ mod tests {
 
     #[test]
     fn deux_tuiles_voisines_s_accordent_sur_leur_bord() {
-        let c = Campagne { graine: 7 };
+        let c = Campagne::brute(7);
         for (i, j) in [(0, 0), (-3, 5), (40, -20), (40_000, -12_345)] {
             let (a, b, d) = (c.tuile(i, j), c.tuile(i + 1, j), c.tuile(i, j + 1));
             for k in 0..=GRILLE {
@@ -223,16 +254,16 @@ mod tests {
 
     #[test]
     fn la_campagne_est_toujours_la_meme_et_nue() {
-        let (a, b) = (Campagne { graine: 3 }.tuile(2, -1), Campagne { graine: 3 }.tuile(2, -1));
+        let (a, b) = (Campagne::brute(3).tuile(2, -1), Campagne::brute(3).tuile(2, -1));
         assert_eq!(a.relief, b.relief);
-        assert_ne!(Campagne { graine: 4 }.tuile(2, -1).relief, a.relief);
+        assert_ne!(Campagne::brute(4).tuile(2, -1).relief, a.relief);
         assert!(a.objets.is_empty());
     }
 
     #[test]
     fn une_ile_au_milieu_de_la_mer_avec_sa_chaine() {
         for graine in [1, 2, 3] {
-            let c = Campagne { graine };
+            let c = Campagne::brute(graine);
             // Le départ est à terre, les coins de la carte au large
             assert!(c.hauteur(32.0, 32.0) > MER as f64 + 1.0, "graine {graine}");
             for (x, z) in [(-9900.0, -9900.0), (9900.0, 9900.0), (-9900.0, 9900.0), (9900.0, -9900.0), (0.0, 9900.0)] {
@@ -259,7 +290,7 @@ mod tests {
 
     #[test]
     fn le_depart_reste_praticable() {
-        let c = Campagne { graine: 1 };
+        let c = Campagne::brute(1);
         let t = c.tuile(0, 0);
         let p = t.relief.pas();
         let raide = (0..GRILLE).flat_map(|b| (0..GRILLE).map(move |a| (a, b))).map(|(a, b)| ((t.relief.sommet(a + 1, b) - t.relief.sommet(a, b)) / p).abs()).fold(0.0, f32::max);
