@@ -10,7 +10,7 @@ use crate::draw::{Color, Rect};
 use crate::math;
 use crate::moniteur::{self, dec, Etat, Moniteur};
 use crate::shell::{Layout, Shell, Side};
-use crate::campagne::{Campagne, DEPART, MER};
+use crate::campagne::{Campagne, DEPART};
 use crate::catalogue::{self, Catalogue, Decor, Entree};
 use crate::editeur::{self, Editeur};
 use crate::manette::{Evenement, Manettes};
@@ -67,10 +67,13 @@ pub fn isolignes(d: f32) -> f32 {
 /// Le fichier de l'érosion, dans le dossier du monde.
 pub const EROSION: &str = "erosion.bin";
 
+/// Le lieu réel importé, dans le dossier du monde.
+pub const LIEU: &str = "lieu.reel";
+
 /// Le relief érodé de `graine`, s'il a été enregistré.
 fn erosion_relue(depot: &Depot, graine: u32) -> Option<Campagne> {
     let e = crate::erosion::Erosion::depuis_octets(&depot.lire_octets(EROSION)?, graine)?;
-    Some(Campagne { graine, erosion: Some(Arc::new(e)) })
+    Some(Campagne { graine, erosion: Some(Arc::new(e)), reel: None })
 }
 
 /// La caméra tourne autour de la tête du personnage : tant de sa hauteur (les yeux).
@@ -177,7 +180,11 @@ impl App {
         monde.corps.mettre(joueur, Corps::new(1.75));
         // Le monde autour du joueur, tout de suite ; la suite se charge en marchant
         // Le relief érodé, s'il a déjà été calculé ; sinon le brut, le temps du calcul
-        let relue = erosion_relue(&depot, fiche.graine);
+        let reel = depot.lire_octets(LIEU).and_then(|o| crate::reel::Reel::depuis_octets(&o));
+        let relue = match reel {
+            Some(r) => Some(Campagne::reelle(Arc::new(r))),
+            None => erosion_relue(&depot, fiche.graine),
+        };
         let a_calculer = relue.is_none() && depot.ou().is_some() && !cfg!(test);
         let campagne = relue.unwrap_or_else(|| Campagne::brute(fiche.graine));
         let source = Box::new(campagne.clone());
@@ -399,6 +406,10 @@ impl App {
     /// lit, sinon l'ancien reste. Sans peau, c'est un décor : il entre au catalogue, et
     /// l'éditeur s'ouvre pour le poser.
     pub fn charger(&mut self, nom: &str, octets: &[u8]) {
+        if let Some(r) = crate::reel::Reel::depuis_octets(octets) {
+            self.importer_lieu(r, octets);
+            return;
+        }
         if gda::sage::lire_glb(octets).is_some() && !catalogue::est_personnage(octets) {
             let remplace = self.remplacer.take();
             match self.catalogue.importer(nom, octets, remplace.as_deref()) {
@@ -444,6 +455,17 @@ impl App {
             }
             Err(e) => self.dire(format!("{nom} illisible : {e}")),
         }
+    }
+
+    /// Un lieu réel reçu : il s'enregistre, et la carte repart de zéro avec lui.
+    pub fn importer_lieu(&mut self, r: crate::reel::Reel, octets: &[u8]) {
+        if let Err(e) = self.tuiles.depot.ecrire_octets(LIEU, octets) {
+            self.dire(format!("{LIEU} : {e}"));
+            return;
+        }
+        let nom = r.nom.clone();
+        self.regenerer(Campagne::reelle(Arc::new(r)));
+        self.dire(format!("Lieu réel « {nom} » : la carte repart de zéro"));
     }
 
     /// Relu au lancement : le dernier personnage ouvert, sans message.
@@ -586,9 +608,9 @@ impl App {
         // L'eau profonde arrête le joueur ; s'il y est déjà, il n'en sort que vers moins
         // profond
         let p = self.lieu().pos;
-        let fond = |x: f32, z: f32| systemes::hauteur_sol(&self.monde, x, z).unwrap_or(MER);
+        let fond = |x: f32, z: f32| systemes::hauteur_sol(&self.monde, x, z).unwrap_or(self.campagne.mer());
         let (ici, la) = (fond(p[0], p[2]), fond(avant[0], avant[2]));
-        if ici < MER - PROFONDEUR && ici < la {
+        if ici < self.campagne.mer() - PROFONDEUR && ici < la {
             if let Some(l) = self.monde.lieu.get_mut(self.joueur) {
                 l.pos = avant;
             }
@@ -607,7 +629,13 @@ impl App {
     pub fn regenerer(&mut self, c: Campagne) {
         let graine = c.graine;
         self.campagne = c.clone();
+        let reel = c.reel.is_some();
         self.tuiles.repartir(&mut self.monde, &mut self.maillages, Box::new(c));
+        if !reel {
+            if let Err(e) = self.tuiles.depot.effacer_fichier(LIEU) {
+                self.dire(format!("{LIEU} : {e}"));
+            }
+        }
         self.refaire_lointain();
         self.tuiles.fiche.graine = graine;
         self.editeur.oublier();
@@ -642,6 +670,10 @@ impl App {
         self.carte_age += dt;
         self.suivre_erosion();
         self.editeur.erosion = self.erosion_en_cours();
+        self.editeur.lieu = self.campagne.reel.as_ref().map(|r| r.nom.clone());
+        if std::mem::take(&mut self.editeur.importer) {
+            self.demande = true;
+        }
         let l = self.shell.layout(ecran, dt);
         let w = l.workspace;
         // Manette : un doigt posé dans la moitié gauche de l'espace de travail
@@ -837,7 +869,7 @@ impl App {
             scene.trou = Some((k, [a[0] + 1.0, a[2] + 1.0, b[0] - 1.0, b[2] - 1.0]));
         }
         self.instant += dt;
-        scene.mer = Some(MER);
+        scene.mer = Some(self.campagne.mer());
         scene.temps = self.instant % 3600.0;
         // Les ombres portées autour du joueur ; en pause, autour du point visé, sans lui
         scene.soleil.centre = self.lieu().interpole(u).0;
@@ -867,7 +899,7 @@ impl App {
         let (p, _) = self.lieu().interpole(u);
         let (cible, d) = match self.visee {
             Some(v) => {
-                let h = systemes::hauteur_sol(&self.monde, v[0], v[2]).unwrap_or(v[1]).max(MER);
+                let h = systemes::hauteur_sol(&self.monde, v[0], v[2]).unwrap_or(v[1]).max(self.campagne.mer());
                 ([v[0], h + 1.0, v[2]], self.cam.2)
             }
             None => ([p[0], p[1] + hauteur * PIVOT, p[2]], self.cam.2 * hauteur / 1.75),
@@ -885,7 +917,7 @@ impl App {
         // Vue levée : l'œil glisse au ras du sol au lieu d'y entrer
         if leve > 0.0 {
             let sol = systemes::hauteur_sol(&self.monde, oeil[0], oeil[2]).unwrap_or(p[1]);
-            oeil[1] = oeil[1].max(sol + 0.4).max(MER + 0.4);
+            oeil[1] = oeil[1].max(sol + 0.4).max(self.campagne.mer() + 0.4);
         }
         // Rien entre le joueur et l'œil : la caméra s'avance devant ce qui le cacherait
         let vers = [oeil[0] - cible[0], oeil[1] - cible[1], oeil[2] - cible[2]];
@@ -895,7 +927,7 @@ impl App {
         }
         // Jamais sous le sol
         let sol = systemes::hauteur_sol(&self.monde, oeil[0], oeil[2]).unwrap_or(p[1]);
-        oeil[1] = oeil[1].max(sol + 0.4).max(MER + 0.4);
+        oeil[1] = oeil[1].max(sol + 0.4).max(self.campagne.mer() + 0.4);
         // Vue levée : l'œil, posé plus haut que son orbite, garde l'angle demandé ; le
         // personnage glisse vers le bas de l'image
         let vise = if self.visee.is_none() && self.cam.1 < 0.0 { [oeil[0] - sy * cp * d, oeil[1] - sp * d, oeil[2] - cy * cp * d] } else { cible };
@@ -970,7 +1002,7 @@ impl App {
             let sol = systemes::hauteur_sol(&self.monde, v[0], v[2]);
             let alt = match sol {
                 None => "pas encore chargé".to_string(),
-                Some(h) if h < MER => format!("sous la mer, fond à {} m", dec(MER - h, 1)),
+                Some(h) if h < self.campagne.mer() => format!("sous l'eau, fond à {} m", dec(self.campagne.mer() - h, 1)),
                 Some(h) => format!("{} m", dec(h, 1)),
             };
             cx.mesure(b, "Sol", &alt);
@@ -979,6 +1011,10 @@ impl App {
             }
         }
         cx.paragraph(b, "Touchez la carte ou glissez-y le doigt pour viser ailleurs.");
+        if let Some(r) = &self.campagne.reel {
+            cx.section(b, &r.nom.to_uppercase());
+            cx.paragraph(b, crate::reel::SOURCES);
+        }
         cx.section(b, "JOUEUR");
         let p = self.lieu().pos;
         cx.mesure(b, "Position", &km(self.monde.absolu(p)));
@@ -996,7 +1032,7 @@ impl App {
             self.dire("Le sol n'est pas encore chargé là : attendez un instant".into());
             return;
         };
-        if h < MER - PROFONDEUR {
+        if h < self.campagne.mer() - PROFONDEUR {
             self.dire("L'eau est trop profonde là".into());
             return;
         }
@@ -1670,6 +1706,29 @@ mod tests {
         assert_eq!(isolignes(1000.0), 25.0);
         assert_eq!(isolignes(TOPO_LOIN), 50.0);
     }
+    #[test]
+    fn un_lieu_reel_s_importe_et_se_retrouve() {
+        let d = std::env::temp_dir().join(format!("sage-lieu-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let mut a = App::avec_dossier(1.0, Some(d.clone()));
+        // Un lieu plat à 10 m, de l'eau à 3 m dans sa moitié ouest
+        let pas = 64.0;
+        let n = crate::reel::cote(pas);
+        let h: Vec<f32> = (0..n * n).map(|i| if i % n < n / 2 { -2.0 } else { 10.0 }).collect();
+        let eau: Vec<bool> = (0..n * n).map(|i| i % n < n / 2).collect();
+        let r = crate::reel::Reel::new("Essai", 49.0, 1.0, 0.0, 0.0, pas, 3.0, &h, &eau);
+        a.charger("essai.reel", &r.octets());
+        assert_eq!(a.campagne.mer(), 3.0);
+        let p = a.lieu().pos;
+        assert!((systemes::hauteur_sol(&a.monde, p[0], p[2]).unwrap() - 10.0).abs() < 0.1);
+        // Relancé : toujours ce lieu ; une île régénérée l'oublie
+        let mut b = App::avec_dossier(1.0, Some(d.clone()));
+        assert_eq!(b.campagne.reel.as_ref().map(|r| r.nom.as_str()), Some("Essai"));
+        b.regenerer(Campagne::brute(5));
+        assert!(App::avec_dossier(1.0, Some(d.clone())).campagne.reel.is_none());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
     #[test]
     fn la_vue_se_leve_vers_le_ciel_en_jeu() {
         let mut a = App::avec_dossier(1.0, None);

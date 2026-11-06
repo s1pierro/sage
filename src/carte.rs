@@ -20,6 +20,8 @@ type Point = (f32, [f32; 3]);
 
 pub struct Carte {
     pub graine: u32,
+    /// La surface de l'eau.
+    mer: f32,
     fond: Vec<Point>,
     /// Les tuiles retouchées, par-dessus le fond.
     retouchees: HashMap<(i32, i32), Point>,
@@ -70,7 +72,7 @@ impl Carte {
                 retouchees.insert((i, j), centre(&t.relief, &t.couleurs));
             }
         }
-        Carte { graine, fond, retouchees, vue: u64::MAX }
+        Carte { graine, mer: c.mer(), fond, retouchees, vue: u64::MAX }
     }
 
     /// Les tuiles chargées et lues du dépôt (retouchées) se posent sur la carte.
@@ -99,8 +101,8 @@ impl Carte {
         for b in 0..COTE {
             for a in 0..COTE {
                 let (y, c) = g[b * COTE + a];
-                let c = if y < 0.0 {
-                    let t = (-y / 30.0).clamp(0.0, 1.0);
+                let c = if y < self.mer {
+                    let t = ((self.mer - y) / 30.0).clamp(0.0, 1.0);
                     [0.50 + (0.12 - 0.50) * t, 0.72 + (0.30 - 0.72) * t, 0.78 + (0.40 - 0.78) * t]
                 } else {
                     // La pente vers la lumière, venue du nord-ouest (-x, -z)

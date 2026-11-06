@@ -126,6 +126,15 @@ impl Depot {
         std::fs::rename(&tmp, &f)
     }
 
+    /// Efface un fichier du dossier, s'il y est.
+    pub fn effacer_fichier(&mut self, nom: &str) -> std::io::Result<()> {
+        let Some(d) = &self.dossier else { return Ok(()) };
+        match std::fs::remove_file(d.join(nom)) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+            _ => Ok(()),
+        }
+    }
+
     /// Les tuiles écrites, (i, j).
     pub fn tuiles_ecrites(&self) -> Vec<(i32, i32)> {
         let lire = |nom: &str| -> Option<(i32, i32)> {

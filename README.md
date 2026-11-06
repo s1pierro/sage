@@ -6,6 +6,24 @@ Il vise un monde ouvert, avec d'autres valeurs que la violence.
 
 ![Le mannequin marche dans le décor de S.A.G.E.](docs/apercu.png)
 
+## Version 0.18 : un lieu réel (Rouen)
+
+- `examples/lieu_reel.rs` prépare 20 km autour d'un point de France : le relief de
+  l'IGN (RGE ALTI, au pas de 4 m, par la Géoplateforme) et les surfaces d'eau
+  d'OpenStreetMap (Overpass). Rouen :
+
+      cargo run --release --example lieu_reel -- Rouen 49.4402 1.0951 rouen.reel
+
+- Dans le jeu : Éditeur › Topologie › CARTE › « Importer un lieu réel… », puis choisir
+  le `.reel` (environ 50 Mo). La carte repart de zéro sur ce lieu, le départ au point
+  demandé ; il est gardé d'un lancement à l'autre. « Régénérer la carte… » revient à
+  une île.
+- L'eau (la Seine, et ce qui est à son niveau) a sa surface au niveau médian du relief
+  sous elle, son fond creusé jusqu'à 8 m. Les étangs plus hauts restent à sec : le jeu
+  n'a qu'un niveau d'eau.
+- Sources : relief © IGN (Licence Ouverte 2.0) ; eau © les contributeurs OpenStreetMap
+  (ODbL). Un `.reel` est dérivé d'OSM : il reste sous ODbL et n'entre pas dans le dépôt.
+
 ## Version 0.17 : voir à 3 km, avec ou sans brouillard
 
 - Au-delà des tuiles chargées, le relief de toute la carte se voit, simplifié (un point

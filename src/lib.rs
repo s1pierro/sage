@@ -22,6 +22,7 @@ pub mod campagne;
 pub mod carte;
 pub mod erosion;
 pub mod lointain;
+pub mod reel;
 pub mod catalogue;
 pub mod draw;
 pub mod editeur;

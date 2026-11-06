@@ -128,6 +128,10 @@ pub struct Editeur {
     pub regeneration: Option<u32>,
     /// L'érosion de cette graine se calcule : la carte se régénère quand elle est prête.
     pub erosion: Option<u32>,
+    /// Le nom du lieu réel de la carte, s'il y en a un.
+    pub lieu: Option<String>,
+    /// Le sélecteur de fichiers est demandé pour un lieu réel.
+    pub importer: bool,
     /// Les réglages du terrassement sous l'objet choisi.
     pub terrasse: Terrassement,
 }
@@ -158,7 +162,7 @@ fn graine_au_hasard() -> u32 {
 
 impl Default for Editeur {
     fn default() -> Editeur {
-        Editeur { mode: Mode::Choisir, retours: Vec::new(), remplacement: None, retournement: None, onglet: AJOUT, pinceau: Pinceau::default(), coup: None, saisie: None, gestes: 0, isolignes: 0.0, confirmer: None, regeneration: None, erosion: None, terrasse: Terrassement::default() }
+        Editeur { mode: Mode::Choisir, retours: Vec::new(), remplacement: None, retournement: None, onglet: AJOUT, pinceau: Pinceau::default(), coup: None, saisie: None, gestes: 0, isolignes: 0.0, confirmer: None, regeneration: None, erosion: None, lieu: None, importer: false, terrasse: Terrassement::default() }
     }
 }
 
@@ -601,13 +605,19 @@ impl Editeur {
             cx.paragraph(b, &format!("Érosion du relief de la graine {g}… quelques secondes. La carte se régénère ensuite."));
             return;
         }
+        if let Some(l) = &self.lieu {
+            cx.mesure(b, "Lieu réel", l);
+            cx.paragraph(b, crate::reel::SOURCES);
+        }
         let Some(g) = self.confirmer else {
-            if cx.liens(b, id("carte-regenerer"), &["Régénérer la carte…"], None).is_some() {
-                self.confirmer = Some(graine_au_hasard());
+            match cx.liens(b, id("carte-regenerer"), &["Régénérer la carte…", "Importer un lieu réel…"], None) {
+                Some(0) => self.confirmer = Some(graine_au_hasard()),
+                Some(_) => self.importer = true,
+                None => {}
             }
             return;
         };
-        cx.paragraph(b, &format!("Une carte nue, au relief tiré de la graine {g}. Toutes les retouches du relief et tous les objets posés seront effacés, sans retour possible ; le catalogue des modèles reste."));
+        cx.paragraph(b, &format!("Une île nue, au relief tiré de la graine {g}. Toutes les retouches du relief et tous les objets posés seront effacés, sans retour possible ; le catalogue des modèles reste."));
         match cx.liens(b, id("carte-confirmer"), &["Régénérer", "Autre graine", "Garder la carte"], None) {
             Some(0) => {
                 self.regeneration = Some(g);

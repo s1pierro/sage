@@ -2,3 +2,5 @@
 /dist/
 /android.jar
 /.apercu/
+*.reel
+*.reel.cache/

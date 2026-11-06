@@ -49,7 +49,7 @@ fn main() {
     w.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let q = |p: f64| w[((w.len() - 1) as f64 * p) as usize];
     println!("eau : 10% {:.2} 50% {:.2} 90% {:.2} 99% {:.2} 99.9% {:.2}", q(0.1), q(0.5), q(0.9), q(0.99), q(0.999));
-    let c = Campagne { graine, erosion: Some(Arc::new(e)) };
+    let c = Campagne { graine, erosion: Some(Arc::new(e)), reel: None };
     let (w, pas) = (700usize, 25.0);
     let mut img = vec![0u8; w * 3 * w];
     for b in 0..w {

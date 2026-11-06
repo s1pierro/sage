@@ -13,6 +13,7 @@
 
 use crate::moteur::{Contenu, Relief, Source, TAILLE};
 use crate::erosion::Erosion;
+use crate::reel::Reel;
 use std::f64::consts::TAU;
 use std::sync::Arc;
 
@@ -39,6 +40,8 @@ pub struct Campagne {
     pub graine: u32,
     /// L'érosion de ce relief, calculée pour cette graine ; sans elle, le relief brut.
     pub erosion: Option<Arc<Erosion>>,
+    /// Un lieu réel à la place de l'île : son relief, son eau.
+    pub reel: Option<Arc<Reel>>,
 }
 
 /// Un nombre de 0 à 1, toujours le même pour (graine, x, z).
@@ -102,14 +105,24 @@ fn rampe(a: f64, b: f64, x: f64) -> f64 {
 impl Campagne {
     /// Le relief brut de `graine`, sans érosion.
     pub fn brute(graine: u32) -> Campagne {
-        Campagne { graine, erosion: None }
+        Campagne { graine, erosion: None, reel: None }
     }
 
     /// Le relief de `graine`, érodé : le calcul prend quelques secondes.
     pub fn erodee(graine: u32) -> Campagne {
         let c = Campagne::brute(graine);
         let e = Erosion::calculer(graine, MER, &|x, z| c.relief(x, z));
-        Campagne { graine, erosion: Some(Arc::new(e)) }
+        Campagne { graine, erosion: Some(Arc::new(e)), reel: None }
+    }
+
+    /// Un lieu réel.
+    pub fn reelle(r: Arc<Reel>) -> Campagne {
+        Campagne { graine: 0, erosion: None, reel: Some(r) }
+    }
+
+    /// La surface de l'eau : la mer de l'île, ou celle du lieu réel.
+    pub fn mer(&self) -> f32 {
+        self.reel.as_ref().map_or(MER, |r| r.niveau)
     }
 
     /// Le centre de l'île, en absolu.
@@ -141,6 +154,9 @@ impl Campagne {
     /// La hauteur du sol en un point absolu : le relief, son érosion, le détail qui se
     /// voit à pied.
     pub fn hauteur(&self, x: f64, z: f64) -> f64 {
+        if let Some(r) = &self.reel {
+            return r.hauteur(x, z);
+        }
         let ecart = self.erosion.as_ref().map_or(0.0, |e| e.ecart(x, z));
         let detail = fbm(self.graine ^ 0x59, x / 40.0, z / 40.0, 2) * 1.2 * self.terre(x, z);
         self.relief(x, z) + ecart + detail
@@ -173,6 +189,18 @@ impl Campagne {
     /// dans les pentes et vers les sommets, le fond de la mer.
     pub fn couleur(&self, x: f64, z: f64, h: f64, n: [f32; 3]) -> [f32; 3] {
         let melange = |a: [f32; 3], b: [f32; 3], t: f64| -> [f32; 3] { [0, 1, 2].map(|k| a[k] + (b[k] - a[k]) * t as f32) };
+        if let Some(r) = &self.reel {
+            // Un lieu réel : de l'herbe plus ou moins sèche, la craie dans les pentes
+            // raides (les coteaux de la Seine), la vase des berges, le fond de l'eau
+            let s = bruit(0xA5A5, x / 60.0, z / 60.0);
+            let mut c = melange([0.45, 0.58, 0.34], [0.60, 0.62, 0.42], s * 0.8);
+            c = melange(c, [0.52, 0.50, 0.44], ((0.85 - n[1] as f64) / 0.15).clamp(0.0, 1.0));
+            c = melange(c, [0.86, 0.85, 0.80], ((0.62 - n[1] as f64) / 0.15).clamp(0.0, 1.0));
+            let e = r.eau(x, z);
+            let dessus = h - r.niveau as f64;
+            c = melange(c, [0.50, 0.47, 0.38], e.max(rampe(1.0, 0.2, dessus)));
+            return melange(c, [0.36, 0.38, 0.34], rampe(-0.5, -4.0, dessus));
+        }
         let herbe = [0.47, 0.60, 0.36];
         let seche = [0.66, 0.65, 0.44];
         let lande = [0.48, 0.50, 0.36];

@@ -44,7 +44,7 @@ pub fn sommets(c: &Campagne) -> Vec<f32> {
     for b in 0..n - 1 {
         for a in 0..n - 1 {
             let q = [b * n + a, b * n + a + 1, (b + 1) * n + a, (b + 1) * n + a + 1];
-            if q.iter().all(|&i| points[i].0[1] < FOND) {
+            if q.iter().all(|&i| points[i].0[1] < c.mer() + FOND) {
                 continue;
             }
             for i in [q[0], q[3], q[1], q[0], q[2], q[3]] {

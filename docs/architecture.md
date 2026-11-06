@@ -748,3 +748,24 @@ sur une grille qui déborde d'un point).
   `brouillard_vu` ; le brouillard ne dépend plus de la distance des tuiles.
 - La caméra, le regard du personnage et la visée partent de sa tête : `PIVOT` = 0,92 de
   sa hauteur (avant : 0,6, le nombril).
+
+## 17. Les lieux réels (0.18)
+
+- `src/reel.rs` : `Reel`, une grille de `pas` mètres sur toute la carte (comme
+  l'érosion), calée en Lambert-93 (`x0`, `y0` : le point (0, 0) du jeu ; X = x0 + x,
+  Y = y0 − z) ; hauteurs sur 16 bits (`base + v × echelle`), lues en Catmull-Rom ; l'eau
+  en un bit par point, sa surface à `niveau`. `lambert93` : la projection de l'IGN
+  (GRS 80, cône sécant). Format binaire « SAGEREEL », version 1.
+- `Campagne::reelle` : `hauteur` et `couleur` viennent du lieu (herbe, craie des
+  pentes raides, vase des berges, fond) ; `Campagne::mer` donne le niveau de l'eau, que
+  le jeu, la carte du monde et le lointain suivent à la place de `MER`.
+- Le jeu garde le lieu dans `monde/lieu.reel` ; au lancement, il passe avant l'érosion.
+  `App::charger` reconnaît un `.reel` à son en-tête (`App::importer_lieu`) ; régénérer
+  une île efface le fichier.
+- `examples/lieu_reel.rs` : relief par la Géoplateforme (WMS, `image/x-bil;bits=32`,
+  morceaux de 2000 × 2000, chaque pixel centré sur un point de la grille) ; eau par
+  Overpass (`natural=water`, `waterway=riverbank`, `out geom`), relations remises en
+  anneaux bout à bout, remplies pair-impair par lignes ; le niveau est la médiane du
+  relief sous l'eau, les plans d'eau à un autre niveau sont écartés, le fond descend
+  avec la distance à la berge (chanfrein). Les téléchargements se gardent dans
+  `<sortie>.cache/`, curl fait le réseau.
