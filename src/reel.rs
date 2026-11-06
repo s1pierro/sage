@@ -485,6 +485,31 @@ impl Reel {
         mieux
     }
 
+    /// La part (de 0 à 1) des points d'occupation de la `classe` dans le carré de demi-côté
+    /// `r` mètres autour de (x, z).
+    pub fn part_sol(&self, classe: u8, x: f64, z: f64, r: f64) -> f64 {
+        if self.sol.is_empty() {
+            return 0.0;
+        }
+        let m = cote_sol(self.cote) as i64;
+        let p = self.pas * 2.0;
+        let (a0, a1) = (((x - r - origine()) / p).ceil() as i64, ((x + r - origine()) / p).floor() as i64);
+        let (b0, b1) = (((z - r - origine()) / p).ceil() as i64, ((z + r - origine()) / p).floor() as i64);
+        let (mut oui, mut tous) = (0, 0);
+        for b in b0.max(0)..=b1.min(m - 1) {
+            for a in a0.max(0)..=a1.min(m - 1) {
+                tous += 1;
+                oui += (self.sol[(b * m + a) as usize] == classe) as i32;
+            }
+        }
+        // Un carré plus petit que la grille : le point le plus proche
+        if tous == 0 {
+            let (a, b) = (((x - origine()) / p).round() as i64, ((z - origine()) / p).round() as i64);
+            return (self.sol[(b.clamp(0, m - 1) * m + a.clamp(0, m - 1)) as usize] == classe) as i32 as f64;
+        }
+        oui as f64 / tous as f64
+    }
+
     /// Le point (x, z) est-il libre, à `marge` mètres près : ni eau, ni chaussée, ni
     /// bâtiment, ni pont ? (Un arbre y pousse.)
     pub fn libre(&self, x: f64, z: f64, marge: f32) -> bool {

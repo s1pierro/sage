@@ -6,6 +6,15 @@ Il vise un monde ouvert, avec d'autres valeurs que la violence.
 
 ![Le mannequin marche dans le décor de S.A.G.E.](docs/apercu.png)
 
+## Version 0.24 : les bois au loin
+
+- Au-delà des tuiles chargées, les bois du lieu réel ont du volume : une canopée vert
+  tacheté à la hauteur des houppiers (12 à 18 m), qui retombe au sol en lisière et dans
+  les clairières (les mêmes que celles des arbres de près). Les forêts se détachent sur
+  les coteaux jusqu'à l'horizon.
+- Près du joueur, les vrais arbres prennent la place ; la canopée ne se voit pas en
+  topologie.
+
 ## Version 0.23 : la végétation
 
 - Des arbres poussent sur le lieu réel selon l'occupation du sol : serrés dans les bois

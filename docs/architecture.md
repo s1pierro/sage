@@ -863,3 +863,19 @@ sur une grille qui déborde d'un point).
 - `Campagne::bati` (`Source`) joint les bâtiments et ponts du `Reel` aux arbres. Ils
   forment une seule entité par tuile (`bati/i/j`, Statique), qui porte ombre.
 
+## 23. Les bois au loin (0.24)
+
+- `vegetation::lointain(campagne)` construit la canopée sur toute la carte, avec une
+  grille de 32 m (`PAS_CANOPEE`). En chaque point :
+  - **part de bois** : `Reel::part_sol(BOIS, x, z, 16 m)`, la part des points
+    d'occupation du carré autour (le point le plus proche si la grille est plus lâche) ;
+  - **clairières** : cette part est multipliée par la densité des bois
+    (`densite_bois`, partagée avec les arbres de près), ramenée de 0,25–0,70 à 0–1 ;
+  - **hauteur** : sol + 1 m + (12 à 18 m, selon un bruit de 120 m) × √part. Elle
+    retombe au sol quand la part tend vers 0.
+- Seuls les carrés dont un coin a du bois se dessinent. Les normales sont tirées de la
+  nappe ; le vert est tacheté par point et par un bruit de 200 m.
+- Le maillage `bati/bois-lointains` est au format Terrain. `Jeu.lointains` (bâtiments
+  et bois) prend le trou du relief lointain : il s'efface sous les tuiles chargées.
+  Le préfixe `bati/` le cache en topologie.
+

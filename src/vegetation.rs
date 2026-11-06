@@ -10,8 +10,14 @@
 //! Deux essences en facettes : un feuillu (tronc et houppier en boule bosselée) et un
 //! conifère (tronc et deux cônes). Seuls les troncs arrêtent ; on passe sous les
 //! branches.
+//!
+//! Au loin, les bois sont une canopée (`lointain`) : une nappe sur une grille de 32 m,
+//! à la hauteur des houppiers au-dessus du sol, qui retombe au sol en lisière et dans les
+//! clairières, d'un vert tacheté. Elle s'efface sous les tuiles chargées, comme le relief
+//! lointain.
 
 use crate::campagne::{bruit, hache, Campagne};
+use crate::moteur::tuiles::DEMI_CARTE;
 use crate::moteur::TAILLE;
 use crate::reel::{BOIS, CHAMP, HABITE, PRE, ZONE};
 
@@ -21,6 +27,64 @@ const CELLULE: f32 = TAILLE / 10.0;
 const MARGE: f32 = 1.5;
 const GRAINE: u32 = 0x7EE5;
 const ECORCE: [f32; 3] = [0.34, 0.26, 0.18];
+/// Le maillage de la canopée lointaine : « bati/ », il ne se dessine pas en topologie.
+pub const ID_LOINTAIN: &str = "bati/bois-lointains";
+/// Le pas de la canopée (m).
+const PAS_CANOPEE: f32 = TAILLE / 2.0;
+
+/// La densité des bois en (x, z) : moins dans les clairières.
+fn densite_bois(x: f32, z: f32) -> f32 {
+    0.85 * (0.55 + 0.6 * bruit(GRAINE, x as f64 / 90.0, z as f64 / 90.0) as f32).min(1.0)
+}
+
+/// La canopée lointaine des bois d'un lieu réel (rien sinon), en triangles : position
+/// absolue, normale, couleur.
+pub fn lointain(c: &Campagne) -> Vec<f32> {
+    let Some(r) = &c.reel else { return Vec::new() };
+    if r.sol.is_empty() {
+        return Vec::new();
+    }
+    let d = DEMI_CARTE;
+    let n = ((2 * d + 1) as f32 * TAILLE / PAS_CANOPEE) as usize + 1;
+    let coin = |a: usize| -(d as f32) * TAILLE + a as f32 * PAS_CANOPEE;
+    // En chaque point : la part de bois alentour (un carré de 32 m), la hauteur des
+    // houppiers et le sol
+    let mut part = vec![0f32; n * n];
+    let mut haut = vec![0f32; n * n];
+    for b in 0..n {
+        for a in 0..n {
+            let (x, z) = (coin(a), coin(b));
+            let f = r.part_sol(BOIS, x as f64, z as f64, PAS_CANOPEE as f64 / 2.0) as f32;
+            let f = f * ((densite_bois(x, z) - 0.25) / 0.45).clamp(0.0, 1.0);
+            let sol = c.hauteur(x as f64, z as f64) as f32;
+            let h = 12.0 + 6.0 * bruit(GRAINE + 1, x as f64 / 120.0, z as f64 / 120.0) as f32;
+            part[b * n + a] = f;
+            haut[b * n + a] = sol + if f > 0.0 { 1.0 + h * f.sqrt() } else { 0.0 };
+        }
+    }
+    let at = |a: usize, b: usize| haut[b.min(n - 1) * n + a.min(n - 1)];
+    let mut v = Vec::new();
+    for b in 0..n - 1 {
+        for a in 0..n - 1 {
+            let q = [(a, b), (a + 1, b), (a, b + 1), (a + 1, b + 1)];
+            if q.iter().all(|&(a, b)| part[b * n + a] < 0.02) {
+                continue;
+            }
+            for &(a, b) in &[q[0], q[3], q[1], q[0], q[2], q[3]] {
+                let (x, z) = (coin(a), coin(b));
+                let dx = (at(a + 1, b) - at(a.saturating_sub(1), b)) / (2.0 * PAS_CANOPEE);
+                let dz = (at(a, b + 1) - at(a, b.saturating_sub(1))) / (2.0 * PAS_CANOPEE);
+                let l = (dx * dx + dz * dz + 1.0).sqrt();
+                let t = hache(GRAINE + 2, a as i64, b as i64) as f32;
+                let s = bruit(GRAINE + 3, x as f64 / 200.0, z as f64 / 200.0) as f32;
+                let vert = [0.16 + 0.07 * t, 0.27 + 0.08 * t - 0.04 * s, 0.13 + 0.03 * t];
+                v.extend_from_slice(&[x, at(a, b), z, -dx / l, 1.0 / l, -dz / l]);
+                v.extend_from_slice(&vert);
+            }
+        }
+    }
+    v
+}
 
 /// Les arbres de la tuile (i, j), comme `Reel::bati` : les sommets (position depuis le
 /// coin de la tuile, normale, couleur) et les triangles qui arrêtent (les troncs).
@@ -39,7 +103,7 @@ pub fn arbres(c: &Campagne, i: i32, j: i32) -> (Vec<f32>, Vec<[[f32; 3]; 3]>) {
             let classe = r.occupation(x as f64, z as f64).iter().fold((0u8, -1.0), |m, &(k, p)| if p > m.1 { (k, p) } else { m }).0;
             let (densite, taille) = match classe {
                 // Des clairières dans les bois
-                BOIS => (0.85 * (0.55 + 0.6 * bruit(GRAINE, x as f64 / 90.0, z as f64 / 90.0) as f32).min(1.0), 1.0),
+                BOIS => (densite_bois(x, z), 1.0),
                 PRE => (0.06, 0.85),
                 HABITE => (0.08, 0.7),
                 ZONE => (0.015, 0.7),
@@ -179,6 +243,12 @@ mod tests {
         // Rien dans l'eau, rien hors d'un lieu réel
         assert!(arbres(&lieu(BOIS, true), 0, 0).0.is_empty());
         assert!(arbres(&Campagne::brute(1), 0, 0).0.is_empty());
+        // Au loin, une canopée au-dessus du sol, sauf au-dessus d'un champ
+        let l = lointain(&bois);
+        assert!(!l.is_empty() && l.len() % 27 == 0);
+        assert!(l.chunks(9).any(|s| s[1] > 10.0) && l.chunks(9).all(|s| s[4] > 0.0));
+        assert!(lointain(&lieu(CHAMP, false)).is_empty());
+        assert!(lointain(&Campagne::brute(1)).is_empty());
         // Les normales regardent dehors : vers le haut au sommet des houppiers
         let haut = v.chunks(9).map(|s| s[1]).fold(f32::MIN, f32::max);
         assert!(haut > 8.0 && haut < 23.0, "{haut}");

@@ -148,8 +148,8 @@ pub struct App {
     calcul: Option<(u32, bool, std::sync::mpsc::Receiver<Campagne>)>,
     /// Le relief lointain de toute la carte, au-delà des tuiles chargées.
     lointain: Option<crate::moteur::MaillageId>,
-    /// Les bâtiments lointains d'un lieu réel, en blocs.
-    lointain_bati: Option<crate::moteur::MaillageId>,
+    /// Les bâtiments et les bois lointains d'un lieu réel (« bati/ »).
+    lointains: Vec<crate::moteur::MaillageId>,
 }
 
 impl App {
@@ -228,7 +228,7 @@ impl App {
             campagne,
             calcul: None,
             lointain: None,
-            lointain_bati: None,
+            lointains: Vec::new(),
         };
         // Les modèles du catalogue : les objets déjà posés les retrouvent
         let mut erreurs = Vec::new();
@@ -270,8 +270,12 @@ impl App {
         }
         let v = crate::lointain::sommets(&self.campagne);
         self.lointain = Some(self.maillages.mettre(crate::lointain::ID, Format::Terrain, Arc::new(v)));
-        let v = crate::lointain::bati(&self.campagne);
-        self.lointain_bati = (!v.is_empty()).then(|| self.maillages.mettre(crate::lointain::ID_BATI, Format::Terrain, Arc::new(v)));
+        self.lointains.clear();
+        for (id, v) in [(crate::lointain::ID_BATI, crate::lointain::bati(&self.campagne)), (crate::vegetation::ID_LOINTAIN, crate::vegetation::lointain(&self.campagne))] {
+            if !v.is_empty() {
+                self.lointains.push(self.maillages.mettre(id, Format::Terrain, Arc::new(v)));
+            }
+        }
     }
 
     /// La graine dont l'érosion se calcule.
@@ -866,8 +870,8 @@ impl App {
             let place = translation([-(o[0] as f32) * t, 0.0, -(o[1] as f32) * t]);
             scene.dessins.push(crate::moteur::scene::Dessin { maillage: k, place, os: Vec::new(), choisi: false });
             let mut trouees = vec![k];
-            // Les bâtiments lointains (« bati/ » : la topologie ne les garde pas)
-            if let Some(b) = self.lointain_bati {
+            // Les bâtiments et les bois lointains (« bati/ » : la topologie ne les garde pas)
+            for &b in &self.lointains {
                 scene.dessins.push(crate::moteur::scene::Dessin { maillage: b, place, os: Vec::new(), choisi: false });
                 trouees.push(b);
             }
