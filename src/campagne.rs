@@ -45,7 +45,7 @@ pub struct Campagne {
 }
 
 /// Un nombre de 0 à 1, toujours le même pour (graine, x, z).
-fn hache(graine: u32, x: i64, z: i64) -> f64 {
+pub(crate) fn hache(graine: u32, x: i64, z: i64) -> f64 {
     let mut h = (x as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ (z as u64).wrapping_mul(0xC2B2_AE3D_27D4_EB4F) ^ graine as u64;
     h ^= h >> 31;
     h = h.wrapping_mul(0xBF58_476D_1CE4_E5B9);
@@ -54,7 +54,7 @@ fn hache(graine: u32, x: i64, z: i64) -> f64 {
 }
 
 /// Bruit de valeurs, lissé (quintique), sur un réseau de pas 1 : de 0 à 1.
-fn bruit(graine: u32, x: f64, z: f64) -> f64 {
+pub(crate) fn bruit(graine: u32, x: f64, z: f64) -> f64 {
     let (x0, z0) = (x.floor(), z.floor());
     let (fx, fz) = (x - x0, z - z0);
     let lisse = |t: f64| t * t * t * (t * (t * 6.0 - 15.0) + 10.0);
@@ -263,8 +263,13 @@ fn occupation(classe: u8, x: f64, z: f64, s: f64) -> [f32; 3] {
 }
 
 impl Source for Campagne {
+    /// Les bâtiments et les ponts de la tuile, et ses arbres.
     fn bati(&self, i: i32, j: i32) -> Option<(Vec<f32>, Vec<[[f32; 3]; 3]>)> {
-        self.reel.as_ref()?.bati(i, j)
+        let (mut v, mut t) = self.reel.as_ref()?.bati(i, j).unwrap_or_default();
+        let (va, ta) = crate::vegetation::arbres(self, i, j);
+        v.extend(va);
+        t.extend(ta);
+        (!v.is_empty()).then_some((v, t))
     }
 
     fn tuile(&self, i: i32, j: i32) -> Contenu {

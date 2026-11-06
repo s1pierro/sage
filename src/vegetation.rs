@@ -1,0 +1,189 @@
+//! La végétation d'un lieu réel : des arbres, plantés tuile par tuile selon l'occupation
+//! du sol (`Reel::occupation`), serrés dans les bois, épars dans les prés, les parcs, les
+//! jardins des quartiers, rares dans les champs.
+//!
+//! La tuile se découpe en cellules de `CELLULE` mètres ; chacune tire au sort (un hachage
+//! de sa place sur la carte : toujours le même arbre au même endroit) si elle porte un
+//! arbre, où, de quelle essence et de quelle taille. Un arbre ne pousse ni dans l'eau, ni
+//! sur une chaussée, un bâtiment ou un pont (`Reel::libre`).
+//!
+//! Deux essences en facettes : un feuillu (tronc et houppier en boule bosselée) et un
+//! conifère (tronc et deux cônes). Seuls les troncs arrêtent ; on passe sous les
+//! branches.
+
+use crate::campagne::{bruit, hache, Campagne};
+use crate::moteur::TAILLE;
+use crate::reel::{BOIS, CHAMP, HABITE, PRE, ZONE};
+
+/// Le côté d'une cellule (m) : dix par tuile.
+const CELLULE: f32 = TAILLE / 10.0;
+/// Un tronc reste à tant de mètres d'une chaussée, d'un mur ou d'un pont.
+const MARGE: f32 = 1.5;
+const GRAINE: u32 = 0x7EE5;
+const ECORCE: [f32; 3] = [0.34, 0.26, 0.18];
+
+/// Les arbres de la tuile (i, j), comme `Reel::bati` : les sommets (position depuis le
+/// coin de la tuile, normale, couleur) et les triangles qui arrêtent (les troncs).
+pub fn arbres(c: &Campagne, i: i32, j: i32) -> (Vec<f32>, Vec<[[f32; 3]; 3]>) {
+    let (mut v, mut t) = (Vec::new(), Vec::new());
+    let Some(r) = &c.reel else { return (v, t) };
+    let (ox, oz) = (i as f32 * TAILLE, j as f32 * TAILLE);
+    let n = (TAILLE / CELLULE).round() as i64;
+    for b in 0..n {
+        for a in 0..n {
+            let (gi, gj) = (i as i64 * n + a, j as i64 * n + b);
+            let h = |k: u32| hache(GRAINE + k, gi, gj) as f32;
+            let x = ox + (a as f32 + 0.15 + 0.7 * h(1)) * CELLULE;
+            let z = oz + (b as f32 + 0.15 + 0.7 * h(2)) * CELLULE;
+            // La classe qui pèse le plus là, et sa densité (la part de cellules boisées)
+            let classe = r.occupation(x as f64, z as f64).iter().fold((0u8, -1.0), |m, &(k, p)| if p > m.1 { (k, p) } else { m }).0;
+            let (densite, taille) = match classe {
+                // Des clairières dans les bois
+                BOIS => (0.85 * (0.55 + 0.6 * bruit(GRAINE, x as f64 / 90.0, z as f64 / 90.0) as f32).min(1.0), 1.0),
+                PRE => (0.06, 0.85),
+                HABITE => (0.08, 0.7),
+                ZONE => (0.015, 0.7),
+                CHAMP => (0.006, 1.0),
+                _ => (0.04, 0.85),
+            };
+            if h(0) >= densite || !r.libre(x as f64, z as f64, MARGE) {
+                continue;
+            }
+            let y = c.hauteur(x as f64, z as f64) as f32;
+            let p = [x - ox, y, z - oz];
+            let coniferes = if classe == BOIS { 0.3 } else { 0.12 };
+            let teinte = h(5);
+            if h(3) < coniferes {
+                conifere(&mut v, &mut t, p, (12.0 + 10.0 * h(4)) * taille, h(6), teinte);
+            } else {
+                feuillu(&mut v, &mut t, p, (9.0 + 8.0 * h(4)) * taille, h(6), teinte, |k| hache(GRAINE + 20 + k, gi, gj) as f32);
+            }
+        }
+    }
+    (v, t)
+}
+
+/// Un triangle à facette : sa normale tournée à l'opposé du point `dedans`.
+fn facette(v: &mut Vec<f32>, mut q: [[f32; 3]; 3], dedans: [f32; 3], couleur: [f32; 3]) {
+    let sub = |a: [f32; 3], b: [f32; 3]| [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+    let (u, w) = (sub(q[1], q[0]), sub(q[2], q[0]));
+    let mut n = [u[1] * w[2] - u[2] * w[1], u[2] * w[0] - u[0] * w[2], u[0] * w[1] - u[1] * w[0]];
+    let m = [(q[0][0] + q[1][0] + q[2][0]) / 3.0, (q[0][1] + q[1][1] + q[2][1]) / 3.0, (q[0][2] + q[1][2] + q[2][2]) / 3.0];
+    let d = sub(m, dedans);
+    if n[0] * d[0] + n[1] * d[1] + n[2] * d[2] < 0.0 {
+        q.swap(1, 2);
+        n = n.map(|x| -x);
+    }
+    let l = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+    if l < 1e-9 {
+        return;
+    }
+    let n = n.map(|x| x / l);
+    for p in q {
+        v.extend_from_slice(&p);
+        v.extend_from_slice(&n);
+        v.extend_from_slice(&couleur);
+    }
+}
+
+/// Un anneau de six points de rayon `r` à la hauteur `y` autour de `p`, tourné de `a`
+/// (en sixièmes de tour).
+fn anneau(p: [f32; 3], y: f32, r: f32, a: f32) -> [[f32; 3]; 6] {
+    std::array::from_fn(|k| {
+        let t = (k as f32 + a) * std::f32::consts::TAU / 6.0;
+        [p[0] + r * t.cos(), y, p[2] + r * t.sin()]
+    })
+}
+
+/// Le tronc, du sol (un demi-mètre dessous) à `haut` : ses six faces, qui arrêtent.
+fn tronc(v: &mut Vec<f32>, t: &mut Vec<[[f32; 3]; 3]>, p: [f32; 3], haut: f32, r: f32, a: f32) {
+    let (bas, dessus) = (anneau(p, p[1] - 0.5, r, a), anneau(p, p[1] + haut, r * 0.7, a));
+    for k in 0..6 {
+        let l = (k + 1) % 6;
+        for q in [[bas[k], bas[l], dessus[l]], [bas[k], dessus[l], dessus[k]]] {
+            let dedans = [p[0], (q[0][1] + q[1][1] + q[2][1]) / 3.0, p[2]];
+            facette(v, q, dedans, ECORCE);
+            t.push(q);
+        }
+    }
+}
+
+/// Un feuillu de `haut` mètres : un tronc, un houppier en boule à facettes, bosselé
+/// (`h` : un hasard par sommet).
+fn feuillu(v: &mut Vec<f32>, t: &mut Vec<[[f32; 3]; 3]>, p: [f32; 3], haut: f32, a: f32, teinte: f32, h: impl Fn(u32) -> f32) {
+    let r = haut * 0.3;
+    let cy = p[1] + haut - r * 0.95;
+    tronc(v, t, p, cy - p[1], 0.12 + haut * 0.018, a);
+    let vert = [0.20 + 0.08 * teinte, 0.34 + 0.08 * teinte, 0.13 + 0.03 * teinte];
+    let mut bas = anneau(p, cy - r * 0.3, r, a);
+    let mut haut_ = anneau(p, cy + r * 0.4, r * 0.8, a + 0.5);
+    for (k, q) in bas.iter_mut().chain(haut_.iter_mut()).enumerate() {
+        let s = 0.85 + 0.3 * h(k as u32);
+        q[0] = p[0] + (q[0] - p[0]) * s;
+        q[2] = p[2] + (q[2] - p[2]) * s;
+    }
+    let (sous, sommet) = ([p[0], cy - r * 0.8, p[2]], [p[0], cy + r * 0.95, p[2]]);
+    let centre = [p[0], cy, p[2]];
+    for k in 0..6 {
+        let l = (k + 1) % 6;
+        facette(v, [sous, bas[l], bas[k]], centre, vert);
+        facette(v, [bas[k], bas[l], haut_[k]], centre, vert);
+        facette(v, [bas[l], haut_[l], haut_[k]], centre, vert);
+        facette(v, [haut_[k], haut_[l], sommet], centre, vert);
+    }
+}
+
+/// Un conifère de `haut` mètres : un tronc et deux cônes.
+fn conifere(v: &mut Vec<f32>, t: &mut Vec<[[f32; 3]; 3]>, p: [f32; 3], haut: f32, a: f32, teinte: f32) {
+    let r = haut * 0.2;
+    tronc(v, t, p, haut * 0.35, 0.12 + haut * 0.015, a);
+    let vert = [0.12 + 0.05 * teinte, 0.24 + 0.06 * teinte, 0.14 + 0.03 * teinte];
+    for (base, rayon, pointe, tour) in [(0.22, r, 0.72, a), (0.5, r * 0.72, 1.0, a + 0.5)] {
+        let y = p[1] + haut * base;
+        let bord = anneau(p, y, rayon, tour);
+        let sommet = [p[0], p[1] + haut * pointe, p[2]];
+        let dedans = [p[0], y + (sommet[1] - y) * 0.3, p[2]];
+        for k in 0..6 {
+            let l = (k + 1) % 6;
+            facette(v, [bord[k], bord[l], sommet], dedans, vert);
+            facette(v, [bord[k], bord[l], [p[0], y, p[2]]], [p[0], y + 1.0, p[2]], vert);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::reel::{cote, cote_sol, Reel};
+    use std::sync::Arc;
+
+    fn lieu(classe: u8, eau: bool) -> Campagne {
+        let pas = 64.0;
+        let n = cote(pas);
+        let m = cote_sol(n);
+        let r = Reel::new("Essai", 49.0, 1.0, 0.0, 0.0, pas, if eau { 5.0 } else { -50.0 }, &vec![0.0; n * n], &vec![eau; n * n], Vec::new(), Vec::new(), Vec::new()).avec_sol(vec![classe; m * m]);
+        Campagne::reelle(Arc::new(r))
+    }
+
+    #[test]
+    fn un_bois_est_serre_un_champ_presque_nu() {
+        let bois = lieu(BOIS, false);
+        let (v, t) = arbres(&bois, 0, 0);
+        assert_eq!(v.len() % 27, 0);
+        // Douze faces de tronc par arbre, qui arrêtent
+        let n = t.len() / 12;
+        assert!(n > 25, "{n} arbres");
+        assert_eq!(arbres(&bois, 0, 0), (v.clone(), t.clone()), "toujours les mêmes");
+        let champs: usize = (0..4).map(|i| arbres(&lieu(CHAMP, false), i, 0).1.len() / 12).sum();
+        assert!(champs < 5, "{champs}");
+        // Rien dans l'eau, rien hors d'un lieu réel
+        assert!(arbres(&lieu(BOIS, true), 0, 0).0.is_empty());
+        assert!(arbres(&Campagne::brute(1), 0, 0).0.is_empty());
+        // Les normales regardent dehors : vers le haut au sommet des houppiers
+        let haut = v.chunks(9).map(|s| s[1]).fold(f32::MIN, f32::max);
+        assert!(haut > 8.0 && haut < 23.0, "{haut}");
+        for s in v.chunks(9).filter(|s| s[1] == haut) {
+            assert!(s[4] > 0.0);
+        }
+    }
+}

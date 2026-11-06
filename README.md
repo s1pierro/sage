@@ -6,6 +6,17 @@ Il vise un monde ouvert, avec d'autres valeurs que la violence.
 
 ![Le mannequin marche dans le décor de S.A.G.E.](docs/apercu.png)
 
+## Version 0.23 : la végétation
+
+- Des arbres poussent sur le lieu réel selon l'occupation du sol : serrés dans les bois
+  (avec des clairières), épars dans les prés et les parcs, dans les jardins des
+  quartiers, rares dans les zones d'activité et les champs.
+- Deux essences en facettes : des feuillus au houppier bosselé et des conifères, de
+  tailles et de verts variés. Ils ne poussent ni dans l'eau, ni sur les routes, les
+  bâtiments ou les ponts.
+- Les troncs arrêtent, on passe sous les branches. Toujours les mêmes arbres au même
+  endroit. Pas besoin de refaire le `.reel` : les arbres se calculent avec les tuiles.
+
 ## Version 0.22 : l'occupation du sol, les bâtiments au loin
 
 - Le sol du lieu réel suit l'occupation d'OpenStreetMap : bois, prés et parcs, champs

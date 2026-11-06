@@ -485,6 +485,51 @@ impl Reel {
         mieux
     }
 
+    /// Le point (x, z) est-il libre, à `marge` mètres près : ni eau, ni chaussée, ni
+    /// bâtiment, ni pont ? (Un arbre y pousse.)
+    pub fn libre(&self, x: f64, z: f64, marge: f32) -> bool {
+        if self.eau(x, z) > 0.0 || self.relief(x, z) < self.niveau as f64 + 0.3 {
+            return false;
+        }
+        if self.route(x, z).is_some_and(|p| p.hors() < marge) {
+            return false;
+        }
+        let (x, z) = (x as f32, z as f32);
+        let segment = |a: [f32; 2], b: [f32; 2]| {
+            let (dx, dz) = (b[0] - a[0], b[1] - a[1]);
+            let l2 = dx * dx + dz * dz;
+            let t = if l2 > 0.0 { (((x - a[0]) * dx + (z - a[1]) * dz) / l2).clamp(0.0, 1.0) } else { 0.0 };
+            (x - a[0] - dx * t).hypot(z - a[1] - dz * t)
+        };
+        let (ti, tj) = ((x / TAILLE).floor() as i32, (z / TAILLE).floor() as i32);
+        for (i, j) in (tj - 1..=tj + 1).flat_map(|j| (ti - 1..=ti + 1).map(move |i| (i, j))) {
+            for &k in self.par_tuile.get(&(i, j)).map_or(&[][..], |l| l.as_slice()) {
+                let c = &self.batiments[k as usize].contour;
+                let mut dedans = false;
+                for e in 0..c.len() {
+                    let (a, b) = (c[e], c[(e + 1) % c.len()]);
+                    if segment(a, b) < marge {
+                        return false;
+                    }
+                    if (a[1] > z) != (b[1] > z) && x < a[0] + (z - a[1]) / (b[1] - a[1]) * (b[0] - a[0]) {
+                        dedans = !dedans;
+                    }
+                }
+                if dedans {
+                    return false;
+                }
+            }
+            for &(k, s) in self.ponts_par_tuile.get(&(i, j)).map_or(&[][..], |l| l.as_slice()) {
+                let p = &self.ponts[k as usize];
+                let (a, b) = (p.points[s as usize], p.points[s as usize + 1]);
+                if segment([a[0], a[1]], [b[0], b[1]]) < p.largeur / 2.0 + PARAPET_LARGE + marge {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
     /// La hauteur du relief seul, sans les routes.
     pub fn relief(&self, x: f64, z: f64) -> f64 {
         let (gx, gz) = ((x - origine()) / self.pas, (z - origine()) / self.pas);

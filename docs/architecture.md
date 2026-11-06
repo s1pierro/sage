@@ -841,3 +841,25 @@ sur une grille qui déborde d'un point).
   préfixe `bati/` le fait disparaître en topologie. Le format Terrain ne porte pas
   d'ombre.
 
+## 22. La végétation (0.23)
+
+- `src/vegetation.rs` : `arbres(campagne, i, j)` plante les arbres d'une tuile. Elle
+  ne fait rien hors d'un lieu réel. La tuile se découpe en 10 × 10 cellules de 6,4 m.
+  Chaque cellule tire au hasard, par hachage de sa place sur la carte : si elle porte un
+  arbre, sa position dans la cellule, son essence, sa taille, sa teinte et sa rotation.
+- La densité dépend de la classe d'occupation qui pèse le plus au point. Elle vaut 85 %
+  dans les bois, modulée par un bruit de 90 m pour les clairières ; 8 % dans les
+  quartiers habités ; 6 % dans les prés ; 4 % là où rien n'est dit ; 1,5 % dans les
+  zones ; 0,6 % dans les champs.
+- `Reel::libre(x, z, marge)` refuse l'eau, les chaussées et les ponts à 1,5 m près. Il
+  refuse aussi les bâtiments : le point est dedans (pair-impair) ou à moins de 1,5 m
+  d'un mur, en cherchant les bâtiments des 3 × 3 tuiles autour.
+- Les formes ont des facettes (une normale par triangle, tournée dehors) :
+  - feuillu : un tronc de six faces et un houppier de 24 triangles (deux anneaux
+    bosselés entre deux pointes) ;
+  - conifère : un tronc et deux cônes à fond.
+  Un arbre fait 36 triangles.
+- Les troncs vont aux triangles qui arrêtent ; les houppiers non.
+- `Campagne::bati` (`Source`) joint les bâtiments et ponts du `Reel` aux arbres. Ils
+  forment une seule entité par tuile (`bati/i/j`, Statique), qui porte ombre.
+
