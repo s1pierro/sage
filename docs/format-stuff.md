@@ -307,6 +307,10 @@ montre pas, et ses paramètres sont gardés.
 - **`retouche`** : `true` dès qu'une main y a touché (déplacée, modifiée, niveau
   ajouté…). Une régénération la laisse alors en paix.
 
+  Un bâtiment posé à la main (`provenance: "main"`, identifiant `main-<horodatage>`)
+  est une instance comme les autres, `retouche: true`. Démoli, il n'a pas de place à
+  garder : il quitte le fichier au lieu de passer `masquee`.
+
   Ainsi en 0.29 : régénérer une région la refait entière à partir des sources, puis y
   remet telles quelles les instances `retouche` ou `masquee` de l'ancienne, avec les
   définitions auxquelles elles renvoient. Une instance refaite du même identifiant, ou

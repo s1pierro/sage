@@ -204,6 +204,33 @@ impl Bati {
         Bati::new(id, tuile, [c[0] - tuile.0 as f32 * TAILLE, b.pied, c[1] - tuile.1 as f32 * TAILLE], 0.0, forme, "osm+lidar".into())
     }
 
+    /// Un bâtiment neuf posé à la main, centré en (x, z) absolus, au cap `cap` : une
+    /// maison de 10 × 8 m à deux pans, le pied un peu sous le sol le plus bas de son
+    /// contour.
+    pub fn neuf(m: &Regions, x: f64, z: f64, cap: f32) -> Bati {
+        let contour = vec![[-5.0, -4.0], [5.0, -4.0], [5.0, 4.0], [-5.0, 4.0]];
+        let sol = |p: &[f32; 2]| {
+            let q = crate::moteur::objets::tourner([p[0], 0.0, p[1]], cap);
+            m.hauteur(x + q[0] as f64, z + q[2] as f64) as f32
+        };
+        let bas = contour.iter().map(sol).fold(f32::MAX, f32::min);
+        let centre = m.hauteur(x, z) as f32;
+        let y = bas.min(centre) - 0.2;
+        let (murs, couverture) = crate::reel::teintes_bati(crate::reel::MAISON);
+        let egout = centre - y + 6.0;
+        let forme = Forme { contour, pied: 0.0, egout, faitage: egout + 3.5, toit: crate::toits::DEUX_PANS, axe: 0.0, murs, couverture };
+        let tuile = ((x / TAILLE as f64).floor() as i32, (z / TAILLE as f64).floor() as i32);
+        let n = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as u64);
+        let mut b = Bati::new(format!("main-{n:x}"), tuile, [(x - tuile.0 as f64 * TAILLE as f64) as f32, y, (z - tuile.1 as f64 * TAILLE as f64) as f32], cap, forme, "main".into());
+        b.retouche = true;
+        b
+    }
+
+    /// Posé à la main : démoli, il n'a pas de place à garder et quitte le fichier.
+    pub fn a_oter(&self) -> bool {
+        self.masquee && self.provenance == "main"
+    }
+
     /// La position, absolue.
     pub fn origine(&self) -> [f32; 3] {
         [self.tuile.0 as f32 * TAILLE + self.position[0], self.position[1], self.tuile.1 as f32 * TAILLE + self.position[2]]
@@ -1005,6 +1032,7 @@ impl Regions {
         for b in l.values() {
             let avant = instances.iter().find(|i| i.get("id").and_then(J::txt) == Some(&b.id)).and_then(|i| i.get("definition")).and_then(J::txt).map(String::from);
             let oter = match &b.detail {
+                _ if b.a_oter() => avant,
                 Some(d) if d.neuve => Some(d.def.clone()),
                 None => avant,
                 _ => None,
@@ -1018,7 +1046,7 @@ impl Regions {
                     changees = true;
                 }
             }
-            if let Some(d) = b.detail.as_ref().filter(|d| d.neuve) {
+            if let Some(d) = b.detail.as_ref().filter(|d| d.neuve && !b.a_oter()) {
                 let k = (2..s.tampons.len()).find(|&k| s.tampons[k].is_empty()).unwrap_or(s.tampons.len().max(2));
                 let anciens = instances.iter().find(|i| i.get("id").and_then(J::txt) == Some(&b.id)).and_then(|i| i.get("procedural")).and_then(|p| p.get("params"));
                 defs.push(crate::enrichi::ecrire(&mut s, k, &d.def, &b.id, b.params(anciens), &d.modele));
@@ -1029,6 +1057,10 @@ impl Regions {
             s.mettre("definitions", J::Liste(defs));
         }
         for b in l.values() {
+            if b.a_oter() {
+                instances.retain(|i| i.get("id").and_then(J::txt) != Some(&b.id));
+                continue;
+            }
             match instances.iter_mut().find(|i| i.get("id").and_then(J::txt) == Some(&b.id)) {
                 Some(i) => *i = b.instance(Some(i)),
                 None => instances.push(b.instance(None)),

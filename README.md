@@ -6,8 +6,20 @@ Il vise un monde ouvert, avec d'autres valeurs que la violence.
 
 ![Le mannequin marche dans le décor de S.A.G.E.](docs/apercu.png)
 
-**Télécharger l'APK** : [sage-0.29.apk](https://github.com/s1pierro/sage/releases/download/v0.29/sage-0.29.apk)
+**Télécharger l'APK** : [sage-0.30.apk](https://github.com/s1pierro/sage/releases/download/v0.30/sage-0.30.apk)
 (Android 8 ou plus récent, arm64).
+
+## Version 0.30 : de nouveaux bâtiments
+
+- Dans un monde matérialisé, l'onglet Ajout de l'éditeur pose un **bâtiment neuf** là
+  où l'on touche : une maison de 10 × 8 m à deux pans, face à la caméra, le pied
+  calé sous le sol le plus bas de son contour.
+- Il se règle comme les autres (toit, hauteurs, cap, couleurs, déplacement), s'enrichit
+  d'un `.glb`, et chaque bâtiment non enrichi gagne deux réglages, **Largeur** et
+  **Profondeur**, qui étirent son contour.
+- Il s'écrit dans sa région en instance `provenance: "main"`, `retouche: true` : une
+  régénération le garde, et n'y refait pas de bâtiment. Démoli (ou son ajout annulé),
+  il quitte le fichier, sa définition avec lui.
 
 ## Version 0.29 : régénérer un fragment du monde
 

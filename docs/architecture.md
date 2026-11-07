@@ -1025,3 +1025,17 @@ sur une grille qui déborde d'un point).
 - **Éditeur** : onglet Carte, liens « Régénérer la région » et « Avec ses voisines »
   quand rien d'autre ne tourne.
 
+## 29. De nouveaux bâtiments (0.30)
+
+- **`Bati::neuf(regions, x, z, cap)`** : un rectangle de 10 × 8 m à deux pans, le pied
+  20 cm sous le sol le plus bas de ses coins, `provenance` `main`, `retouche`.
+  `a_oter` : démoli et posé à la main, il est retiré de la région par `reecrire`
+  (instance et définition) au lieu d'être masqué.
+- **Éditeur** : `Mode::PoserBati` (lien « Bâtiment » de la section Ajouter, quand le
+  monde est matérialisé) ; l'appui crée le bâtiment par `retoucher_bati`, avec pour état
+  d'avant le même bâtiment démoli : annuler l'ajout le retire. Les réglages Largeur et
+  Profondeur étirent le contour autour de son milieu, dans le repère de l'instance.
+- Les retouches en attente et `reecrire` acceptaient déjà une instance inconnue de la
+  région (ajoutée à la liste) : rien d'autre ne change pour les tuiles, le lointain ou
+  la régénération.
+

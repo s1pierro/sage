@@ -46,6 +46,8 @@ pub enum Mode {
     Ajouter(Genre),
     /// Poser le bâtiment choisi là où l'on touche.
     DeplacerBati,
+    /// Poser un bâtiment neuf là où l'on touche (monde matérialisé).
+    PoserBati,
 }
 
 /// De quoi défaire un changement.
@@ -347,6 +349,21 @@ impl Editeur {
                 }
                 monde.choisie = i.and_then(|i| i.entite).filter(|e| monde.objet.get(*e).is_some());
             }
+            Mode::PoserBati => {
+                if let (Some(m), Some(i)) = (self.regions.clone(), i) {
+                    let a = monde.absolu(i.point);
+                    let cap = angle(((lacet + PI) / FRAC_PI_2).round() * FRAC_PI_2);
+                    let x = crate::regions::Bati::neuf(&m, a[0], a[2], cap);
+                    let k = (crate::regions::de_tuile(x.tuile.0), crate::regions::de_tuile(x.tuile.1));
+                    let mut avant = x.clone();
+                    avant.masquee = true;
+                    let ident = x.id.clone();
+                    self.retoucher_bati(&m, monde, maillages, tuiles, &avant, x, 0, "l'ajout du bâtiment");
+                    self.bati = Some((k, ident));
+                    monde.choisie = None;
+                }
+                self.mode = Mode::Choisir;
+            }
             Mode::DeplacerBati => {
                 if let (Some(m), Some(((ri, rj), id)), Some(i)) = (self.regions.clone(), self.bati.clone(), i) {
                     if let Some(avant) = m.batiment(ri, rj, &id) {
@@ -410,6 +427,15 @@ impl Editeur {
         if let Some(k) = cx.liens(b, id("editeur-ajouter"), &noms, actif) {
             self.mode = if actif == Some(k) { Mode::Choisir } else { Mode::Ajouter(Genre::TOUS[k]) };
         }
+        // Un bâtiment neuf, dans un monde matérialisé
+        if self.regions.is_some() {
+            let actif = (self.mode == Mode::PoserBati).then_some(0);
+            if cx.liens(b, id("editeur-bati-neuf"), &["Bâtiment"], actif).is_some() {
+                self.mode = if actif.is_some() { Mode::Choisir } else { Mode::PoserBati };
+                self.bati = None;
+                monde.choisie = None;
+            }
+        }
         // Les modèles importés, sous leur nom
         let importes: Vec<(Genre, String)> = monde.modeles.presents().into_iter().map(|k| (Genre::Modele(k), monde.modeles.get(k).map_or(String::new(), |m| m.nom.clone()))).collect();
         if !importes.is_empty() {
@@ -422,7 +448,9 @@ impl Editeur {
                 self.mode = if actif == Some(k) { Mode::Choisir } else { Mode::Ajouter(importes[k].0) };
             }
         }
-        if let Mode::Ajouter(g) = self.mode {
+        if self.mode == Mode::PoserBati {
+            cx.paragraph(b, "Touchez dans la vue l'endroit où poser son centre : une maison de 10 × 8 m, face à vous, à régler ensuite (dimensions, toit, hauteurs, couleurs) ou à enrichir d'un .glb.");
+        } else if let Mode::Ajouter(g) = self.mode {
             let quoi = match g {
                 Genre::Modele(_) => format!("« {} »", nom_de(monde, &Objet::neuf(g))),
                 _ => article(g).to_string(),
@@ -1040,6 +1068,7 @@ impl Editeur {
         cx.section(b, "RÉGLAGES");
         let mut x = bt.clone();
         let mut cle = 0;
+        let mut cle_dim = 0;
         let k = id("bati-cap");
         let mut deg = angle(bt.cap).to_degrees();
         cx.slider(b, k, "Cap", &format!("{} °", dec(deg, 0)), &mut deg, 0.0, 360.0);
@@ -1055,6 +1084,24 @@ impl Editeur {
             return;
         }
         let f = &bt.forme;
+        // Les dimensions : le contour étiré dans le repère du bâtiment
+        let (lo, hi) = f.contour.iter().fold(([f32::MAX; 2], [f32::MIN; 2]), |(lo, hi), p| ([lo[0].min(p[0]), lo[1].min(p[1])], [hi[0].max(p[0]), hi[1].max(p[1])]));
+        for (axe, nom, cle) in [(0usize, "Largeur", id("bati-largeur")), (1, "Profondeur", id("bati-profondeur"))] {
+            let avant = (hi[axe] - lo[axe]).max(0.1);
+            let mut l = avant;
+            cx.slider(b, cle, nom, &format!("{} m", dec(l, 1)), &mut l, 2.0, 120.0);
+            let l = (l * 2.0).round() / 2.0;
+            if (l - avant).abs() > 0.01 {
+                let (c, k) = ((lo[axe] + hi[axe]) / 2.0, l / avant);
+                for p in &mut x.forme.contour {
+                    p[axe] = c + (p[axe] - c) * k;
+                }
+                cle_dim = cle;
+            }
+        }
+        if cle_dim != 0 {
+            cle = cle_dim;
+        }
         if let Some(t) = cx.liens(b, id("bati-toit"), &TOITS, Some(f.toit as usize)) {
             x.forme.toit = t as u8;
             if t as u8 == crate::toits::PLAT {
