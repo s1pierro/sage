@@ -118,6 +118,10 @@ pub struct Editeur {
     retours: Vec<Retour>,
     /// Le modèle dont on demande un nouveau fichier (l'application ouvre le sélecteur).
     pub remplacement: Option<String>,
+    /// Le bâtiment à exporter en .glb, pour l'application.
+    pub export_bati: Option<Bati>,
+    /// Le bâtiment (région, identifiant) qu'un .glb à choisir enrichira.
+    pub enrichir_bati: Option<((i32, i32), String)>,
     /// Le modèle dont il faut retourner les faces.
     pub retournement: Option<String>,
     /// L'onglet ouvert : `AJOUT`, `TOPOLOGIE` ou `CARTE`.
@@ -182,7 +186,7 @@ fn graine_au_hasard() -> u32 {
 
 impl Default for Editeur {
     fn default() -> Editeur {
-        Editeur { mode: Mode::Choisir, retours: Vec::new(), remplacement: None, retournement: None, onglet: AJOUT, pinceau: Pinceau::default(), coup: None, saisie: None, gestes: 0, isolignes: 0.0, confirmer: None, regeneration: None, erosion: None, lieu: None, monde: None, importer: false, terrasse: Terrassement::default(), regions: None, bati: None, surbrillance: None, surbrillance_maillage: None, message: None }
+        Editeur { mode: Mode::Choisir, retours: Vec::new(), remplacement: None, export_bati: None, enrichir_bati: None, retournement: None, onglet: AJOUT, pinceau: Pinceau::default(), coup: None, saisie: None, gestes: 0, isolignes: 0.0, confirmer: None, regeneration: None, erosion: None, lieu: None, monde: None, importer: false, terrasse: Terrassement::default(), regions: None, bati: None, surbrillance: None, surbrillance_maillage: None, message: None }
     }
 }
 
@@ -314,10 +318,19 @@ impl Editeur {
                 self.bati = None;
                 // Un bâtiment d'un monde matérialisé : celui sous le point touché
                 if let (Some(m), Some(i)) = (self.regions.clone(), i) {
+                    let mut enrichi = None;
                     let tuile = i.entite.and_then(|e| monde.ident.get(e)).and_then(|s| {
                         let (a, b) = s.strip_prefix("bati/")?.split_once('/')?;
+                        // Un bâtiment enrichi a son entité : bati/i/j/<id>
+                        let (b, id) = b.split_once('/').map_or((b, None), |(b, id)| (b, Some(id)));
+                        enrichi = id.map(String::from);
                         Some((a.parse::<i32>().ok()?, b.parse::<i32>().ok()?))
                     });
+                    if let (Some((ti, tj)), Some(id)) = (tuile, enrichi) {
+                        self.bati = Some(((crate::regions::de_tuile(ti), crate::regions::de_tuile(tj)), id));
+                        monde.choisie = None;
+                        return;
+                    }
                     if let Some((ti, tj)) = tuile {
                         let a = monde.absolu(i.point);
                         if let Some(b) = m.bati_sous(ti, tj, a[0], a[2]) {
@@ -973,6 +986,9 @@ impl Editeur {
         };
         cx.mesure(b, "Provenance", &format!("{provenance}{}", if bt.retouche { ", retouché" } else { "" }));
         cx.mesure(b, "Tuile", &format!("{} ; {}", bt.tuile.0, bt.tuile.1));
+        if let Some(d) = &bt.detail {
+            cx.mesure(b, "Modèle", &format!("{} triangles{}", d.modele.triangles.len(), if d.neuve { ", à écrire" } else { "" }));
+        }
         let actif = (self.mode == Mode::DeplacerBati).then_some(0);
         match cx.liens(b, id("bati-actions"), &["Déplacer", "Démolir", "Laisser"], actif) {
             Some(0) => self.mode = if self.mode == Mode::DeplacerBati { Mode::Choisir } else { Mode::DeplacerBati },
@@ -994,6 +1010,20 @@ impl Editeur {
         if self.mode == Mode::DeplacerBati {
             cx.paragraph(b, "Touchez dans la vue l'endroit où poser son centre ; il garde sa hauteur au-dessus du sol.");
         }
+        // L'enrichir : l'exporter pour le retravailler, le remplacer par un modèle
+        let enrichi = bt.detail.is_some();
+        let liens: &[&str] = if enrichi { &["Exporter en .glb", "Remplacer par un .glb…", "Revenir au procédural"] } else { &["Exporter en .glb", "Remplacer par un .glb…"] };
+        match cx.liens(b, id("bati-modele"), liens, None) {
+            Some(0) => self.export_bati = Some(bt.clone()),
+            Some(1) => self.enrichir_bati = Some(((ri, rj), bt.id.clone())),
+            Some(_) => {
+                let mut x = bt.clone();
+                x.detail = None;
+                self.retoucher_bati(m, monde, maillages, tuiles, &bt, x, 0, "le retour au procédural");
+                return;
+            }
+            None => {}
+        }
 
         cx.section(b, "RÉGLAGES");
         let mut x = bt.clone();
@@ -1005,6 +1035,12 @@ impl Editeur {
         if (cap - angle(bt.cap)).abs() > 1e-4 {
             x.cap = cap;
             cle = k;
+        }
+        if enrichi {
+            if cle != 0 && x != bt {
+                self.retoucher_bati(m, monde, maillages, tuiles, &bt, x, cle, "le réglage du bâtiment");
+            }
+            return;
         }
         let f = &bt.forme;
         if let Some(t) = cx.liens(b, id("bati-toit"), &TOITS, Some(f.toit as usize)) {
@@ -1078,7 +1114,26 @@ impl Editeur {
             Some((e, avant)) if *avant == b => *e,
             _ => {
                 let (mut v, mut t) = (Vec::new(), Vec::new());
-                b.monter(b.tuile.0, b.tuile.1, &mut v, &mut t);
+                match &b.detail {
+                    // Enrichi : les faces de son modèle, à son cap et à sa place
+                    Some(d) => {
+                        for tri in &d.modele.triangles {
+                            let p = tri.map(|q| {
+                                let r = crate::moteur::objets::tourner(q, b.cap);
+                                [r[0] + b.position[0], r[1] + b.position[1], r[2] + b.position[2]]
+                            });
+                            let (u, w) = ([p[1][0] - p[0][0], p[1][1] - p[0][1], p[1][2] - p[0][2]], [p[2][0] - p[0][0], p[2][1] - p[0][1], p[2][2] - p[0][2]]);
+                            let n = [u[1] * w[2] - u[2] * w[1], u[2] * w[0] - u[0] * w[2], u[0] * w[1] - u[1] * w[0]];
+                            let l = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt().max(1e-9);
+                            for q in p {
+                                v.extend_from_slice(&q);
+                                v.extend_from_slice(&n.map(|c| c / l));
+                                v.extend_from_slice(&[1.0, 1.0, 1.0]);
+                            }
+                        }
+                    }
+                    None => b.monter(b.tuile.0, b.tuile.1, &mut v, &mut t),
+                }
                 for q in v.chunks_mut(9) {
                     for k in 0..3 {
                         q[k] += q[3 + k] * 0.05;

@@ -6,7 +6,7 @@
 
 #![allow(non_camel_case_types)]
 
-use crate::jeu::App;
+use crate::jeu::{App, Sortie};
 use crate::manette::{Evenement, AXES};
 use crate::draw::{DrawList, Rect};
 use crate::gles::{load_gl, Egl};
@@ -161,6 +161,8 @@ static SHARED: Mutex<Shared> = Mutex::new(Shared {
 static WAKE: Condvar = Condvar::new();
 /// Machine virtuelle et activité courante, pour ouvrir le sélecteur depuis le fil de rendu.
 static ACTIVITE: Mutex<Option<(usize, usize)>> = Mutex::new(None);
+/// La machine Java et le ContentResolver (global), pour déposer dans Téléchargements.
+static JAVA: Mutex<Option<(usize, usize)>> = Mutex::new(None);
 /// Le dernier personnage ouvert, relu au lancement.
 const GARDE: &str = "personnage.glb";
 static START: OnceLock<Instant> = OnceLock::new();
@@ -278,6 +280,16 @@ fn render_loop() -> Result<(), String> {
         let t3 = Instant::now();
         // Pour le moniteur ; affichées à l'image suivante
         app.mesurer(intervalle, (t1 - t0).as_secs_f32(), (t2 - t1).as_secs_f32(), (t3 - t2).as_secs_f32());
+        let sorties = app.prendre_sorties();
+        let mut echec = None;
+        for s in &sorties {
+            if let Err(e) = deposer(s) {
+                echec = Some(format!("Enregistrement impossible de {} : {e}", s.nom));
+            }
+        }
+        if let Some(s) = sorties.last() {
+            app.dire(echec.unwrap_or_else(|| format!("Dans Téléchargements : {}", s.nom)));
+        }
         if app.prendre_demande() {
             if let Err(e) = selecteur() {
                 app.dire(format!("Sélecteur de fichiers indisponible : {e}"));
@@ -511,6 +523,101 @@ unsafe fn relier_java(activity: *mut ANativeActivity) {
     }
 }
 
+/// Chaîne Java ; un octet nul la couperait, il est retiré.
+fn jstr(env: Jni, s: &str) -> Obj {
+    let c = CString::new(s.replace('\0', "")).unwrap_or_default();
+    unsafe { chaine(env, &c) }
+}
+
+/// Dépose un fichier dans Téléchargements par MediaStore, sans permission (Android 10+).
+fn deposer(s: &Sortie) -> Result<(), String> {
+    use std::io::Write;
+    use std::os::fd::FromRawFd;
+    let (vm, resolver) = JAVA.lock().unwrap().ok_or("Android 10 ou plus est nécessaire")?;
+    let (vm, resolver) = (vm as *mut *const *const c_void, resolver as Obj);
+    unsafe {
+        let attacher: unsafe extern "C" fn(*mut *const *const c_void, *mut Jni, *mut c_void) -> i32 = std::mem::transmute(*(*vm).add(4));
+        let mut env: Jni = null_mut();
+        if attacher(vm, &mut env, null_mut()) != 0 || env.is_null() {
+            return Err("Java injoignable".into());
+        }
+        // Un fil natif n'a pas de cadre : ce cadre libère toutes les références locales
+        let pousser: unsafe extern "C" fn(Jni, i32) -> i32 = jni_fn(env, 19);
+        let retirer: unsafe extern "C" fn(Jni, Obj) -> Obj = jni_fn(env, 20);
+        pousser(env, 32);
+        let r = ecrire_media(env, resolver, s).and_then(|fd| {
+            let mut f = std::fs::File::from_raw_fd(fd);
+            f.write_all(&s.octets).map_err(|e| e.to_string())
+        });
+        retirer(env, null_mut());
+        r
+    }
+}
+
+/// Crée l'entrée et ouvre son fichier ; rend un descripteur à nous.
+unsafe fn ecrire_media(env: Jni, resolver: Obj, s: &Sortie) -> Result<i32, String> {
+    let classe: unsafe extern "C" fn(Jni, *const i8) -> Obj = jni_fn(env, 6);
+    let id: unsafe extern "C" fn(Jni, Obj, *const i8, *const i8) -> *mut c_void = jni_fn(env, 33);
+    let neuf: unsafe extern "C" fn(Jni, Obj, *mut c_void, ...) -> Obj = jni_fn(env, 28);
+    let vide: unsafe extern "C" fn(Jni, Obj, *mut c_void, ...) = jni_fn(env, 61);
+    let f: AppelObj = jni_fn(env, 34);
+
+    let cv_c = classe(env, c"android/content/ContentValues".as_ptr() as *const _);
+    if exception(env) || cv_c.is_null() {
+        return Err("ContentValues absent".into());
+    }
+    let ctor = id(env, cv_c, c"<init>".as_ptr() as *const _, c"()V".as_ptr() as *const _);
+    let cv = neuf(env, cv_c, ctor);
+    let put = id(env, cv_c, c"put".as_ptr() as *const _, c"(Ljava/lang/String;Ljava/lang/String;)V".as_ptr() as *const _);
+    if exception(env) || cv.is_null() || put.is_null() {
+        return Err("ContentValues inutilisable".into());
+    }
+    vide(env, cv, put, jstr(env, "_display_name"), jstr(env, &s.nom));
+    vide(env, cv, put, jstr(env, "mime_type"), jstr(env, s.mime));
+
+    let dl = classe(env, c"android/provider/MediaStore$Downloads".as_ptr() as *const _);
+    if exception(env) || dl.is_null() {
+        return Err("Android 10 ou plus est nécessaire".into());
+    }
+    let champ: unsafe extern "C" fn(Jni, Obj, *const i8, *const i8) -> *mut c_void = jni_fn(env, 144);
+    let lire: unsafe extern "C" fn(Jni, Obj, *mut c_void) -> Obj = jni_fn(env, 145);
+    let u = champ(env, dl, c"EXTERNAL_CONTENT_URI".as_ptr() as *const _, c"Landroid/net/Uri;".as_ptr() as *const _);
+    if exception(env) || u.is_null() {
+        return Err("dossier Téléchargements introuvable".into());
+    }
+    let dossier = lire(env, dl, u);
+
+    let m = methode(env, resolver, c"insert", c"(Landroid/net/Uri;Landroid/content/ContentValues;)Landroid/net/Uri;").ok_or("insert absent")?;
+    let item = f(env, resolver, m, dossier, cv);
+    if exception(env) || item.is_null() {
+        return Err("création du fichier refusée".into());
+    }
+    let m = methode(env, resolver, c"openFileDescriptor", c"(Landroid/net/Uri;Ljava/lang/String;)Landroid/os/ParcelFileDescriptor;").ok_or("ouverture absente")?;
+    let pfd = f(env, resolver, m, item, chaine(env, c"w"));
+    if exception(env) || pfd.is_null() {
+        return Err("ouverture du fichier refusée".into());
+    }
+    let get = methode(env, pfd, c"getFd", c"()I").ok_or("descripteur absent")?;
+    let i: unsafe extern "C" fn(Jni, Obj, *mut c_void, ...) -> i32 = jni_fn(env, 49);
+    let fd = dup(i(env, pfd, get));
+    if let Some(close) = methode(env, pfd, c"close", c"()V") {
+        vide(env, pfd, close);
+        exception(env);
+    }
+    if fd < 0 { Err("descripteur illisible".into()) } else { Ok(fd) }
+}
+
+/// Garde de quoi joindre Java depuis le fil de rendu, à partir d'Android 10.
+unsafe fn retenir_java(activity: *mut ANativeActivity) {
+    if (*activity).sdk_version < 29 {
+        return;
+    }
+    let env = (*activity).env as Jni;
+    let Some(resolver) = objet0(env, (*activity).clazz, c"getContentResolver", c"()Landroid/content/ContentResolver;") else { return };
+    let globale: unsafe extern "C" fn(Jni, Obj) -> Obj = jni_fn(env, 21);
+    *JAVA.lock().unwrap() = Some(((*activity).vm as usize, globale(env, resolver) as usize));
+}
+
 // ---------------------------------------------------------------------------
 // Callbacks de l'activité
 // ---------------------------------------------------------------------------
@@ -711,6 +818,9 @@ unsafe fn density(activity: *mut ANativeActivity) -> f32 {
 pub unsafe extern "C" fn ANativeActivity_onCreate(activity: *mut ANativeActivity, _: *mut c_void, _: usize) {
     let fichier = fichier_recu(activity);
     relier_java(activity);
+    if JAVA.lock().unwrap().is_none() {
+        retenir_java(activity);
+    }
     {
         let mut s = SHARED.lock().unwrap();
         s.dp = density(activity);

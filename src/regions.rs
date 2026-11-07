@@ -144,12 +144,52 @@ pub struct Bati {
     /// Démoli : il garde sa place pour qu'une régénération ne le fasse pas revenir.
     pub masquee: bool,
     pub b: Batiment,
+    /// Enrichi : le modèle détaillé de sa définition propre (`enrichi`).
+    pub detail: Option<Detail>,
+}
+
+/// Le niveau détaillé d'un bâtiment enrichi : sa définition dans la région, et son modèle
+/// dans le repère de l'instance.
+#[derive(Clone)]
+pub struct Detail {
+    /// L'identifiant de la définition.
+    pub def: String,
+    pub modele: Arc<crate::catalogue::Decor>,
+    /// La clé du modèle dans le moteur : elle change avec sa géométrie.
+    pub cle: String,
+    /// Pas encore écrite dans la région.
+    pub neuve: bool,
+}
+
+impl Detail {
+    pub fn new(def: String, modele: Arc<crate::catalogue::Decor>, neuve: bool) -> Detail {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        modele.sommets.len().hash(&mut h);
+        for x in &modele.sommets {
+            x.to_bits().hash(&mut h);
+        }
+        modele.materiaux.iter().for_each(|m| m.source.as_ref().map(|s| s.len()).hash(&mut h));
+        Detail { cle: format!("def/{def}/{:016x}", h.finish()), def, modele, neuve }
+    }
+}
+
+impl PartialEq for Detail {
+    fn eq(&self, o: &Detail) -> bool {
+        self.def == o.def && self.cle == o.cle && self.neuve == o.neuve
+    }
+}
+
+impl std::fmt::Debug for Detail {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "Detail({}, {} triangles)", self.cle, self.modele.triangles.len())
+    }
 }
 
 impl Bati {
     pub fn new(id: String, tuile: (i32, i32), position: [f32; 3], cap: f32, forme: Forme, provenance: String) -> Bati {
         let b = Batiment::plat(crate::reel::MAISON, 0.0, 0.0, Vec::new());
-        let mut x = Bati { id, tuile, position, cap, forme, provenance, retouche: false, masquee: false, b };
+        let mut x = Bati { id, tuile, position, cap, forme, provenance, retouche: false, masquee: false, b, detail: None };
         x.refaire();
         x
     }
@@ -222,8 +262,40 @@ impl Bati {
             Some(J::Objet(o)) => o.clone(),
             _ => Vec::new(),
         };
+        let params = self.params(ancienne.and_then(|a| a.get("procedural")).and_then(|p| p.get("params")));
+        let mut proc = match ancienne.and_then(|a| a.get("procedural")) {
+            Some(J::Objet(p)) => p.clone(),
+            _ => Vec::new(),
+        };
+        mettre(&mut proc, "generateur", Some(txt("batiment")));
+        mettre(&mut proc, "params", Some(params));
+        mettre(&mut o, "id", Some(txt(&self.id)));
+        // Enrichi, il renvoie à sa définition ; sinon il porte ses paramètres
+        match &self.detail {
+            Some(d) => {
+                mettre(&mut o, "definition", Some(txt(&d.def)));
+                mettre(&mut o, "procedural", None);
+            }
+            None => {
+                mettre(&mut o, "definition", None);
+                mettre(&mut o, "procedural", Some(J::Objet(proc)));
+            }
+        }
+        mettre(&mut o, "tuile", Some(J::Liste(vec![J::Num(self.tuile.0 as f64), J::Num(self.tuile.1 as f64)])));
+        mettre(&mut o, "position", Some(liste(&self.position)));
+        let (s, c) = (self.cap / 2.0).sin_cos();
+        mettre(&mut o, "rotation", (self.cap.abs() > 1e-6).then(|| J::Liste(vec![J::Num(0.0), n4(s), J::Num(0.0), n4(c)])));
+        mettre(&mut o, "provenance", Some(txt(&self.provenance)));
+        mettre(&mut o, "retouche", Some(J::Bool(self.retouche)));
+        mettre(&mut o, "masquee", self.masquee.then_some(J::Bool(true)));
+        J::Objet(o)
+    }
+
+    /// Les paramètres du générateur `batiment` ; partant des anciens, les clés inconnues
+    /// restent.
+    pub fn params(&self, anciens: Option<&J>) -> J {
         let f = &self.forme;
-        let mut params = match ancienne.and_then(|a| a.get("procedural")).and_then(|p| p.get("params")) {
+        let mut params = match anciens {
             Some(J::Objet(p)) => p.clone(),
             _ => Vec::new(),
         };
@@ -235,22 +307,7 @@ impl Bati {
         mettre(&mut params, "axe", Some(n4(f.axe)));
         mettre(&mut params, "murs", Some(couleur(f.murs)));
         mettre(&mut params, "couverture", Some(couleur(f.couverture)));
-        let mut proc = match ancienne.and_then(|a| a.get("procedural")) {
-            Some(J::Objet(p)) => p.clone(),
-            _ => Vec::new(),
-        };
-        mettre(&mut proc, "generateur", Some(txt("batiment")));
-        mettre(&mut proc, "params", Some(J::Objet(params)));
-        mettre(&mut o, "id", Some(txt(&self.id)));
-        mettre(&mut o, "procedural", Some(J::Objet(proc)));
-        mettre(&mut o, "tuile", Some(J::Liste(vec![J::Num(self.tuile.0 as f64), J::Num(self.tuile.1 as f64)])));
-        mettre(&mut o, "position", Some(liste(&self.position)));
-        let (s, c) = (self.cap / 2.0).sin_cos();
-        mettre(&mut o, "rotation", (self.cap.abs() > 1e-6).then(|| J::Liste(vec![J::Num(0.0), n4(s), J::Num(0.0), n4(c)])));
-        mettre(&mut o, "provenance", Some(txt(&self.provenance)));
-        mettre(&mut o, "retouche", Some(J::Bool(self.retouche)));
-        mettre(&mut o, "masquee", self.masquee.then_some(J::Bool(true)));
-        J::Objet(o)
+        J::Objet(params)
     }
 
     /// Relu d'une instance `batiment` ; rien si ce n'en est pas une.
@@ -259,7 +316,12 @@ impl Bati {
         if p.get("generateur").and_then(J::txt) != Some("batiment") {
             return None;
         }
-        let params = p.get("params")?;
+        Bati::depuis_params(i, p.get("params")?)
+    }
+
+    /// Relu d'une instance et des paramètres du générateur `batiment` (les siens, ou ceux
+    /// du premier niveau de sa définition).
+    pub fn depuis_params(i: &J, params: &J) -> Option<Bati> {
         let t = i.get("tuile")?.nombres::<2>()?;
         let pos = i.get("position")?.nombres::<3>()?;
         let contour: Vec<[f32; 2]> = params.get("contour").and_then(J::liste).unwrap_or(&[]).iter().filter_map(|q| q.nombres::<2>()).map(|q| [q[0] as f32, q[1] as f32]).collect();
@@ -602,8 +664,20 @@ impl Region {
         }
         // Les instances procédurales ; les autres attendent leur générateur
         let (mut batiments, mut ponts) = (Vec::new(), Vec::new());
+        let definitions = s.get("definitions").and_then(J::liste).unwrap_or(&[]);
         for i in s.get("instances").and_then(J::liste).unwrap_or(&[]) {
             if i.get("masquee").and_then(J::bool) == Some(true) {
+                continue;
+            }
+            // Un bâtiment enrichi : sa définition, procédurale de loin et détaillée de près
+            if let Some(d) = i.get("definition").and_then(J::txt) {
+                let lu = definitions.iter().find(|x| x.get("id").and_then(J::txt) == Some(d)).and_then(|x| crate::enrichi::lire(s, x));
+                if let Some((params, modele)) = lu {
+                    if let Some(mut b) = Bati::depuis_params(i, &params) {
+                        b.detail = Some(Detail::new(d.to_string(), modele, false));
+                        batiments.push(b);
+                    }
+                }
                 continue;
             }
             let Some(p) = i.get("procedural") else { continue };
@@ -687,10 +761,10 @@ impl Region {
             crate::reel::monter_pont(&mut v, &mut t, a, b, p.largeur, p.teinte);
         }
         let retouche = |id: &str| retouches.is_some_and(|r| r.contains_key(id));
-        for b in self.batiments.iter().filter(|b| b.tuile == (i, j) && !retouche(&b.id)) {
+        for b in self.batiments.iter().filter(|b| b.tuile == (i, j) && !retouche(&b.id) && b.detail.is_none()) {
             b.monter(i, j, &mut v, &mut t);
         }
-        for b in retouches.into_iter().flat_map(|r| r.values()).filter(|b| b.tuile == (i, j) && !b.masquee) {
+        for b in retouches.into_iter().flat_map(|r| r.values()).filter(|b| b.tuile == (i, j) && !b.masquee && b.detail.is_none()) {
             b.monter(i, j, &mut v, &mut t);
         }
         let [d, n] = self.par_tuile[rg];
@@ -698,6 +772,13 @@ impl Region {
         v.extend(va);
         t.extend(ta);
         (!v.is_empty()).then_some((v, t))
+    }
+
+    /// Les bâtiments enrichis de la tuile (i, j), retouches comprises.
+    pub fn enrichis(&self, i: i32, j: i32, retouches: Option<&HashMap<String, Bati>>) -> Vec<Bati> {
+        let retouche = |id: &str| retouches.is_some_and(|r| r.contains_key(id));
+        let a = self.batiments.iter().filter(|b| !retouche(&b.id));
+        a.chain(retouches.into_iter().flat_map(|r| r.values())).filter(|b| b.tuile == (i, j) && !b.masquee && b.detail.is_some()).cloned().collect()
     }
 }
 
@@ -843,6 +924,12 @@ impl Regions {
         self.region(ri, rj)?.bati(i, j, self.retouches_de(ri, rj).as_ref())
     }
 
+    /// Les bâtiments enrichis de la tuile (i, j).
+    pub fn enrichis(&self, i: i32, j: i32) -> Vec<Bati> {
+        let (ri, rj) = (de_tuile(i), de_tuile(j));
+        self.region(ri, rj).map(|r| r.enrichis(i, j, self.retouches_de(ri, rj).as_ref())).unwrap_or_default()
+    }
+
     /// Le bâtiment `id` de la région (ri, rj), retouches comprises.
     pub fn batiment(&self, ri: i32, rj: i32, id: &str) -> Option<Bati> {
         if let Some(b) = self.retouches.lock().unwrap().bati.get(&(ri, rj)).and_then(|r| r.get(id)) {
@@ -911,6 +998,36 @@ impl Regions {
         let chemin = self.chemin(ri, rj);
         let mut s = Stuff::lire(&std::fs::read(&chemin).map_err(|e| format!("{} : {e}", nom_fichier(ri, rj)))?)?;
         let mut instances = s.get("instances").and_then(J::liste).map(|l| l.to_vec()).unwrap_or_default();
+        // Les définitions : écrite pour un bâtiment qu'on vient d'enrichir, ôtée pour celui
+        // qui revient au procédural. Chacune a son tampon (à partir du 2).
+        let mut defs = s.get("definitions").and_then(J::liste).map(|l| l.to_vec()).unwrap_or_default();
+        let mut changees = false;
+        for b in l.values() {
+            let avant = instances.iter().find(|i| i.get("id").and_then(J::txt) == Some(&b.id)).and_then(|i| i.get("definition")).and_then(J::txt).map(String::from);
+            let oter = match &b.detail {
+                Some(d) if d.neuve => Some(d.def.clone()),
+                None => avant,
+                _ => None,
+            };
+            if let Some(x) = oter {
+                if let Some(k) = defs.iter().position(|d| d.get("id").and_then(J::txt) == Some(&x)) {
+                    if let Some(t) = crate::enrichi::tampon(&defs[k]).filter(|&t| t >= 2).and_then(|t| s.tampons.get_mut(t)) {
+                        t.clear();
+                    }
+                    defs.remove(k);
+                    changees = true;
+                }
+            }
+            if let Some(d) = b.detail.as_ref().filter(|d| d.neuve) {
+                let k = (2..s.tampons.len()).find(|&k| s.tampons[k].is_empty()).unwrap_or(s.tampons.len().max(2));
+                let anciens = instances.iter().find(|i| i.get("id").and_then(J::txt) == Some(&b.id)).and_then(|i| i.get("procedural")).and_then(|p| p.get("params"));
+                defs.push(crate::enrichi::ecrire(&mut s, k, &d.def, &b.id, b.params(anciens), &d.modele));
+                changees = true;
+            }
+        }
+        if changees {
+            s.mettre("definitions", J::Liste(defs));
+        }
         for b in l.values() {
             match instances.iter_mut().find(|i| i.get("id").and_then(J::txt) == Some(&b.id)) {
                 Some(i) => *i = b.instance(Some(i)),

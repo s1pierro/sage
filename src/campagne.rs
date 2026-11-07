@@ -314,6 +314,18 @@ fn occupation(classe: u8, x: f64, z: f64, s: f64) -> [f32; 3] {
 }
 
 impl Source for Campagne {
+    /// Les bâtiments enrichis du monde matérialisé.
+    fn enrichis(&self, i: i32, j: i32) -> Vec<crate::moteur::tuiles::Enrichi> {
+        let Some(m) = &self.monde else { return Vec::new() };
+        m.enrichis(i, j)
+            .into_iter()
+            .filter_map(|b| {
+                let d = b.detail?;
+                Some(crate::moteur::tuiles::Enrichi { id: b.id, pos: b.position, cap: b.cap, cle: d.cle, modele: d.modele })
+            })
+            .collect()
+    }
+
     /// Les bâtiments et les ponts de la tuile, et ses arbres.
     fn bati(&self, i: i32, j: i32) -> Option<(Vec<f32>, Vec<[[f32; 3]; 3]>)> {
         if let Some(m) = &self.monde {

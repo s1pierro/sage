@@ -6,8 +6,24 @@ Il vise un monde ouvert, avec d'autres valeurs que la violence.
 
 ![Le mannequin marche dans le décor de S.A.G.E.](docs/apercu.png)
 
-**Télécharger l'APK** : [sage-0.27.apk](https://github.com/s1pierro/sage/releases/download/v0.27/sage-0.27.apk)
+**Télécharger l'APK** : [sage-0.28.apk](https://github.com/s1pierro/sage/releases/download/v0.28/sage-0.28.apk)
 (Android 8 ou plus récent, arm64).
+
+## Version 0.28 : enrichir les bâtiments
+
+- Le panneau d'un bâtiment l'**exporte en `.glb`** (dans Téléchargements, Android 10 ou
+  plus) : posé à l'origine, sans rotation, pour le retravailler dans Rustcraft ou
+  Blender. Un bâtiment déjà enrichi s'exporte avec son modèle et ses textures.
+- **Remplacer par un .glb…** : le modèle choisi devient le niveau détaillé du bâtiment,
+  avec ses matériaux et ses textures. Il se voit et arrête le joueur tout de suite, se
+  choisit, se déplace, tourne et se démolit comme les autres ; ses blocs lointains
+  restent ceux de sa forme procédurale.
+- Le bâtiment reçoit sa **propre définition** dans sa région `.stuff` : un premier
+  niveau procédural (ses paramètres d'avant, pour le lointain) et un niveau détaillé
+  (les parties du modèle, rangées à la manière du glTF, ses textures PNG ou JPEG telles
+  quelles), avec la collision de ce niveau. L'instance renvoie à la définition et passe
+  `retouche: true`.
+- **Revenir au procédural** ôte la définition et rend au bâtiment sa forme réglable.
 
 ## Version 0.27 : retoucher les bâtiments
 

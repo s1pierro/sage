@@ -29,6 +29,10 @@ pub struct MateriauDecor {
     pub alpha: Alpha,
     /// Ses faces se voient des deux côtés (`doubleSided`).
     pub deux_cotes: bool,
+    /// Sa couleur de base (sRVB), que portent aussi les sommets.
+    pub couleur: [f32; 3],
+    /// Le fichier de sa texture tel qu'il était (PNG ou JPEG), pour le ranger ailleurs.
+    pub source: Option<Arc<Vec<u8>>>,
 }
 
 /// Un modèle décodé, prêt pour le moteur.
@@ -191,7 +195,9 @@ pub fn decoder_glb(octets: &[u8], retourner: Option<bool>) -> Result<Decor, Stri
         } else {
             Alpha::Opaque
         };
-        materiaux.push(MateriauDecor { image, opacite, alpha, deux_cotes: x.is_some_and(|x| x.deux_cotes) });
+        let couleur = x.map_or([0.8f32; 3], |x| [0, 1, 2].map(|c| srvb(x.couleur[c])));
+        let source = x.and_then(|x| x.image.as_ref()).filter(|_| image.is_some()).map(|(_, o)| Arc::new(o.clone()));
+        materiaux.push(MateriauDecor { image, opacite, alpha, deux_cotes: x.is_some_and(|x| x.deux_cotes), couleur, source });
     }
     // Les opaques d'abord, puis les masqués, puis les mêlés
     let mut ordre: Vec<usize> = (0..seaux.len()).filter(|&k| !seaux[k].is_empty()).collect();

@@ -285,6 +285,14 @@ montre pas, et ses paramètres sont gardés.
   qui n'ont pas de définition propre. Un tel bâtiment qu'on enrichit (niveaux ajoutés à
   la main) reçoit sa propre définition, dont le premier niveau reprend ces paramètres,
   et passe `retouche: true`.
+
+  Ainsi en 0.28 : la définition `def-<id du bâtiment>` (genre `batiment`) a pour niveaux
+  `n0` (procédural, `jusqua` 3000) et `n1` (les parties du modèle importé, `jusqua`
+  400), et `"collision": { "niveau": "n1" }`. Ses parties sont nommées `p0`, `p1`…, ses
+  matériaux `m0`, `m1`… (`couleur`, `opacite`, `deux_cotes`, `texture`), ses textures
+  `t0`… Toutes ses données sont dans un tampon à elle (à partir du tampon 2), qui se vide
+  quand la définition est remplacée ou ôtée. L'instance porte alors `definition` au lieu
+  de `procedural` ; revenir au procédural fait l'inverse.
 - **`tuile`** : les indices (i, j) de la tuile de 64 m où se trouve l'instance, qui peuvent
   être négatifs. Une instance qui se déplace (un personnage, un véhicule en route) en
   change ; une instance de région est rangée sous la sienne.

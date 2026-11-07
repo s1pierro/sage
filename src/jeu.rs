@@ -95,6 +95,14 @@ const EDITION_CHARGE: usize = 4;
 
 pub const CIEL: [f32; 3] = [0.70, 0.80, 0.92];
 
+/// Un fichier à déposer hors de l'application.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Sortie {
+    pub nom: String,
+    pub mime: &'static str,
+    pub octets: Vec<u8>,
+}
+
 pub struct App {
     pub monde: Monde,
     pub maillages: Maillages,
@@ -109,6 +117,10 @@ pub struct App {
     message: Option<(String, f32)>,
     /// Le sélecteur de fichiers est demandé.
     demande: bool,
+    /// Les fichiers à déposer hors de l'application.
+    sorties: Vec<Sortie>,
+    /// Le bâtiment qu'un .glb reçu enrichira : sa région et son identifiant.
+    pub remplacer_bati: Option<((i32, i32), String)>,
     /// Le .glb à garder pour le prochain lancement.
     a_garder: Option<Vec<u8>>,
     /// Le joueur a déjà bougé : l'aide s'efface.
@@ -217,6 +229,8 @@ impl App {
             manette: None,
             message: None,
             demande: false,
+            sorties: Vec::new(),
+            remplacer_bati: None,
             a_garder: None,
             a_bouge: false,
             shell: Shell::new(dp),
@@ -487,6 +501,69 @@ impl App {
         k
     }
 
+    /// Un .glb devient le niveau détaillé du bâtiment `ident` de la région (ri, rj) : il
+    /// se voit tout de suite, sa définition s'écrira dans la région avec les retouches.
+    fn enrichir_bati(&mut self, ri: i32, rj: i32, ident: &str, nom: &str, octets: &[u8]) {
+        let Some(m) = self.campagne.monde.clone() else {
+            self.dire("Pas de monde matérialisé : rien à enrichir".into());
+            return;
+        };
+        let Some(avant) = m.batiment(ri, rj, ident) else {
+            self.dire(format!("{ident} : bâtiment introuvable"));
+            return;
+        };
+        let d = match catalogue::decoder_glb(octets, None) {
+            Ok(d) => d,
+            Err(e) => {
+                self.dire(format!("{nom} : {e}"));
+                return;
+            }
+        };
+        let (n, manque) = (d.triangles.len(), d.manquantes);
+        let mut x = avant.clone();
+        x.detail = Some(crate::regions::Detail::new(format!("def-{ident}"), Arc::new(d), true));
+        x.retouche = true;
+        m.retoucher(x);
+        self.tuiles.refaire_bati(&mut self.monde, &mut self.maillages, avant.tuile);
+        let mut s = format!("{ident} enrichi : {n} triangles");
+        if n > catalogue::TRIANGLES_LOURD {
+            s.push_str(", lourd à dessiner");
+        }
+        if manque > 0 {
+            s.push_str(&format!(", {manque} texture{} manquante{}", if manque > 1 { "s" } else { "" }, if manque > 1 { "s" } else { "" }));
+        }
+        self.dire(s);
+    }
+
+    /// Les bâtiments enrichis qui attendent leur modèle : il entre dans le moteur (ses
+    /// textures, sa géométrie) une fois pour tous ceux qui le partagent.
+    fn habiller_enrichis(&mut self) {
+        for (e, x) in std::mem::take(&mut self.tuiles.a_habiller) {
+            if !self.monde.vivante(e) {
+                continue;
+            }
+            let m = match self.monde.modeles.chercher(&x.cle).filter(|&m| self.monde.modeles.get(m).is_some_and(|m| m.gabarit.is_some())) {
+                Some(m) => m,
+                None => {
+                    let d = &x.modele;
+                    let cle = format!("modele/{}", x.cle);
+                    let textures: Vec<Option<crate::moteur::TextureId>> = d.materiaux.iter().enumerate().map(|(i, m)| m.image.clone().map(|im| self.textures.mettre(&format!("{cle}/{i}"), im))).collect();
+                    let parties = d
+                        .parties
+                        .iter()
+                        .map(|&(premier, nombre, k)| {
+                            let m = &d.materiaux[k];
+                            Partie { premier, nombre, materiau: Materiau { texture: textures[k], opacite: m.opacite, alpha: m.alpha, deux_cotes: m.deux_cotes } }
+                        })
+                        .collect();
+                    let g = crate::moteur::Gabarit { sommets: Arc::new(d.sommets.clone()), parties, triangles: Arc::new(d.triangles.clone()), boite: d.boite };
+                    self.monde.modeles.mettre(&x.cle, d.nom.as_deref().unwrap_or(&x.id), g)
+                }
+            };
+            crate::moteur::tuiles::habiller(&mut self.monde, &mut self.maillages, e, m);
+        }
+    }
+
     /// Retourne les faces du modèle `id`, pour tous ses objets.
     pub fn retourner_modele(&mut self, id: &str) {
         let r = self.catalogue.octets(id).ok_or_else(|| "fichier du modèle illisible".to_string()).and_then(|o| self.catalogue.retourner(id, &o));
@@ -513,6 +590,12 @@ impl App {
         if let Some(r) = crate::reel::Reel::depuis_octets(octets) {
             self.importer_lieu(r, octets);
             return;
+        }
+        if let Some(((ri, rj), ident)) = self.remplacer_bati.take() {
+            if gda::sage::lire_glb(octets).is_some() && !catalogue::est_personnage(octets) {
+                self.enrichir_bati(ri, rj, &ident, nom, octets);
+                return;
+            }
         }
         if gda::sage::lire_glb(octets).is_some() && !catalogue::est_personnage(octets) {
             let remplace = self.remplacer.take();
@@ -613,6 +696,11 @@ impl App {
     /// L'éditeur est ouvert : les appuis dans la vue choisissent et posent des objets.
     pub fn edite(&self) -> bool {
         self.shell.start.open && self.onglet == ONGLET_EDITEUR
+    }
+
+    /// Les fichiers à déposer hors de l'application (Téléchargements).
+    pub fn prendre_sorties(&mut self) -> Vec<Sortie> {
+        std::mem::take(&mut self.sorties)
     }
 
     pub fn prendre_demande(&mut self) -> bool {
@@ -925,6 +1013,7 @@ impl App {
         self.tuiles.rayon = r;
         self.tuiles.garde = r + GARDE_TUILES - RAYON_TUILES;
         self.tuiles.suivre(&mut self.monde, &mut self.maillages, (o[0], o[1]), if self.visee.is_some() { EDITION_CHARGE } else { 1 });
+        self.habiller_enrichis();
         self.tuiles.vieillir(&self.monde, dt);
         if self.visee.is_none() {
             // Le personnage regarde ce que vise la caméra
@@ -1369,6 +1458,13 @@ impl App {
             }
             if let Some(id) = self.editeur.retournement.take() {
                 self.retourner_modele(&id);
+            }
+            if let Some(bt) = self.editeur.export_bati.take() {
+                self.sorties.push(Sortie { nom: format!("{}.glb", bt.id), mime: "model/gltf-binary", octets: crate::enrichi::glb(&bt) });
+            }
+            if let Some(k) = self.editeur.enrichir_bati.take() {
+                self.remplacer_bati = Some(k);
+                self.demande = true;
             }
             if let Some(g) = self.editeur.regeneration.take() {
                 self.lancer_erosion(g, true);

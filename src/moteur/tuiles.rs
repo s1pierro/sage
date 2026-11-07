@@ -206,6 +206,28 @@ pub trait Source: Send {
     fn bati(&self, _i: i32, _j: i32) -> Option<(Vec<f32>, Vec<[[f32; 3]; 3]>)> {
         None
     }
+
+    /// Les bâtiments enrichis de la tuile : chacun son modèle détaillé, qui se dessine à
+    /// part (il a ses textures).
+    fn enrichis(&self, _i: i32, _j: i32) -> Vec<Enrichi> {
+        Vec::new()
+    }
+}
+
+/// Un bâtiment enrichi : sa position dans le repère de la tuile, son cap, son modèle et la
+/// clé de ce modèle (qui change avec sa géométrie).
+#[derive(Clone)]
+pub struct Enrichi {
+    pub id: String,
+    pub pos: [f32; 3],
+    pub cap: f32,
+    pub cle: String,
+    pub modele: Arc<crate::catalogue::Decor>,
+}
+
+/// L'identifiant de l'entité d'un bâtiment enrichi.
+pub fn ident_enrichi(i: i32, j: i32, id: &str) -> String {
+    format!("bati/{i}/{j}/{id}")
 }
 
 /// L'identifiant du maillage des bâtiments d'une tuile (hors « tuile/ » : la topologie ne
@@ -234,6 +256,8 @@ pub struct Chargee {
     pub lue: bool,
     /// Ses bâtiments, s'il y en a.
     pub bati: Option<Entite>,
+    /// Ses bâtiments enrichis, un par entité.
+    pub enrichis: Vec<Entite>,
 }
 
 /// Les tuiles chargées, et comment les choisir. Une tuile modifiée est écrite tout
@@ -258,6 +282,9 @@ pub struct Tuiles {
     pub erreur: Option<String>,
     /// Compte les retouches du relief et les cartes refaites : la carte du monde suit.
     pub retouches: u64,
+    /// Les bâtiments enrichis dont le modèle n'est pas encore dans le moteur : l'application
+    /// l'installe (ses textures), puis les habille (`habiller`).
+    pub a_habiller: Vec<(Entite, Enrichi)>,
 }
 
 impl Tuiles {
@@ -280,6 +307,7 @@ impl Tuiles {
             ecrites: 0,
             erreur: None,
             retouches: 0,
+            a_habiller: Vec::new(),
         }
     }
 
@@ -311,6 +339,9 @@ impl Tuiles {
             if let Some(b) = c.bati {
                 maillages.ote(&ident_bati(k.0, k.1));
                 monde.detruire(b);
+            }
+            for e in c.enrichis {
+                monde.detruire(e);
             }
             for e in self.objets_de(monde, k) {
                 monde.detruire(e);
@@ -392,7 +423,27 @@ impl Tuiles {
             monde.obstacles.mettre(b, vec![super::physique::Forme::Triangles(Arc::new(super::physique::Triangles::new(tri)))]);
             b
         });
-        self.chargees.insert((i, j), Chargee { terrain: t, couleurs: Arc::new(c.couleurs), proche, loin, lue, bati });
+        let enrichis = self.poser_enrichis(monde, maillages, (i, j));
+        self.chargees.insert((i, j), Chargee { terrain: t, couleurs: Arc::new(c.couleurs), proche, loin, lue, bati, enrichis });
+    }
+
+    /// Les bâtiments enrichis de la tuile `k` : leurs entités, leurs murs ; habillées tout
+    /// de suite si leur modèle est déjà dans le moteur, sinon à l'application de le faire.
+    fn poser_enrichis(&mut self, monde: &mut Monde, maillages: &mut Maillages, k: (i32, i32)) -> Vec<Entite> {
+        let o = Tuiles::coin(monde, k);
+        let mut l = Vec::new();
+        for x in self.source.enrichis(k.0, k.1) {
+            let e = monde.creer(&ident_enrichi(k.0, k.1, &x.id));
+            monde.lieu.mettre(e, Lieu::en([o[0] + x.pos[0], x.pos[1], o[2] + x.pos[2]], x.cap));
+            let murs: Vec<[[f32; 3]; 3]> = x.modele.triangles.iter().map(|t| t.map(|p| super::objets::tourner(p, x.cap))).collect();
+            monde.obstacles.mettre(e, vec![super::physique::Forme::Triangles(Arc::new(super::physique::Triangles::new(murs)))]);
+            match monde.modeles.chercher(&x.cle).filter(|&m| monde.modeles.get(m).is_some_and(|m| m.gabarit.is_some())) {
+                Some(m) => habiller(monde, maillages, e, m),
+                None => self.a_habiller.push((e, x)),
+            }
+            l.push(e);
+        }
+        l
     }
 
     /// Les objets dont la base est dans la tuile `k`.
@@ -544,6 +595,9 @@ impl Tuiles {
                 maillages.ote(&ident_bati(k.0, k.1));
                 monde.detruire(b);
             }
+            for e in c.enrichis {
+                monde.detruire(e);
+            }
         }
         let objets: Vec<Entite> = monde.objet.iter().map(|(e, _)| e).collect();
         for e in objets {
@@ -603,6 +657,14 @@ impl Tuiles {
                 }
             }
         }
+        for e in std::mem::take(&mut c.enrichis) {
+            monde.detruire(e);
+        }
+        let enrichis = self.poser_enrichis(monde, maillages, k);
+        if let Some(c) = self.chargees.get_mut(&k) {
+            c.enrichis = enrichis;
+        }
+        balayer(monde, maillages);
     }
 
     /// Ôte l'objet `e` du monde.
@@ -643,6 +705,15 @@ pub fn placer(monde: &mut Monde, maillages: &mut Maillages, e: Entite, objet: Ob
     monde.rendu.mettre(e, Rendu { maillage: k, local });
     monde.obstacles.mettre(e, obstacles);
     monde.objet.mettre(e, objet);
+}
+
+/// Donne à l'entité `e` le dessin du modèle `m` (ses parties, ses textures).
+pub fn habiller(monde: &mut Monde, maillages: &mut Maillages, e: Entite, m: crate::moteur::ModeleId) {
+    let Some(x) = monde.modeles.get(m) else { return };
+    let Some(g) = &x.gabarit else { return };
+    let cle = format!("modele/{}/{}", x.id, x.version);
+    let k = maillages.chercher(&cle).unwrap_or_else(|| maillages.mettre_parties(&cle, Format::Texture, g.sommets.clone(), g.parties.clone()));
+    monde.rendu.mettre(e, Rendu { maillage: k, local: math::scale(1.0) });
 }
 
 /// Le maillage des modèles absents.

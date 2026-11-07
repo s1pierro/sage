@@ -983,3 +983,29 @@ sur une grille qui déborde d'un point).
   le pied suivant le sol, sans quitter la région. La surbrillance est une copie des
   faces du bâtiment gonflée de 5 cm (`bati/choisi`), que la scène dessine choisie.
 
+## 27. Enrichir les bâtiments (0.28)
+
+- **`enrichi`** : `glb(b)` écrit un bâtiment en `.glb` dans le repère de son instance
+  (forme procédurale en deux matériaux, ou modèle détaillé avec ses textures),
+  l'identifiant dans `extras.sage.id` ; `ecrire` range un `Decor` en définition (niveaux
+  `n0` procédural et `n1` détaillé, tampon propre) ; `lire` la relit en paramètres et en
+  `Decor` prêt pour le moteur. `MateriauDecor` garde la couleur de base et les octets
+  de la texture source pour cela.
+- **`regions::Detail`** : la définition, le modèle (`Arc<Decor>`), une clé tirée de sa
+  géométrie (le modèle n'entre qu'une fois dans le moteur) et `neuve` (pas encore
+  écrite). `Bati::detail` le porte ; `instance` écrit `definition` ou `procedural`.
+  `Region::depuis` relit les définitions, `Region::bati` saute les bâtiments enrichis,
+  `Region::enrichis` les donne par tuile. `reecrire` écrit la définition neuve (en
+  réutilisant un tampon vide) ou ôte celle d'un bâtiment revenu au procédural.
+- **Tuiles** : `Source::enrichis` ; chaque bâtiment enrichi d'une tuile chargée est une
+  entité `bati/i/j/<id>` (lieu et cap de l'instance, murs : les triangles du modèle
+  tournés). Si son modèle n'est pas encore dans `monde.modeles`, l'entité attend dans
+  `a_habiller` : `App::habiller_enrichis` installe ses textures et son gabarit, puis
+  `tuiles::habiller` lui donne son dessin.
+- **Éditeur** : un appui sur `bati/i/j/<id>` choisit ce bâtiment. Liens « Exporter en
+  .glb » (`App::sorties`, déposées dans Téléchargements par MediaStore comme dans
+  Rustcraft), « Remplacer par un .glb… » (`App::remplacer_bati`, puis
+  `enrichir_bati` à la réception) et « Revenir au procédural ». Enrichi, le panneau
+  garde le cap, le déplacement et la démolition, sans les réglages de forme ; sa
+  surbrillance suit les faces du modèle.
+

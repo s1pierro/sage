@@ -30,6 +30,7 @@ pub mod vegetation;
 pub mod catalogue;
 pub mod draw;
 pub mod editeur;
+pub mod enrichi;
 pub mod gles;
 pub mod image;
 pub mod jeu;
