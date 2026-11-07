@@ -26,11 +26,13 @@ pub struct Fiche {
     pub graine: u32,
     pub suivant: u64,
     pub joueur: Option<([i32; 2], [f32; 3], f32)>,
+    /// Le registre des catalogues : l'identifiant de chaque fichier et son chemin.
+    pub catalogues: Vec<(String, String)>,
 }
 
 impl Default for Fiche {
     fn default() -> Fiche {
-        Fiche { id: "monde/campagne".into(), nom: "Campagne".into(), graine: 1, suivant: 0, joueur: None }
+        Fiche { id: "monde/campagne".into(), nom: "Campagne".into(), graine: 1, suivant: 0, joueur: None, catalogues: Vec::new() }
     }
 }
 
@@ -171,11 +173,16 @@ impl Depot {
             graine: j.get("graine")?.num()? as u32,
             suivant: j.get("suivant").and_then(J::num).unwrap_or(0.0) as u64,
             joueur,
+            catalogues: match j.get("catalogues") {
+                Some(J::Objet(o)) => o.iter().filter_map(|(k, v)| Some((k.clone(), v.txt()?.to_string()))).collect(),
+                _ => Vec::new(),
+            },
         })
     }
 
     pub fn ecrire_fiche(&mut self, f: &Fiche) -> std::io::Result<()> {
         let mut o = vec![("format", J::Num(FORMAT)), ("id", texte(&f.id)), ("nom", texte(&f.nom)), ("graine", J::Num(f.graine as f64)), ("suivant", J::Num(f.suivant as f64))];
+        o.push(("catalogues", J::Objet(f.catalogues.iter().map(|(k, v)| (k.clone(), texte(v))).collect())));
         if let Some((t, p, c)) = f.joueur {
             o.push(("joueur", objet(vec![("tuile", J::Liste(vec![J::Num(t[0] as f64), J::Num(t[1] as f64)])), ("pos", nombres(&p)), ("cap", n(c))])));
         }

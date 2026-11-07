@@ -220,7 +220,7 @@ pub struct Reel {
     pub eau: Vec<u8>,
     pub routes: Vec<Route>,
     /// Pour chaque case, les segments (route, premier point) qui l'approchent.
-    index: std::collections::HashMap<(i32, i32), Vec<(u32, u32)>>,
+    index: Index,
     pub batiments: Vec<Batiment>,
     /// Pour chaque tuile, les bâtiments dont le centre est chez elle.
     par_tuile: std::collections::HashMap<(i32, i32), Vec<u32>>,
@@ -294,6 +294,17 @@ fn pave(v: &mut Vec<f32>, t: &mut Vec<[[f32; 3]; 3]>, a: [f32; 3], b: [f32; 3], 
     }
 }
 
+/// Un morceau de pont de `a` à `b` (x, z, hauteur du tablier, dans le repère voulu) : le
+/// tablier, couleur `dessus`, et un parapet de chaque côté.
+pub fn monter_pont(v: &mut Vec<f32>, t: &mut Vec<[[f32; 3]; 3]>, a: [f32; 3], b: [f32; 3], largeur: f32, dessus: [f32; 3]) {
+    let w = largeur / 2.0;
+    pave(v, t, a, b, (-w, w), (-TABLIER, 0.0), dessus, BETON);
+    for cote in [-1.0, 1.0] {
+        let (u0, u1) = if cote < 0.0 { (-w - PARAPET_LARGE, -w) } else { (w, w + PARAPET_LARGE) };
+        pave(v, t, a, b, (u0, u1), (-TABLIER, PARAPET), GARDE_CORPS, GARDE_CORPS);
+    }
+}
+
 /// Le coin de la grille (au repère du jeu) : le coin de la première tuile de la carte.
 pub fn origine() -> f64 {
     -(DEMI_CARTE as f64) * TAILLE as f64
@@ -331,6 +342,48 @@ fn ecrire_routes(o: &mut Vec<u8>, routes: &[Route]) {
             }
         }
     }
+}
+
+/// Les segments (route, premier point) qui approchent chaque case de `CASE` mètres.
+pub type Index = std::collections::HashMap<(i32, i32), Vec<(u32, u32)>>;
+
+/// Range chaque segment de route dans les cases qu'il approche (chaussée et bas-côtés).
+pub fn indexer(routes: &[Route]) -> Index {
+    let mut index: Index = Default::default();
+    for (k, r) in routes.iter().enumerate() {
+        let m = r.largeur / 2.0 + epaule(r.genre);
+        for (i, s) in r.points.windows(2).enumerate() {
+            let (x0, x1) = (s[0][0].min(s[1][0]) - m, s[0][0].max(s[1][0]) + m);
+            let (z0, z1) = (s[0][1].min(s[1][1]) - m, s[0][1].max(s[1][1]) + m);
+            for cz in (z0 / CASE).floor() as i32..=(z1 / CASE).floor() as i32 {
+                for cx in (x0 / CASE).floor() as i32..=(x1 / CASE).floor() as i32 {
+                    index.entry((cx, cz)).or_default().push((k as u32, i as u32));
+                }
+            }
+        }
+    }
+    index
+}
+
+/// La route la plus proche de (x, z), si l'on est sur elle ou ses bas-côtés ; la plus
+/// large l'emporte (on compte depuis son bord).
+pub fn proche(routes: &[Route], index: &Index, x: f64, z: f64) -> Option<Proche> {
+    let (x, z) = (x as f32, z as f32);
+    let l = index.get(&((x / CASE).floor() as i32, (z / CASE).floor() as i32))?;
+    let mut mieux: Option<Proche> = None;
+    for &(k, i) in l {
+        let r = &routes[k as usize];
+        let (a, b) = (r.points[i as usize], r.points[i as usize + 1]);
+        let (dx, dz) = (b[0] - a[0], b[1] - a[1]);
+        let l2 = dx * dx + dz * dz;
+        let t = if l2 > 0.0 { (((x - a[0]) * dx + (z - a[1]) * dz) / l2).clamp(0.0, 1.0) } else { 0.0 };
+        let d = (x - a[0] - dx * t).hypot(z - a[1] - dz * t);
+        let p = Proche { genre: r.genre, largeur: r.largeur, distance: d, hauteur: a[2] + (b[2] - a[2]) * t };
+        if p.hors() < epaule(r.genre) && mieux.is_none_or(|m| p.hors() < m.hors()) {
+            mieux = Some(p);
+        }
+    }
+    mieux
 }
 
 fn cr(a: f64, b: f64, c: f64, d: f64, t: f64) -> f64 {
@@ -381,19 +434,7 @@ impl Reel {
 
     /// Range chaque segment de route dans les cases qu'il approche.
     fn indexe(mut self) -> Reel {
-        let mut index: std::collections::HashMap<(i32, i32), Vec<(u32, u32)>> = Default::default();
-        for (k, r) in self.routes.iter().enumerate() {
-            let m = r.largeur / 2.0 + epaule(r.genre);
-            for (i, s) in r.points.windows(2).enumerate() {
-                let (x0, x1) = (s[0][0].min(s[1][0]) - m, s[0][0].max(s[1][0]) + m);
-                let (z0, z1) = (s[0][1].min(s[1][1]) - m, s[0][1].max(s[1][1]) + m);
-                for cz in (z0 / CASE).floor() as i32..=(z1 / CASE).floor() as i32 {
-                    for cx in (x0 / CASE).floor() as i32..=(x1 / CASE).floor() as i32 {
-                        index.entry((cx, cz)).or_default().push((k as u32, i as u32));
-                    }
-                }
-            }
-        }
+        let index = indexer(&self.routes);
         self.index = index;
         let mut par_tuile: std::collections::HashMap<(i32, i32), Vec<u32>> = Default::default();
         for (k, b) in self.batiments.iter().enumerate() {
@@ -423,12 +464,7 @@ impl Reel {
             let p = &self.ponts[k as usize];
             let (a, b) = (p.points[s as usize], p.points[s as usize + 1]);
             let (a, b) = ([a[0] - ox, a[1] - oz, a[2]], [b[0] - ox, b[1] - oz, b[2]]);
-            let w = p.largeur / 2.0;
-            pave(&mut v, &mut t, a, b, (-w, w), (-TABLIER, 0.0), teinte(p.genre), BETON);
-            for cote in [-1.0, 1.0] {
-                let (u0, u1) = if cote < 0.0 { (-w - PARAPET_LARGE, -w) } else { (w, w + PARAPET_LARGE) };
-                pave(&mut v, &mut t, a, b, (u0, u1), (-TABLIER, PARAPET), GARDE_CORPS, GARDE_CORPS);
-            }
+            monter_pont(&mut v, &mut t, a, b, p.largeur, teinte(p.genre));
         }
         for &k in self.par_tuile.get(&(i, j)).map_or(&[][..], |l| l.as_slice()) {
             let b = &self.batiments[k as usize];
@@ -450,22 +486,7 @@ impl Reel {
     /// La route la plus proche de (x, z), si l'on est sur elle ou ses bas-côtés ; la plus
     /// large l'emporte (on compte depuis son bord).
     pub fn route(&self, x: f64, z: f64) -> Option<Proche> {
-        let (x, z) = (x as f32, z as f32);
-        let l = self.index.get(&((x / CASE).floor() as i32, (z / CASE).floor() as i32))?;
-        let mut mieux: Option<Proche> = None;
-        for &(k, i) in l {
-            let r = &self.routes[k as usize];
-            let (a, b) = (r.points[i as usize], r.points[i as usize + 1]);
-            let (dx, dz) = (b[0] - a[0], b[1] - a[1]);
-            let l2 = dx * dx + dz * dz;
-            let t = if l2 > 0.0 { (((x - a[0]) * dx + (z - a[1]) * dz) / l2).clamp(0.0, 1.0) } else { 0.0 };
-            let d = (x - a[0] - dx * t).hypot(z - a[1] - dz * t);
-            let p = Proche { genre: r.genre, largeur: r.largeur, distance: d, hauteur: a[2] + (b[2] - a[2]) * t };
-            if p.hors() < epaule(r.genre) && mieux.is_none_or(|m| p.hors() < m.hors()) {
-                mieux = Some(p);
-            }
-        }
-        mieux
+        proche(&self.routes, &self.index, x, z)
     }
 
     /// La part (de 0 à 1) des points d'occupation de la `classe` dans le carré de demi-côté

@@ -19,7 +19,7 @@
 use crate::campagne::{bruit, hache, Campagne};
 use crate::moteur::tuiles::DEMI_CARTE;
 use crate::moteur::TAILLE;
-use crate::reel::{BOIS, CHAMP, HABITE, PRE, ZONE};
+use crate::reel::{Reel, BOIS, CHAMP, HABITE, PRE, ZONE};
 
 /// Le côté d'une cellule (m) : dix par tuile.
 const CELLULE: f32 = TAILLE / 10.0;
@@ -30,48 +30,70 @@ const ECORCE: [f32; 3] = [0.34, 0.26, 0.18];
 /// Le maillage de la canopée lointaine : « bati/ », il ne se dessine pas en topologie.
 pub const ID_LOINTAIN: &str = "bati/bois-lointains";
 /// Le pas de la canopée (m).
-const PAS_CANOPEE: f32 = TAILLE / 2.0;
+pub const PAS_CANOPEE: f32 = TAILLE / 2.0;
 
 /// La densité des bois en (x, z) : moins dans les clairières.
 fn densite_bois(x: f32, z: f32) -> f32 {
     0.85 * (0.55 + 0.6 * bruit(GRAINE, x as f64 / 90.0, z as f64 / 90.0) as f32).min(1.0)
 }
 
+/// Les points de la canopée par côté, sur toute la carte.
+pub fn cote_canopee() -> usize {
+    ((2 * DEMI_CARTE + 1) as f32 * TAILLE / PAS_CANOPEE) as usize + 1
+}
+
+/// Le point de canopée `a` (x ou z absolu).
+pub fn coin_canopee(a: usize) -> f32 {
+    -(DEMI_CARTE as f32) * TAILLE + a as f32 * PAS_CANOPEE
+}
+
 /// La canopée lointaine des bois d'un lieu réel (rien sinon), en triangles : position
 /// absolue, normale, couleur.
 pub fn lointain(c: &Campagne) -> Vec<f32> {
+    if let Some(m) = &c.monde {
+        return (*m.silhouettes().bois).clone();
+    }
+    let n = cote_canopee();
+    lointain_zone(c, 0..n - 1, 0..n - 1)
+}
+
+/// La canopée des carrés (a, b) de la grille de la canopée dans ces plages : morceau par
+/// morceau, le même résultat que d'un seul tenant.
+pub fn lointain_zone(c: &Campagne, qa: std::ops::Range<usize>, qb: std::ops::Range<usize>) -> Vec<f32> {
     let Some(r) = &c.reel else { return Vec::new() };
-    if r.sol.is_empty() {
+    if r.sol.is_empty() || qa.is_empty() || qb.is_empty() {
         return Vec::new();
     }
-    let d = DEMI_CARTE;
-    let n = ((2 * d + 1) as f32 * TAILLE / PAS_CANOPEE) as usize + 1;
-    let coin = |a: usize| -(d as f32) * TAILLE + a as f32 * PAS_CANOPEE;
-    // En chaque point : la part de bois alentour (un carré de 32 m), la hauteur des
-    // houppiers et le sol
-    let mut part = vec![0f32; n * n];
-    let mut haut = vec![0f32; n * n];
-    for b in 0..n {
-        for a in 0..n {
-            let (x, z) = (coin(a), coin(b));
+    let n = cote_canopee();
+    // En chaque point de la fenêtre (les carrés et leurs voisins) : la part de bois
+    // alentour (un carré de 32 m), la hauteur des houppiers et le sol
+    let (a0, b0) = (qa.start.saturating_sub(1), qb.start.saturating_sub(1));
+    let (a1, b1) = ((qa.end + 1).min(n - 1), (qb.end + 1).min(n - 1));
+    let w = a1 - a0 + 1;
+    let mut part = vec![0f32; w * (b1 - b0 + 1)];
+    let mut haut = vec![0f32; part.len()];
+    for b in b0..=b1 {
+        for a in a0..=a1 {
+            let (x, z) = (coin_canopee(a), coin_canopee(b));
             let f = r.part_sol(BOIS, x as f64, z as f64, PAS_CANOPEE as f64 / 2.0) as f32;
             let f = f * ((densite_bois(x, z) - 0.25) / 0.45).clamp(0.0, 1.0);
             let sol = c.hauteur(x as f64, z as f64) as f32;
             let h = 12.0 + 6.0 * bruit(GRAINE + 1, x as f64 / 120.0, z as f64 / 120.0) as f32;
-            part[b * n + a] = f;
-            haut[b * n + a] = sol + if f > 0.0 { 1.0 + h * f.sqrt() } else { 0.0 };
+            part[(b - b0) * w + a - a0] = f;
+            haut[(b - b0) * w + a - a0] = sol + if f > 0.0 { 1.0 + h * f.sqrt() } else { 0.0 };
         }
     }
-    let at = |a: usize, b: usize| haut[b.min(n - 1) * n + a.min(n - 1)];
+    let i = |a: usize, b: usize| (b.clamp(b0, b1) - b0) * w + a.clamp(a0, a1) - a0;
+    let at = |a: usize, b: usize| haut[i(a.min(n - 1), b.min(n - 1))];
     let mut v = Vec::new();
-    for b in 0..n - 1 {
-        for a in 0..n - 1 {
+    for b in qb {
+        for a in qa.clone() {
             let q = [(a, b), (a + 1, b), (a, b + 1), (a + 1, b + 1)];
-            if q.iter().all(|&(a, b)| part[b * n + a] < 0.02) {
+            if q.iter().all(|&(a, b)| part[i(a, b)] < 0.02) {
                 continue;
             }
             for &(a, b) in &[q[0], q[3], q[1], q[0], q[2], q[3]] {
-                let (x, z) = (coin(a), coin(b));
+                let (x, z) = (coin_canopee(a), coin_canopee(b));
                 let dx = (at(a + 1, b) - at(a.saturating_sub(1), b)) / (2.0 * PAS_CANOPEE);
                 let dz = (at(a, b + 1) - at(a, b.saturating_sub(1))) / (2.0 * PAS_CANOPEE);
                 let l = (dx * dx + dz * dz + 1.0).sqrt();
@@ -86,11 +108,31 @@ pub fn lointain(c: &Campagne) -> Vec<f32> {
     v
 }
 
+/// Un arbre planté : sa cellule (`gi`, `gj`, sur toute la carte), sa place (absolue), son
+/// essence, sa hauteur, sa teinte (0–1) et son tour (`cap`, en sixièmes de tour, 0–1).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Arbre {
+    pub gi: i64,
+    pub gj: i64,
+    pub pos: [f32; 3],
+    pub conifere: bool,
+    pub hauteur: f32,
+    pub teinte: f32,
+    pub cap: f32,
+}
+
 /// Les arbres de la tuile (i, j), comme `Reel::bati` : les sommets (position depuis le
 /// coin de la tuile, normale, couleur) et les triangles qui arrêtent (les troncs).
 pub fn arbres(c: &Campagne, i: i32, j: i32) -> (Vec<f32>, Vec<[[f32; 3]; 3]>) {
-    let (mut v, mut t) = (Vec::new(), Vec::new());
-    let Some(r) = &c.reel else { return (v, t) };
+    match &c.reel {
+        Some(r) => monter(&plantes(r, i, j), i, j),
+        None => (Vec::new(), Vec::new()),
+    }
+}
+
+/// Les arbres que porte la tuile (i, j) d'un lieu réel, dans l'ordre des cellules.
+pub fn plantes(r: &Reel, i: i32, j: i32) -> Vec<Arbre> {
+    let mut l = Vec::new();
     let (ox, oz) = (i as f32 * TAILLE, j as f32 * TAILLE);
     let n = (TAILLE / CELLULE).round() as i64;
     for b in 0..n {
@@ -113,15 +155,28 @@ pub fn arbres(c: &Campagne, i: i32, j: i32) -> (Vec<f32>, Vec<[[f32; 3]; 3]>) {
             if h(0) >= densite || !r.libre(x as f64, z as f64, MARGE) {
                 continue;
             }
-            let y = c.hauteur(x as f64, z as f64) as f32;
-            let p = [x - ox, y, z - oz];
+            let y = r.hauteur(x as f64, z as f64) as f32;
             let coniferes = if classe == BOIS { 0.3 } else { 0.12 };
-            let teinte = h(5);
-            if h(3) < coniferes {
-                conifere(&mut v, &mut t, p, (12.0 + 10.0 * h(4)) * taille, h(6), teinte);
-            } else {
-                feuillu(&mut v, &mut t, p, (9.0 + 8.0 * h(4)) * taille, h(6), teinte, |k| hache(GRAINE + 20 + k, gi, gj) as f32);
-            }
+            let conifere = h(3) < coniferes;
+            let hauteur = if conifere { (12.0 + 10.0 * h(4)) * taille } else { (9.0 + 8.0 * h(4)) * taille };
+            l.push(Arbre { gi, gj, pos: [x, y, z], conifere, hauteur, teinte: h(5), cap: h(6) });
+        }
+    }
+    l
+}
+
+/// Les maillages d'arbres de la tuile (i, j) : sommets depuis le coin de la tuile, et les
+/// troncs qui arrêtent.
+pub fn monter(arbres: &[Arbre], i: i32, j: i32) -> (Vec<f32>, Vec<[[f32; 3]; 3]>) {
+    let (mut v, mut t) = (Vec::new(), Vec::new());
+    let (ox, oz) = (i as f32 * TAILLE, j as f32 * TAILLE);
+    for a in arbres {
+        let p = [a.pos[0] - ox, a.pos[1], a.pos[2] - oz];
+        if a.conifere {
+            conifere(&mut v, &mut t, p, a.hauteur, a.cap, a.teinte);
+        } else {
+            let (gi, gj) = (a.gi, a.gj);
+            feuillu(&mut v, &mut t, p, a.hauteur, a.cap, a.teinte, |k| hache(GRAINE + 20 + k, gi, gj) as f32);
         }
     }
     (v, t)

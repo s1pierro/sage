@@ -14,6 +14,7 @@ pub mod pieds;
 pub mod posture;
 pub mod ressources;
 pub mod scene;
+pub mod stuff;
 pub mod systemes;
 pub mod tuiles;
 

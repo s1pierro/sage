@@ -16,7 +16,7 @@ use std::collections::HashMap;
 pub const COTE: usize = (2 * DEMI_CARTE + 1) as usize;
 
 /// Le sol au centre d'une tuile : sa hauteur et sa couleur.
-type Point = (f32, [f32; 3]);
+pub type Point = (f32, [f32; 3]);
 
 pub struct Carte {
     pub graine: u32,
@@ -41,31 +41,50 @@ fn centre(r: &Relief, couleurs: &[[f32; 3]]) -> Point {
     (r.sommet(m, m), couleurs.get(m * (r.n + 1) + m).copied().unwrap_or([0.5; 3]))
 }
 
+/// Le fond des tuiles (i, j) de ces plages (rognées à la carte), ligne par ligne :
+/// morceau par morceau, le même résultat que d'un seul tenant.
+pub fn fond_zone(c: &Campagne, ti: std::ops::Range<i32>, tj: std::ops::Range<i32>) -> Vec<Point> {
+    let d = DEMI_CARTE;
+    let t = TAILLE as f64;
+    let qa = (ti.start.max(-d) + d) as usize..(ti.end.min(d + 1) + d).max(0) as usize;
+    let qb = (tj.start.max(-d) + d) as usize..(tj.end.min(d + 1) + d).max(0) as usize;
+    if qa.is_empty() || qb.is_empty() {
+        return Vec::new();
+    }
+    // Une hauteur par tuile ; la pente, pour la couleur, se lit entre voisines
+    let (a0, b0) = (qa.start.saturating_sub(1), qb.start.saturating_sub(1));
+    let (a1, b1) = ((qa.end).min(COTE - 1), (qb.end).min(COTE - 1));
+    let w = a1 - a0 + 1;
+    let centre = |a: usize| (a as f64 - d as f64 + 0.5) * t;
+    let mut hs = Vec::with_capacity(w * (b1 - b0 + 1));
+    for b in b0..=b1 {
+        for a in a0..=a1 {
+            hs.push(c.hauteur(centre(a), centre(b)));
+        }
+    }
+    let h = |a: usize, b: usize| hs[(b.min(COTE - 1).clamp(b0, b1) - b0) * w + a.min(COTE - 1).clamp(a0, a1) - a0];
+    let mut fond = Vec::with_capacity(qa.len() * qb.len());
+    for b in qb {
+        for a in qa.clone() {
+            let dx = (h(a + 1, b) - h(a.saturating_sub(1), b)) / (2.0 * t);
+            let dz = (h(a, b + 1) - h(a, b.saturating_sub(1))) / (2.0 * t);
+            let l = (dx * dx + dz * dz + 1.0).sqrt();
+            let n = [(-dx / l) as f32, (1.0 / l) as f32, (-dz / l) as f32];
+            fond.push((h(a, b) as f32, c.couleur(centre(a), centre(b), h(a, b), n)));
+        }
+    }
+    fond
+}
+
 impl Carte {
     /// Le fond de la carte du relief `c`, et les tuiles écrites du dépôt.
     pub fn new(c: &Campagne, monde: &mut Monde, tuiles: &Tuiles) -> Carte {
         let graine = c.graine;
         let d = DEMI_CARTE;
-        let t = TAILLE as f64;
-        // Une hauteur par tuile ; la pente, pour la couleur, se lit entre voisines
-        let mut hs = Vec::with_capacity(COTE * COTE);
-        for j in -d..=d {
-            for i in -d..=d {
-                hs.push(c.hauteur((i as f64 + 0.5) * t, (j as f64 + 0.5) * t));
-            }
-        }
-        let h = |a: usize, b: usize| hs[b.min(COTE - 1) * COTE + a.min(COTE - 1)];
-        let mut fond = Vec::with_capacity(COTE * COTE);
-        for b in 0..COTE {
-            for a in 0..COTE {
-                let dx = (h(a + 1, b) - h(a.saturating_sub(1), b)) / (2.0 * t);
-                let dz = (h(a, b + 1) - h(a, b.saturating_sub(1))) / (2.0 * t);
-                let l = (dx * dx + dz * dz + 1.0).sqrt();
-                let n = [(-dx / l) as f32, (1.0 / l) as f32, (-dz / l) as f32];
-                let (x, z) = ((a as f64 - d as f64 + 0.5) * t, (b as f64 - d as f64 + 0.5) * t);
-                fond.push((h(a, b) as f32, c.couleur(x, z, h(a, b), n)));
-            }
-        }
+        let fond = match &c.monde {
+            Some(m) => (*m.silhouettes().carte).clone(),
+            None => fond_zone(c, -d..d + 1, -d..d + 1),
+        };
         let mut retouchees = HashMap::new();
         for (i, j) in tuiles.depot.tuiles_ecrites() {
             if let Ok(Some(t)) = tuiles.depot.lire_tuile(i, j, &mut monde.modeles) {

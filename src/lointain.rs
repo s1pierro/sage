@@ -27,37 +27,54 @@ const FOND: f32 = -12.0;
 
 /// Ses sommets (position absolue, normale, couleur), en triangles.
 pub fn sommets(c: &Campagne) -> Vec<f32> {
+    if let Some(m) = &c.monde {
+        return (*m.silhouettes().relief).clone();
+    }
+    let d = DEMI_CARTE;
+    sommets_zone(c, -d..d + 1, -d..d + 1)
+}
+
+/// Les carrés des tuiles (i, j) de ces plages (rognées à la carte) : morceau par morceau,
+/// le même résultat que d'un seul tenant.
+pub fn sommets_zone(c: &Campagne, ti: std::ops::Range<i32>, tj: std::ops::Range<i32>) -> Vec<f32> {
     let d = DEMI_CARTE;
     let n = (2 * d + 2) as usize; // coins par côté
     let t = TAILLE as f64;
     let coin = |a: usize| (a as i32 - d) as f64 * t;
-    let mut h = Vec::with_capacity(n * n);
-    for b in 0..n {
-        for a in 0..n {
+    // Les carrés (a, b), et une fenêtre de coins autour pour les normales
+    let qa = (ti.start.max(-d) + d) as usize..(ti.end.min(d + 1) + d).max(0) as usize;
+    let qb = (tj.start.max(-d) + d) as usize..(tj.end.min(d + 1) + d).max(0) as usize;
+    if qa.is_empty() || qb.is_empty() {
+        return Vec::new();
+    }
+    let (a0, b0) = (qa.start.saturating_sub(1), qb.start.saturating_sub(1));
+    let (a1, b1) = ((qa.end + 1).min(n - 1), (qb.end + 1).min(n - 1));
+    let w = a1 - a0 + 1;
+    let mut h = Vec::with_capacity(w * (b1 - b0 + 1));
+    for b in b0..=b1 {
+        for a in a0..=a1 {
             h.push(c.hauteur(coin(a), coin(b)));
         }
     }
-    let at = |a: usize, b: usize| h[b.min(n - 1) * n + a.min(n - 1)];
-    let mut points = Vec::with_capacity(n * n);
-    for b in 0..n {
-        for a in 0..n {
-            let dx = (at(a + 1, b) - at(a.saturating_sub(1), b)) / (2.0 * t);
-            let dz = (at(a, b + 1) - at(a, b.saturating_sub(1))) / (2.0 * t);
-            let l = (dx * dx + dz * dz + 1.0).sqrt();
-            let nm = [(-dx / l) as f32, (1.0 / l) as f32, (-dz / l) as f32];
-            let y = at(a, b);
-            points.push(([coin(a) as f32, y as f32, coin(b) as f32], nm, c.couleur(coin(a), coin(b), y, nm)));
-        }
-    }
+    let at = |a: usize, b: usize| h[(b.min(n - 1).clamp(b0, b1) - b0) * w + a.min(n - 1).clamp(a0, a1) - a0];
+    let point = |a: usize, b: usize| {
+        let dx = (at(a + 1, b) - at(a.saturating_sub(1), b)) / (2.0 * t);
+        let dz = (at(a, b + 1) - at(a, b.saturating_sub(1))) / (2.0 * t);
+        let l = (dx * dx + dz * dz + 1.0).sqrt();
+        let nm = [(-dx / l) as f32, (1.0 / l) as f32, (-dz / l) as f32];
+        let y = at(a, b);
+        ([coin(a) as f32, y as f32, coin(b) as f32], nm, c.couleur(coin(a), coin(b), y, nm))
+    };
     let mut v = Vec::new();
-    for b in 0..n - 1 {
-        for a in 0..n - 1 {
-            let q = [b * n + a, b * n + a + 1, (b + 1) * n + a, (b + 1) * n + a + 1];
-            if q.iter().all(|&i| points[i].0[1] < c.mer() + FOND) {
+    for b in qb {
+        for a in qa.clone() {
+            let q = [(a, b), (a + 1, b), (a, b + 1), (a + 1, b + 1)];
+            if q.iter().all(|&(a, b)| (at(a, b) as f32) < c.mer() + FOND) {
                 continue;
             }
-            for i in [q[0], q[3], q[1], q[0], q[2], q[3]] {
-                let (p, nm, co) = points[i];
+            let p = q.map(|(a, b)| point(a, b));
+            for i in [0, 3, 1, 0, 2, 3] {
+                let (p, nm, co) = p[i];
                 v.extend_from_slice(&p);
                 v.extend_from_slice(&nm);
                 v.extend_from_slice(&co);
@@ -70,9 +87,21 @@ pub fn sommets(c: &Campagne) -> Vec<f32> {
 /// Les bâtiments lointains d'un lieu réel (rien sinon), en triangles : position absolue,
 /// normale, couleur.
 pub fn bati(c: &Campagne) -> Vec<f32> {
+    if let Some(m) = &c.monde {
+        return (*m.silhouettes().bati).clone();
+    }
     let Some(r) = &c.reel else { return Vec::new() };
+    blocs(r.batiments.iter().map(|b| {
+        let (murs, toit) = crate::reel::teintes_bati(b.genre);
+        (b, murs, toit)
+    }))
+}
+
+/// Les blocs lointains de ces bâtiments (contour absolu), avec leurs couleurs de murs et
+/// de toit.
+pub fn blocs<'a>(l: impl Iterator<Item = (&'a crate::reel::Batiment, [f32; 3], [f32; 3])>) -> Vec<f32> {
     let mut v = Vec::new();
-    for b in &r.batiments {
+    for (b, murs, toit) in l {
         let k = &b.contour;
         let aire = crate::reel::aire(k).abs();
         if aire < BATI_AIRE && b.toit - b.pied < BATI_HAUT + 1.0 {
@@ -100,7 +129,6 @@ pub fn bati(c: &Campagne) -> Vec<f32> {
         let (du, dw) = ((u1 - u0) / 2.0 * s, (w1 - w0) / 2.0 * s);
         let coin = |u: f32, w: f32, y: f32| [ax[0] * u + tr[0] * w, y, ax[1] * u + tr[1] * w];
         let pied = [(um - du, wm - dw), (um + du, wm - dw), (um + du, wm + dw), (um - du, wm + dw)];
-        let (murs, toit) = crate::reel::teintes_bati(b.genre);
         let mut quad = |q: [[f32; 3]; 4], n: [f32; 3], co: [f32; 3]| {
             for i in [0, 1, 2, 0, 2, 3] {
                 v.extend_from_slice(&q[i]);

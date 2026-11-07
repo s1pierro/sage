@@ -924,3 +924,62 @@ sur une grille qui déborde d'un point).
     1 500 m² et les immeubles de plus de 15 m.
 - Les blocs lointains prennent la mi-hauteur du toit.
 
+## 25. Le monde matérialisé (0.26)
+
+- **Conteneur** (`src/moteur/stuff.rs`) : `Stuff` (manifeste `J` et tampons),
+  `ranger`/`tampon` pour écrire des éléments typés (`f32`, `u32`, `u16`, `i16`, `u8`)
+  alignés sur 8, `lire_ref` pour les relire d'après une référence, `octets`/`lire`
+  pour le fichier entier. `Fichier` ne lit que l'en-tête et le manifeste, puis chaque
+  tampon demandé (seek). Les clés inconnues restent dans le manifeste.
+- **Régions** (`src/regions.rs`) : `Region::materialiser(campagne, ri, rj)` tire du lieu
+  réel le relief à 2 m (`Reel::hauteur`, routes aplanies), l'eau (part ≥ 0,5), la
+  classe dominante du sol à 8 m, les routes qui approchent, les bâtiments et les
+  morceaux de pont dont la tuile est dans la région, les arbres
+  (`vegetation::plantes`, tuile par tuile) et la silhouette.
+- **Calculs par zone** : `lointain::sommets_zone`, `vegetation::lointain_zone` et
+  `carte::fond_zone` calculent un morceau du lointain ou de la carte avec une fenêtre
+  de voisins rognée comme le calcul d'un tenant : morceau par morceau, le même résultat.
+- **Végétation** : `plantes` choisit les arbres d'une tuile (`Arbre` : cellule, place,
+  essence, hauteur, teinte, tour) ; `monter` en fait les maillages. Les bosses d'un
+  feuillu viennent de sa cellule, qu'on retrouve dans la colonne `id` du tableau.
+- **Lecture** : `Regions::ouvrir(dossier)` demande `sources.json` et `regions/`.
+  `region(ri, rj)` relit une région entière à la demande, et en garde 24 (les moins
+  récemment servies partent). `hauteur` lit le point du relief, en ligne droite entre
+  deux ; `Sol` (occupation, eau, niveau, routes) teinte le sol par `couleur_lieu`,
+  partagée avec `Reel`. `silhouettes` lit une fois, de chaque région, le manifeste et
+  les quatre tampons de la silhouette.
+- **Campagne** : `monde: Option<Arc<Regions>>` prime sur `reel` pour la hauteur, la
+  couleur, la mer et `Source::bati` ; `lointain`, `vegetation::lointain` et `Carte`
+  prennent les silhouettes.
+- **Jeu** : au lancement, le monde matérialisé passe avant `lieu.reel`. Un lieu réel
+  sans régions (relu, ou importé) se matérialise dans un autre fil
+  (`lancer_materialisation`, sur les cœurs moins un) ; fini, la carte passe sur les
+  régions (`prendre_campagne`). Régénérer ou importer un autre lieu interrompt la
+  matérialisation et efface les régions (`regions::effacer`). L'éditeur (onglet Carte)
+  affiche l'avancement.
+- **`monde.json`** gagne `catalogues`, le registre des catalogues, refait à chaque
+  matérialisation (`regions::catalogues`).
+
+## 26. Retoucher les bâtiments (0.27)
+
+- **Instance** (`regions::Bati`) : la tuile, la position dans la tuile (centre du
+  contour, pied des murs), le cap, la `Forme` (les paramètres du générateur
+  `batiment`, dans le repère de l'instance), la provenance, `retouche`, `masquee`, et le
+  `Batiment` monté en absolu (`refaire`). `instance` l'écrit en JSON en partant de
+  l'ancienne (clés inconnues gardées), `depuis_instance` le relit, rotation comprise.
+- **Retouches en attente** (`Regions::retoucher`) : par région et par identifiant, elles
+  remplacent les bâtiments relus dans `Regions::bati`, `batiment` et `bati_sous`. Après
+  `CALME` secondes sans retouche (et quand l'application passe en arrière-plan),
+  `ecrire` réécrit chaque région touchée : instances remplacées, silhouette des bâtiments
+  refaite (le tampon 1 réécrit), fichier temporaire renommé, région oubliée du cache,
+  `version` incrémentée. Le jeu refait alors `bati/lointain`.
+- **Tuiles** : `refaire_bati(k)` redemande `Source::bati` pour une tuile chargée et
+  remplace son maillage et ses murs.
+- **Éditeur** : un appui sur une entité `bati/i/j` cherche le bâtiment sous le point
+  (`bati_sous` : dans le contour, sinon à moins d'un mètre d'un mur). Le panneau du
+  bâtiment remplace celui de l'objet. Chaque réglage passe par `retoucher_bati`, qui
+  retient l'état d'avant (`Retour::Bati`, un même réglage fondu en une étape) et refait
+  les tuiles d'avant et d'après. `Mode::DeplacerBati` pose le centre là où l'on touche,
+  le pied suivant le sol, sans quitter la région. La surbrillance est une copie des
+  faces du bâtiment gonflée de 5 cm (`bati/choisi`), que la scène dessine choisie.
+

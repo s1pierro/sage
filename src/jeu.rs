@@ -68,12 +68,12 @@ pub fn isolignes(d: f32) -> f32 {
 pub const EROSION: &str = "erosion.bin";
 
 /// Le lieu réel importé, dans le dossier du monde.
-pub const LIEU: &str = "lieu.reel";
+pub const LIEU: &str = crate::regions::LIEU;
 
 /// Le relief érodé de `graine`, s'il a été enregistré.
 fn erosion_relue(depot: &Depot, graine: u32) -> Option<Campagne> {
     let e = crate::erosion::Erosion::depuis_octets(&depot.lire_octets(EROSION)?, graine)?;
-    Some(Campagne { graine, erosion: Some(Arc::new(e)), reel: None })
+    Some(Campagne { graine, erosion: Some(Arc::new(e)), reel: None, monde: None })
 }
 
 /// La caméra tourne autour de la tête du personnage : tant de sa hauteur (les yeux).
@@ -150,6 +150,11 @@ pub struct App {
     lointain: Option<crate::moteur::MaillageId>,
     /// Les bâtiments et les bois lointains d'un lieu réel (« bati/ »).
     lointains: Vec<crate::moteur::MaillageId>,
+    /// La matérialisation du lieu réel qui se fait à part : où elle en est, et ce qu'elle
+    /// rendra (les octets écrits).
+    materialisation: Option<(Arc<crate::regions::Avancement>, std::sync::mpsc::Receiver<Result<u64, String>>)>,
+    /// Les bâtiments lointains suivent les retouches écrites jusqu'à celle-là.
+    version_bati: u64,
 }
 
 impl App {
@@ -182,10 +187,14 @@ impl App {
         monde.corps.mettre(joueur, Corps::new(1.75));
         // Le monde autour du joueur, tout de suite ; la suite se charge en marchant
         // Le relief érodé, s'il a déjà été calculé ; sinon le brut, le temps du calcul
-        let reel = depot.lire_octets(LIEU).and_then(|o| crate::reel::Reel::depuis_octets(&o));
-        let relue = match reel {
-            Some(r) => Some(Campagne::reelle(Arc::new(r))),
-            None => erosion_relue(&depot, fiche.graine),
+        // Le monde matérialisé d'abord ; sinon le lieu réel, qui se matérialisera
+        let matiere = depot.ou().and_then(|d| crate::regions::Regions::ouvrir(d));
+        let reel = if matiere.is_none() { depot.lire_octets(LIEU).and_then(|o| crate::reel::Reel::depuis_octets(&o)) } else { None };
+        let a_materialiser = reel.is_some() && depot.ou().is_some() && !cfg!(test);
+        let relue = match (matiere, reel) {
+            (Some(m), _) => Some(Campagne::materialisee(Arc::new(m))),
+            (None, Some(r)) => Some(Campagne::reelle(Arc::new(r))),
+            _ => erosion_relue(&depot, fiche.graine),
         };
         let a_calculer = relue.is_none() && depot.ou().is_some() && !cfg!(test);
         let campagne = relue.unwrap_or_else(|| Campagne::brute(fiche.graine));
@@ -229,6 +238,8 @@ impl App {
             calcul: None,
             lointain: None,
             lointains: Vec::new(),
+            materialisation: None,
+            version_bati: 0,
         };
         // Les modèles du catalogue : les objets déjà posés les retrouvent
         let mut erreurs = Vec::new();
@@ -249,7 +260,89 @@ impl App {
             let g = a.tuiles.fiche.graine;
             a.lancer_erosion(g, false);
         }
+        if a_materialiser {
+            a.lancer_materialisation();
+        }
         a
+    }
+
+    /// Le lieu réel de la carte se matérialise dans un autre fil : ses régions `.stuff`
+    /// s'écrivent dans le dossier du monde, puis la carte passe dessus.
+    pub fn lancer_materialisation(&mut self) {
+        self.arreter_materialisation();
+        let (Some(r), Some(d)) = (self.campagne.reel.clone(), self.tuiles.depot.ou().cloned()) else { return };
+        let av = Arc::new(crate::regions::Avancement::default());
+        let (tx, rx) = std::sync::mpsc::channel();
+        let a = av.clone();
+        let fils = std::thread::available_parallelism().map_or(2, |n| n.get().saturating_sub(1).max(1));
+        std::thread::spawn(move || {
+            let _ = tx.send(crate::regions::materialiser(r, &d, &a, fils));
+        });
+        self.materialisation = Some((av, rx));
+        self.dire("Matérialisation du lieu réel en régions .stuff…".into());
+    }
+
+    /// Interrompt la matérialisation en cours, s'il y en a une.
+    fn arreter_materialisation(&mut self) {
+        if let Some((av, rx)) = self.materialisation.take() {
+            av.arret.store(true, std::sync::atomic::Ordering::Relaxed);
+            let _ = rx.recv();
+        }
+    }
+
+    /// Les bâtiments retouchés s'écrivent dans leurs régions quand on n'y touche plus ;
+    /// leurs blocs lointains suivent.
+    fn suivre_retouches(&mut self) {
+        let Some(m) = self.campagne.monde.clone() else { return };
+        if m.calme() {
+            if let Err(e) = m.ecrire() {
+                self.dire(format!("Bâtiments : {e}"));
+            }
+        }
+        let v = m.version.load(std::sync::atomic::Ordering::Relaxed);
+        if v != self.version_bati {
+            self.version_bati = v;
+            let b = crate::lointain::bati(&self.campagne);
+            let k = self.maillages.mettre(crate::lointain::ID_BATI, Format::Terrain, Arc::new(b));
+            if !self.lointains.contains(&k) {
+                self.lointains.push(k);
+            }
+        }
+    }
+
+    /// Où en est le monde matérialisé, pour l'éditeur.
+    fn etat_monde(&self) -> Option<String> {
+        if let Some((av, _)) = &self.materialisation {
+            let (f, t) = (av.faites.load(std::sync::atomic::Ordering::Relaxed), av.total.load(std::sync::atomic::Ordering::Relaxed));
+            return Some(format!("matérialisation, {f} / {t} régions"));
+        }
+        let m = self.campagne.monde.as_ref()?;
+        Some(format!("matérialisé, {} régions", m.silhouettes().lues))
+    }
+
+    /// La matérialisation finie : la carte passe sur les régions, qui se voient comme le
+    /// lieu réel.
+    fn suivre_materialisation(&mut self) {
+        let Some((_, rx)) = &self.materialisation else { return };
+        let fin = match rx.try_recv() {
+            Ok(f) => f,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => Err("matérialisation perdue".into()),
+        };
+        self.materialisation = None;
+        let ouvert = self.tuiles.depot.ou().and_then(|d| crate::regions::Regions::ouvrir(d));
+        match (fin, ouvert) {
+            (Ok(octets), Some(m)) => {
+                if let Some(d) = self.tuiles.depot.ou().cloned() {
+                    self.tuiles.fiche.catalogues = crate::regions::catalogues(&d);
+                }
+                let n = crate::regions::toutes().len();
+                self.prendre_campagne(Campagne::materialisee(Arc::new(m)));
+                self.dire(format!("Monde matérialisé : {n} régions, {} Mo", octets / 1_000_000));
+            }
+            (Ok(_), None) => self.dire("Matérialisation : les régions ne se relisent pas".into()),
+            (Err(e), _) => self.dire(format!("Matérialisation : {e}")),
+        }
     }
 
     /// L'érosion de `graine` se calcule dans un autre fil ; `regenerer` : la carte se
@@ -322,7 +415,9 @@ impl App {
         }
         self.carte = None;
         self.refaire_lointain();
-        self.dire("Le relief est érodé".into());
+        if self.campagne.erosion.is_some() {
+            self.dire("Le relief est érodé".into());
+        }
     }
 
     /// Le joueur prend ce personnage : son maillage est enregistré sous l'identifiant du
@@ -475,6 +570,9 @@ impl App {
         let nom = r.nom.clone();
         self.regenerer(Campagne::reelle(Arc::new(r)));
         self.dire(format!("Lieu réel « {nom} » : la carte repart de zéro"));
+        if !cfg!(test) {
+            self.lancer_materialisation();
+        }
     }
 
     /// Relu au lancement : le dernier personnage ouvert, sans message.
@@ -490,6 +588,11 @@ impl App {
         let l = self.lieu();
         self.tuiles.fiche.joueur = Some((self.monde.origine, l.pos, l.cap));
         self.tuiles.tout_ecrire(&self.monde);
+        if let Some(m) = &self.campagne.monde {
+            if let Err(e) = m.ecrire() {
+                self.dire(format!("Bâtiments : {e}"));
+            }
+        }
     }
 
     /// Ce qu'envoie une manette de jeu.
@@ -638,7 +741,16 @@ impl App {
     pub fn regenerer(&mut self, c: Campagne) {
         let graine = c.graine;
         self.campagne = c.clone();
-        let reel = c.reel.is_some();
+        let reel = c.reel.is_some() || c.monde.is_some();
+        // Le monde matérialisé d'avant ne vaut plus pour la nouvelle carte
+        self.arreter_materialisation();
+        if c.monde.is_none() {
+            if let Some(d) = self.tuiles.depot.ou().cloned() {
+                if let Err(e) = crate::regions::effacer(&d) {
+                    self.dire(format!("{} : {e}", crate::regions::DOSSIER));
+                }
+            }
+        }
         self.tuiles.repartir(&mut self.monde, &mut self.maillages, Box::new(c));
         if !reel {
             if let Err(e) = self.tuiles.depot.effacer_fichier(LIEU) {
@@ -678,8 +790,12 @@ impl App {
         self.shell.carte = self.edite() && self.editeur.onglet == editeur::CARTE;
         self.carte_age += dt;
         self.suivre_erosion();
+        self.suivre_materialisation();
         self.editeur.erosion = self.erosion_en_cours();
-        self.editeur.lieu = self.campagne.reel.as_ref().map(|r| r.nom.clone());
+        self.editeur.lieu = self.campagne.nom_lieu();
+        self.editeur.monde = self.etat_monde();
+        self.editeur.regions = self.campagne.monde.clone();
+        self.suivre_retouches();
         if std::mem::take(&mut self.editeur.importer) {
             self.demande = true;
         }
@@ -854,13 +970,22 @@ impl App {
             if c.appui("annuler") {
                 self.editeur.annuler(&mut self.monde, &mut self.maillages, &mut self.tuiles);
             }
-        } else if self.monde.choisie.take().is_some() {
+        } else if self.monde.choisie.take().is_some() || self.editeur.bati.take().is_some() {
             self.editeur.mode = editeur::Mode::Choisir;
+        }
+        self.editeur.suivre_bati(&mut self.monde, &mut self.maillages);
+        if let Some(m) = self.editeur.message.take() {
+            self.dire(m);
         }
         self.interface(cx, w, doigt.is_some().then_some(j), dt);
         self.panneau(cx, &l);
         self.poignee(cx, &l, ecran);
         let mut scene = Scene::extraire(&self.monde, &self.maillages, &self.textures, camera, u);
+        if let Some(k) = self.editeur.surbrillance_maillage {
+            for d in scene.dessins.iter_mut().filter(|d| d.maillage == k) {
+                d.choisi = true;
+            }
+        }
         // En édition, pas de brouillard
         scene.brouillard = if self.visee.is_some() { 1.0e7 } else { self.affichage.brouillard_vu() };
         // Le relief lointain, sauf sous les tuiles chargées (un mètre de recouvrement)
@@ -1026,8 +1151,8 @@ impl App {
             }
         }
         cx.paragraph(b, "Touchez la carte ou glissez-y le doigt pour viser ailleurs.");
-        if let Some(r) = &self.campagne.reel {
-            cx.section(b, &r.nom.to_uppercase());
+        if let Some(nom) = self.campagne.nom_lieu() {
+            cx.section(b, &nom.to_uppercase());
             cx.paragraph(b, crate::reel::SOURCES);
         }
         cx.section(b, "JOUEUR");

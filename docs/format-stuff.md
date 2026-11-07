@@ -10,8 +10,9 @@ JPEG… Il ne porte donc **aucune donnée d'édition de maillage**, en particuli
 pile de modifieurs : seulement des maillages figés, prêts à dessiner. Les éditeurs
 gardent leurs propres fichiers, et l'on refait le `.stuff` à partir d'eux.
 
-Rien n'est encore codé : ce document fixe le format avant le code. Les décisions qui
-l'ont façonné sont rappelées à la fin.
+Le conteneur et les régions sont codés depuis la version 0.26 (`src/moteur/stuff.rs`,
+`src/regions.rs`) ; les définitions, l'armature et les catalogues viendront ensuite.
+Les décisions qui ont façonné le format sont rappelées à la fin.
 
 ## Principes
 
@@ -69,8 +70,8 @@ octets** dans ce tampon (multiple de la taille du type), et `taille` un **nombre
 d'éléments** du type. Une référence ne désigne qu'un seul type : des données de types
 différents prennent chacune la leur.
 
-L'outil `stuff` (à écrire) affiche le manifeste et le résumé des tampons, et peut
-convertir un fichier en JSON lisible (tampons en base64) et retour.
+L'outil `stuff` (`examples/stuff.rs`) affiche l'en-tête, les tampons et le manifeste.
+La conversion en JSON lisible (tampons en base64) et retour viendra avec l'édition.
 
 ## Racine du manifeste
 
@@ -304,6 +305,9 @@ montre pas, et ses paramètres sont gardés.
   véhicule ouvert…). Absent pour le statique.
 - **Une instance masquée** (un bâtiment d'OSM qu'on a démoli) garde sa place :
   `"masquee": true`. Ainsi, régénérer ne la fait pas revenir.
+- **`rotation`** : facultative, l'identité par défaut. Pour un bâtiment, seule la
+  rotation autour de la verticale compte : le contour et l'axe du toit tournent autour
+  de la position.
 
 ## Tableaux (instances en masse)
 
@@ -323,7 +327,14 @@ Pour les millions d'arbres, une instance JSON par arbre serait trop lourde. Un
 }
 ```
 
-- Les identifiants d'un tableau sont `<id du tableau>/<n>`.
+- Les identifiants d'un tableau sont `<id du tableau>/<n>`, où `n` est la valeur de la
+  colonne `id` : elle reste la même d'une régénération à l'autre (pour les arbres, la
+  cellule de 6,4 m, sur 16 bits chacune, décalées de 32 768).
+- Un tableau désigne sa sorte par `definition`, ou par `procedural` : un générateur
+  dont les colonnes de `params` sont les paramètres. Les arbres générés ont
+  `"procedural": { "generateur": "arbre", "essences": ["feuillu", "conifere"] }` :
+  `essence` est le rang dans `essences`, `teinte` va de 0 à 255, et `cap` est en
+  radians.
 - Une instance de tableau qu'on retouche beaucoup (qu'on remplace par un autre modèle)
   peut en sortir pour devenir une instance détaillée. Sa ligne est alors masquée.
 
@@ -338,8 +349,10 @@ Un fichier `genre: "region"` couvre 16 × 16 tuiles, soit 1 024 m. Il se nomme
   "relief": { "pas": 2, "cote": 513, "base": -8.3, "echelle": 0.01, "hauteurs": <u16> },
   "eau": { "niveau": -0.3, "masque": <bits> },
   "occupation": { "pas": 8, "cote": 129, "classes": <u8> },
+  "routes": { "nombre": 12, "genres": <u8>, "largeurs": <f32>, "debuts": <u32>, "points": <f32 × 3> },
   "peinture": { … },
-  "tuiles": { "index": <u32 × 2 par tuile> }
+  "tuiles": { "index": <u32 × 2 par tuile> },
+  "silhouette": { "relief": <f32>, "bati": <f32>, "bois": <f32>, "carte": <f32 × 4 par tuile> }
 }
 ```
 
@@ -347,18 +360,34 @@ Un fichier `genre: "region"` couvre 16 × 16 tuiles, soit 1 024 m. Il se nomme
   voisines lisent les mêmes points), soit 513 × 513 points à 2 m. La hauteur vaut
   `base + v × echelle`. C'est ce que retouche l'éditeur.
 - **`eau`** : le niveau et un bit par point du relief.
-- **`occupation`** : la classe du sol (bois, pré, champ, habité, zone) sur la grille de
-  8 m. C'est elle qui teinte le sol, et que l'éditeur peindra.
+- **`occupation`** : la classe du sol (0 rien de dit, 1 bois, 2 pré, 3 champ, 4 habité,
+  5 zone) sur la grille de 8 m. C'est elle qui teinte le sol, et que l'éditeur
+  peindra.
+- **`routes`** : les routes qui approchent la région (chaussée et bas-côtés compris),
+  entières. Le relief les porte déjà, aplani ; elles servent à teinter le sol.
+  `genres` (0 grande route… 5 sentier) et `largeurs` en donnent une valeur par route,
+  `debuts` le rang du premier point de chaque route (une valeur de plus que de routes,
+  la dernière étant le nombre de points), `points` x, z (depuis le coin de la région) et
+  la hauteur de la chaussée.
 - **`peinture`** : les couleurs du sol peintes à la main, tuile par tuile, seulement là
   où il y en a.
-- **`tuiles.index`** : pour chaque tuile, le rang de sa première ligne dans chaque
-  tableau (les lignes sont triées par tuile). La **région est l'unité de chargement** :
+- **`tuiles.index`** : pour chaque tuile, dans l'ordre des lignes (j puis i), le rang
+  de sa première ligne et son nombre de lignes, pour chaque tableau à la suite (les
+  lignes sont triées par tuile). La **région est l'unité de chargement** :
   le moteur lit son manifeste en entier (un kilomètre carré, quelques milliers
   d'instances), et l'index sert à trouver directement les données binaires d'une tuile,
   par exemple pour ne construire que les tuiles proches.
-- **Silhouette** : le maillage lointain d'une région (relief simplifié, silhouettes des
-  bâtiments, canopée) peut y être rangé une fois calculé, sous `silhouette`, pour ne pas
-  le refaire à chaque lancement.
+- **`silhouette`** : le lointain de la région, calculé une fois à la matérialisation,
+  pour ne pas relire toutes les régions au lancement. `relief` (un point par coin de
+  tuile), `bati` (un bloc par grand bâtiment) et `bois` (la canopée, grille de 32 m)
+  sont des triangles prêts à dessiner : neuf f32 par sommet, la position (x, z depuis
+  le coin de la région), la normale et la couleur. `carte` donne, pour chaque tuile de
+  la région qui est dans la carte, la hauteur et la couleur de son centre. Le jeu ne lit
+  de chaque région que son manifeste et ces tampons-là.
+- Les **instances** de la région : les bâtiments générés (`bat-<n>`, procédural
+  `batiment`, la position au centre du contour et au pied des murs), et les morceaux de
+  pont (`pont-<n>-<morceau>`, procédural `pont`, la position au milieu du morceau). La
+  ligne d'un pont est relative à sa position, hauteur comprise.
 
 ## Le monde
 
@@ -377,8 +406,15 @@ sources.json          d'où vient le monde (lieu.reel, MNH…), pour les régén
 lui, sans recherche ; un catalogue manquant se signale au chargement du monde. La
 matérialisation l'écrit en parcourant `catalogue/`.
 
-**La matérialisation** (`examples/lieu_reel.rs`, puis un outil dédié) écrit toutes les
-régions à partir du `.reel` et des sources. Le jeu ne lit plus que le dossier du monde.
+**`sources.json`** : le lieu (`fichier`, `nom`, `lat`, `lon`, Lambert-93 de l'origine
+`x0`, `y0`, `pas`, `niveau` de l'eau, mention des sources) et la matérialisation
+(`dossier`, `tuiles` par région, régions de `de` à `a`). Il s'écrit en dernier : un
+monde sans lui n'est pas matérialisé.
+
+**La matérialisation** (`regions::materialiser`, que lancent le jeu après l'import d'un
+`.reel` et l'outil `examples/materialiser.rs`) écrit toutes les régions à partir du
+`.reel`, d'abord dans `regions.tmp/`, renommé une fois tout écrit. Le jeu ne lit plus
+que le dossier du monde.
 **Régénérer un fragment** relit les sources pour une zone, et ne touche que les
 instances ni retouchées ni ajoutées à la main.
 
@@ -395,3 +431,10 @@ instances ni retouchées ni ajoutées à la main.
 - **Les bâtiments générés** sont des instances qui portent leurs paramètres
   procéduraux, sans définition propre, jusqu'à ce qu'on les enrichisse.
 - **Les catalogues** se trouvent par un registre dans `monde.json`.
+- **Les routes** d'une région sont rangées avec elle, en lignes : le relief les porte
+  déjà, elles ne servent qu'à teinter le sol (0.26).
+- **La silhouette** de chaque région est écrite à la matérialisation, en triangles
+  prêts à dessiner (0.26). Retoucher un bâtiment la réécrit (0.27).
+- **Retoucher un bâtiment** réécrit son instance sur place (0.27) : les clés connues
+  sont remplacées, les autres gardées ; `retouche` passe à `true`. Un bâtiment reste
+  dans le fichier de sa région.

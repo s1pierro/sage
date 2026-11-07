@@ -9,6 +9,7 @@
 //! - `manette`, `reglages` : les manettes de jeu, leurs profils, et l'onglet qui les règle ;
 //! - `terrain` : le pinceau qui retouche le relief des tuiles ;
 //! - `campagne` : la source de tuiles générée : une île, nue ;
+//! - `regions` : le monde matérialisé en régions `.stuff`, écrit depuis un lieu réel ;
 //! - `carte` : la carte du monde entier, dans l'onglet Topologie ;
 //! - `catalogue` : les modèles importés d'un `.glb` (décors, bâtiments) ;
 //! - `personnage` : le personnage relu d'un .glb, prêt pour le processeur graphique ;
@@ -23,6 +24,7 @@ pub mod carte;
 pub mod erosion;
 pub mod lointain;
 pub mod reel;
+pub mod regions;
 pub mod toits;
 pub mod vegetation;
 pub mod catalogue;

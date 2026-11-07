@@ -6,6 +6,38 @@ Il vise un monde ouvert, avec d'autres valeurs que la violence.
 
 ![Le mannequin marche dans le décor de S.A.G.E.](docs/apercu.png)
 
+**Télécharger l'APK** : [sage-0.27.apk](https://github.com/s1pierro/sage/releases/download/v0.27/sage-0.27.apk)
+(Android 8 ou plus récent, arm64).
+
+## Version 0.27 : retoucher les bâtiments
+
+- Dans un monde matérialisé, l'éditeur (onglet Ajout) choisit un **bâtiment** d'un
+  appui : il passe en surbrillance, et le panneau dit d'où il vient (OSM, LiDAR) et s'il
+  a été retouché.
+- On règle sa forme de toit (plat, deux pans, croupe, appentis) et son sens, la hauteur
+  des murs et du toit, son cap, la couleur des murs et de la couverture ; on le déplace
+  d'un appui dans la vue (dans sa région), ou on le démolit. Tout s'annule.
+- Les retouches se voient tout de suite, collisions comprises, et s'écrivent dans la
+  région `.stuff` dès qu'on n'y touche plus : l'instance garde ses autres clés et passe
+  `retouche: true` ; un bâtiment démoli reste dans le fichier, `masquee: true`, pour
+  qu'une régénération ne le fasse pas revenir. Ses blocs lointains suivent.
+
+## Version 0.26 : le monde matérialisé
+
+- Le lieu réel s'écrit en **régions `.stuff`** (le format du moteur, voir
+  [`docs/format-stuff.md`](docs/format-stuff.md)) : 400 régions de 1 km, chacune avec
+  son relief à 2 m, son eau, l'occupation du sol, ses routes, ses bâtiments et ponts
+  (en instances procédurales, avec leur provenance), ses arbres (en tableau) et sa
+  silhouette lointaine. Le jeu lit ensuite ces régions, et plus le `.reel`.
+- Après l'import d'un `.reel` (ou au premier lancement avec un lieu déjà importé), la
+  matérialisation se fait à part, pendant qu'on joue ; l'onglet Carte de l'éditeur
+  montre l'avancement. Une fois finie, la carte passe sur les régions, sans différence
+  visible.
+- Au lancement, seuls les manifestes et les silhouettes des régions sont lus ; les
+  régions se chargent ensuite à mesure qu'on avance.
+- Deux outils : `examples/materialiser.rs` matérialise un `.reel` dans un dossier de
+  monde, `examples/stuff.rs` affiche le contenu d'un fichier `.stuff`.
+
 ## Version 0.25 : les toits
 
 - Les bâtiments du lieu réel ont leur vrai toit : la hauteur et la forme sont mesurées

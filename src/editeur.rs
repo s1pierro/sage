@@ -1,6 +1,7 @@
 //! L'éditeur du monde, en deux onglets :
 //! - Ajout : choisir un objet d'un appui dans la vue, le déplacer et le tourner par ses
-//!   poignées, le régler, le dupliquer, le supprimer, en ajouter du catalogue ;
+//!   poignées, le régler, le dupliquer, le supprimer, en ajouter du catalogue ; choisir un
+//!   bâtiment d'un monde matérialisé, le régler, le déplacer, le démolir ;
 //! - Topologie : retoucher le relief au pinceau (`crate::terrain`).
 //!
 //! Chaque changement marque les tuiles touchées, que `Tuiles` écrit ensuite dans le dépôt.
@@ -12,7 +13,9 @@ use crate::moteur::{physique, Camera, Entite, Genre, Lieu, Maillages, Monde, Obj
 use crate::terrain::{self, Avant, Outil, Pinceau};
 use crate::ui::{id, sub_id, Id};
 use crate::widgets::{Body, Cx};
+use crate::regions::{Bati, Regions};
 use std::f32::consts::{FRAC_PI_2, PI, TAU};
+use std::sync::Arc;
 
 /// Portée de l'appui dans la vue, en mètres.
 const PORTEE: f32 = 150.0;
@@ -41,6 +44,8 @@ pub enum Mode {
     Deplacer,
     /// Poser un objet neuf de ce modèle là où l'on touche.
     Ajouter(Genre),
+    /// Poser le bâtiment choisi là où l'on touche.
+    DeplacerBati,
 }
 
 /// De quoi défaire un changement.
@@ -60,6 +65,8 @@ enum Retour {
     Relief(Avant),
     /// Un terrassement : le relief d'avant, et l'objet posé dessus.
     Terrassement(Avant, Box<Retour>),
+    /// Un bâtiment tel qu'il était, et le réglage qui l'a changé.
+    Bati { avant: Bati, cle: Id, quoi: &'static str },
 }
 
 impl Retour {
@@ -68,6 +75,7 @@ impl Retour {
             Retour::Objet { quoi, .. } => quoi,
             Retour::Relief(_) => "le coup de pinceau",
             Retour::Terrassement(..) => "le terrassement",
+            Retour::Bati { quoi, .. } => quoi,
         }
     }
 }
@@ -130,10 +138,22 @@ pub struct Editeur {
     pub erosion: Option<u32>,
     /// Le nom du lieu réel de la carte, s'il y en a un.
     pub lieu: Option<String>,
+    /// L'état du monde matérialisé (régions `.stuff`), s'il y a un lieu réel.
+    pub monde: Option<String>,
     /// Le sélecteur de fichiers est demandé pour un lieu réel.
     pub importer: bool,
     /// Les réglages du terrassement sous l'objet choisi.
     pub terrasse: Terrassement,
+    /// Le monde matérialisé, dont on peut retoucher les bâtiments.
+    pub regions: Option<Arc<Regions>>,
+    /// Le bâtiment choisi : sa région, son identifiant.
+    pub bati: Option<((i32, i32), String)>,
+    /// Le bâtiment en surbrillance : son entité et sa forme d'alors.
+    surbrillance: Option<(Entite, Bati)>,
+    /// Le maillage de la surbrillance, que la scène dessine choisi.
+    pub surbrillance_maillage: Option<crate::moteur::MaillageId>,
+    /// Ce qui s'est passé à dire au joueur.
+    pub message: Option<String>,
 }
 
 /// Comment terrasser sous un objet.
@@ -162,7 +182,7 @@ fn graine_au_hasard() -> u32 {
 
 impl Default for Editeur {
     fn default() -> Editeur {
-        Editeur { mode: Mode::Choisir, retours: Vec::new(), remplacement: None, retournement: None, onglet: AJOUT, pinceau: Pinceau::default(), coup: None, saisie: None, gestes: 0, isolignes: 0.0, confirmer: None, regeneration: None, erosion: None, lieu: None, importer: false, terrasse: Terrassement::default() }
+        Editeur { mode: Mode::Choisir, retours: Vec::new(), remplacement: None, retournement: None, onglet: AJOUT, pinceau: Pinceau::default(), coup: None, saisie: None, gestes: 0, isolignes: 0.0, confirmer: None, regeneration: None, erosion: None, lieu: None, monde: None, importer: false, terrasse: Terrassement::default(), regions: None, bati: None, surbrillance: None, surbrillance_maillage: None, message: None }
     }
 }
 
@@ -234,6 +254,19 @@ impl Editeur {
                 self.retours.push(*objet);
                 return self.annuler(monde, maillages, tuiles);
             }
+            Retour::Bati { avant, .. } => {
+                let Some(m) = self.regions.clone() else { return };
+                let k = (crate::regions::de_tuile(avant.tuile.0), crate::regions::de_tuile(avant.tuile.1));
+                let ici = m.batiment(k.0, k.1, &avant.id).map(|b| b.tuile);
+                m.retoucher(avant.clone());
+                for t in ici.into_iter().chain(std::iter::once(avant.tuile)) {
+                    tuiles.refaire_bati(monde, maillages, t);
+                }
+                self.bati = (!avant.masquee).then(|| (k, avant.id.clone()));
+                monde.choisie = None;
+                self.mode = Mode::Choisir;
+                return;
+            }
         };
         let r = (id, origine);
         let e = monde.trouver(&r.0);
@@ -277,7 +310,44 @@ impl Editeur {
             p
         };
         match self.mode {
-            Mode::Choisir => monde.choisie = i.and_then(|i| i.entite).filter(|e| monde.objet.get(*e).is_some()),
+            Mode::Choisir => {
+                self.bati = None;
+                // Un bâtiment d'un monde matérialisé : celui sous le point touché
+                if let (Some(m), Some(i)) = (self.regions.clone(), i) {
+                    let tuile = i.entite.and_then(|e| monde.ident.get(e)).and_then(|s| {
+                        let (a, b) = s.strip_prefix("bati/")?.split_once('/')?;
+                        Some((a.parse::<i32>().ok()?, b.parse::<i32>().ok()?))
+                    });
+                    if let Some((ti, tj)) = tuile {
+                        let a = monde.absolu(i.point);
+                        if let Some(b) = m.bati_sous(ti, tj, a[0], a[2]) {
+                            self.bati = Some(((crate::regions::de_tuile(ti), crate::regions::de_tuile(tj)), b.id));
+                            monde.choisie = None;
+                            return;
+                        }
+                    }
+                }
+                monde.choisie = i.and_then(|i| i.entite).filter(|e| monde.objet.get(*e).is_some());
+            }
+            Mode::DeplacerBati => {
+                if let (Some(m), Some(((ri, rj), id)), Some(i)) = (self.regions.clone(), self.bati.clone(), i) {
+                    if let Some(avant) = m.batiment(ri, rj, &id) {
+                        let a = monde.absolu(i.point);
+                        let (ti, tj) = ((a[0] / TAILLE as f64).floor() as i32, (a[2] / TAILLE as f64).floor() as i32);
+                        if (crate::regions::de_tuile(ti), crate::regions::de_tuile(tj)) != (ri, rj) {
+                            self.message = Some("Un bâtiment ne quitte pas encore sa région (1 km) : posez-le plus près".into());
+                        } else {
+                            let o = avant.origine();
+                            let mut x = avant.clone();
+                            x.tuile = (ti, tj);
+                            // Le pied suit le sol
+                            x.position = [(a[0] - ti as f64 * TAILLE as f64) as f32, avant.position[1] + (m.hauteur(a[0], a[2]) - m.hauteur(o[0] as f64, o[2] as f64)) as f32, (a[2] - tj as f64 * TAILLE as f64) as f32];
+                            self.retoucher_bati(&m, monde, maillages, tuiles, &avant, x, 0, "le déplacement");
+                        }
+                    }
+                }
+                self.mode = Mode::Choisir;
+            }
             Mode::Deplacer => {
                 if let (Some((e, o, l)), Some(i)) = (choisi(monde), i) {
                     let p = poser(&o, &i);
@@ -303,11 +373,13 @@ impl Editeur {
 
     /// Le corps du panneau de l'éditeur.
     pub fn panneau(&mut self, cx: &mut Cx, b: &mut Body, monde: &mut Monde, maillages: &mut Maillages, tuiles: &mut Tuiles) {
-        match choisi(monde) {
-            Some((e, o, l)) => self.reglages(cx, b, monde, maillages, tuiles, e, o, l),
-            None => {
+        let bati = self.bati.clone().zip(self.regions.clone());
+        match (choisi(monde), bati) {
+            (_, Some((((ri, rj), ident), m))) => self.reglages_bati(cx, b, monde, maillages, tuiles, &m, (ri, rj), &ident),
+            (Some((e, o, l)), None) => self.reglages(cx, b, monde, maillages, tuiles, e, o, l),
+            (None, None) => {
                 b.y += 6.0 * cx.dp;
-                cx.paragraph(b, "Touchez un objet dans la vue pour le choisir, ou ajoutez-en un du catalogue.");
+                cx.paragraph(b, if self.regions.is_some() { "Touchez un objet ou un bâtiment dans la vue pour le choisir, ou ajoutez un objet du catalogue." } else { "Touchez un objet dans la vue pour le choisir, ou ajoutez-en un du catalogue." });
             }
         }
 
@@ -354,6 +426,12 @@ impl Editeur {
         cx.mesure(b, "État", &if attente > 0 { format!("{attente} en attente") } else { "à jour".to_string() });
         if let Some(err) = &tuiles.erreur {
             cx.paragraph(b, err);
+        }
+        if let Some(m) = &self.regions {
+            let n = m.en_attente();
+            if n > 0 {
+                cx.mesure(b, "Bâtiments", &format!("{n} à écrire"));
+            }
         }
         if let Some(r) = self.retours.last() {
             let l = format!("Annuler {}", r.quoi());
@@ -591,6 +669,7 @@ impl Editeur {
     /// La carte repart de zéro : plus rien à annuler ni à tenir.
     pub fn oublier(&mut self) {
         self.retours.clear();
+        self.bati = None;
         self.coup = None;
         self.saisie = None;
         self.mode = Mode::Choisir;
@@ -607,6 +686,9 @@ impl Editeur {
         }
         if let Some(l) = &self.lieu {
             cx.mesure(b, "Lieu réel", l);
+            if let Some(m) = &self.monde {
+                cx.mesure(b, "Monde", m);
+            }
             cx.paragraph(b, crate::reel::SOURCES);
         }
         let Some(g) = self.confirmer else {
@@ -850,3 +932,168 @@ mod tests {
         assert_eq!(h.2, Some(e));
     }
 }
+
+/// Les noms des formes de toit, dans l'ordre de `toits::PLAT`…
+const TOITS: [&str; 4] = ["Plat", "Deux pans", "Croupe", "Appentis"];
+
+impl Editeur {
+    /// Retient le bâtiment tel qu'il était (un même réglage ne fait qu'une étape), puis
+    /// le retouche : ses tuiles se refont tout de suite, sa région s'écrira.
+    #[allow(clippy::too_many_arguments)]
+    fn retoucher_bati(&mut self, m: &Regions, monde: &mut Monde, maillages: &mut Maillages, tuiles: &mut Tuiles, avant: &Bati, mut x: Bati, cle: Id, quoi: &'static str) {
+        let meme = cle != 0 && matches!(self.retours.last(), Some(Retour::Bati { cle: c, avant: a, .. }) if *c == cle && a.id == avant.id);
+        if !meme {
+            self.pousser(Retour::Bati { avant: avant.clone(), cle, quoi });
+        }
+        x.retouche = true;
+        x.refaire();
+        let (t0, t1) = (avant.tuile, x.tuile);
+        m.retoucher(x);
+        tuiles.refaire_bati(monde, maillages, t0);
+        if t1 != t0 {
+            tuiles.refaire_bati(monde, maillages, t1);
+        }
+    }
+
+    /// Le panneau du bâtiment choisi : d'où il vient, le déplacer, le démolir, son toit,
+    /// ses hauteurs, ses couleurs.
+    #[allow(clippy::too_many_arguments)]
+    fn reglages_bati(&mut self, cx: &mut Cx, b: &mut Body, monde: &mut Monde, maillages: &mut Maillages, tuiles: &mut Tuiles, m: &Arc<Regions>, (ri, rj): (i32, i32), ident: &str) {
+        let Some(bt) = m.batiment(ri, rj, ident) else {
+            self.bati = None;
+            return;
+        };
+        cx.section(b, "BÂTIMENT");
+        cx.mesure(b, "Identifiant", &bt.id);
+        let provenance = match bt.provenance.as_str() {
+            "osm+lidar" => "OSM et LiDAR",
+            "osm" => "OSM",
+            "main" => "posé à la main",
+            p => p,
+        };
+        cx.mesure(b, "Provenance", &format!("{provenance}{}", if bt.retouche { ", retouché" } else { "" }));
+        cx.mesure(b, "Tuile", &format!("{} ; {}", bt.tuile.0, bt.tuile.1));
+        let actif = (self.mode == Mode::DeplacerBati).then_some(0);
+        match cx.liens(b, id("bati-actions"), &["Déplacer", "Démolir", "Laisser"], actif) {
+            Some(0) => self.mode = if self.mode == Mode::DeplacerBati { Mode::Choisir } else { Mode::DeplacerBati },
+            Some(1) => {
+                let mut x = bt.clone();
+                x.masquee = true;
+                self.retoucher_bati(m, monde, maillages, tuiles, &bt, x, 0, "la démolition");
+                self.bati = None;
+                self.mode = Mode::Choisir;
+                return;
+            }
+            Some(_) => {
+                self.bati = None;
+                self.mode = Mode::Choisir;
+                return;
+            }
+            None => {}
+        }
+        if self.mode == Mode::DeplacerBati {
+            cx.paragraph(b, "Touchez dans la vue l'endroit où poser son centre ; il garde sa hauteur au-dessus du sol.");
+        }
+
+        cx.section(b, "RÉGLAGES");
+        let mut x = bt.clone();
+        let mut cle = 0;
+        let k = id("bati-cap");
+        let mut deg = angle(bt.cap).to_degrees();
+        cx.slider(b, k, "Cap", &format!("{} °", dec(deg, 0)), &mut deg, 0.0, 360.0);
+        let cap = angle(((deg / 5.0).round() * 5.0).to_radians());
+        if (cap - angle(bt.cap)).abs() > 1e-4 {
+            x.cap = cap;
+            cle = k;
+        }
+        let f = &bt.forme;
+        if let Some(t) = cx.liens(b, id("bati-toit"), &TOITS, Some(f.toit as usize)) {
+            x.forme.toit = t as u8;
+            if t as u8 == crate::toits::PLAT {
+                x.forme.faitage = x.forme.egout;
+            } else if f.faitage - f.egout < 0.5 {
+                x.forme.faitage = f.egout + 3.0;
+            }
+            cle = id("bati-toit");
+        }
+        // Les murs, depuis le pied (un peu sous le sol), et le toit au-dessus
+        let k = id("bati-egout");
+        let mut murs = f.egout - f.pied;
+        cx.slider(b, k, "Murs", &format!("{} m", dec(murs, 1)), &mut murs, 2.0, 80.0);
+        let murs = (murs * 2.0).round() / 2.0;
+        if (murs - (f.egout - f.pied)).abs() > 0.01 {
+            let toit = x.forme.faitage - x.forme.egout;
+            x.forme.egout = f.pied + murs;
+            x.forme.faitage = x.forme.egout + toit;
+            cle = k;
+        }
+        if f.toit != crate::toits::PLAT {
+            let k = id("bati-faitage");
+            let mut h = f.faitage - f.egout;
+            cx.slider(b, k, "Toit", &format!("{} m", dec(h, 1)), &mut h, 0.5, 25.0);
+            let h = (h * 4.0).round() / 4.0;
+            if (h - (f.faitage - f.egout)).abs() > 0.01 {
+                x.forme.faitage = x.forme.egout + h;
+                cle = k;
+            }
+            let k = id("bati-axe");
+            let mut a = f.axe.rem_euclid(PI).to_degrees();
+            cx.slider(b, k, "Sens du toit", &format!("{} °", dec(a, 0)), &mut a, 0.0, 180.0);
+            let a = ((a / 5.0).round() * 5.0).to_radians();
+            if (a - f.axe.rem_euclid(PI)).abs() > 1e-3 {
+                x.forme.axe = a;
+                cle = k;
+            }
+        }
+        let teintes: Vec<Color> = PALETTE.iter().map(|c| [c[0], c[1], c[2]].map(|v| (v * 255.0).round() as u8)).map(|c| [c[0], c[1], c[2], 255]).collect();
+        cx.mesure(b, "Murs", &format!("#{}", hex(f.murs)));
+        if let Some(i) = cx.nuancier(b, id("bati-murs"), &teintes, PALETTE.iter().position(|c| hex(*c) == hex(f.murs))) {
+            x.forme.murs = PALETTE[i];
+            cle = id("bati-murs");
+        }
+        cx.mesure(b, "Couverture", &format!("#{}", hex(f.couverture)));
+        if let Some(i) = cx.nuancier(b, id("bati-couverture"), &teintes, PALETTE.iter().position(|c| hex(*c) == hex(f.couverture))) {
+            x.forme.couverture = PALETTE[i];
+            cle = id("bati-couverture");
+        }
+        if cle != 0 && x != bt {
+            self.retoucher_bati(m, monde, maillages, tuiles, &bt, x, cle, "le réglage du bâtiment");
+        }
+    }
+
+    /// La surbrillance du bâtiment choisi : une copie de ses faces, un peu gonflée, que la
+    /// scène dessine choisie. Elle suit le bâtiment, et part avec lui.
+    pub fn suivre_bati(&mut self, monde: &mut Monde, maillages: &mut Maillages) {
+        const ID: &str = "bati/choisi";
+        let voulu = self.bati.as_ref().zip(self.regions.as_ref()).and_then(|(((ri, rj), id), m)| m.batiment(*ri, *rj, id)).filter(|b| !b.masquee);
+        let Some(b) = voulu else {
+            if let Some((e, _)) = self.surbrillance.take() {
+                monde.detruire(e);
+                maillages.ote(ID);
+            }
+            self.surbrillance_maillage = None;
+            return;
+        };
+        let e = match &self.surbrillance {
+            Some((e, avant)) if *avant == b => *e,
+            _ => {
+                let (mut v, mut t) = (Vec::new(), Vec::new());
+                b.monter(b.tuile.0, b.tuile.1, &mut v, &mut t);
+                for q in v.chunks_mut(9) {
+                    for k in 0..3 {
+                        q[k] += q[3 + k] * 0.05;
+                    }
+                }
+                let e = self.surbrillance.take().map_or_else(|| monde.creer(ID), |(e, _)| e);
+                let k = maillages.mettre(ID, crate::moteur::Format::Statique, std::sync::Arc::new(v));
+                monde.rendu.mettre(e, crate::moteur::Rendu { maillage: k, local: crate::math::scale(1.0) });
+                self.surbrillance_maillage = Some(k);
+                self.surbrillance = Some((e, b.clone()));
+                e
+            }
+        };
+        // Le monde a pu se décaler : la tuile du bâtiment dans le repère d'aujourd'hui
+        monde.lieu.mettre(e, Lieu::en(Tuiles::coin(monde, b.tuile), 0.0));
+    }
+}
+

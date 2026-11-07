@@ -578,6 +578,33 @@ impl Tuiles {
         self.retouches += 1;
     }
 
+    /// Les bâtiments de la tuile chargée `k` ont changé dans la source : son maillage et
+    /// ses murs se refont.
+    pub fn refaire_bati(&mut self, monde: &mut Monde, maillages: &mut Maillages, k: (i32, i32)) {
+        if !self.chargees.contains_key(&k) {
+            return;
+        }
+        let neuf = self.source.bati(k.0, k.1);
+        let o = Tuiles::coin(monde, k);
+        let id = ident_bati(k.0, k.1);
+        let Some(c) = self.chargees.get_mut(&k) else { return };
+        match neuf {
+            Some((v, tri)) => {
+                let b = *c.bati.get_or_insert_with(|| monde.creer(&id));
+                let m = maillages.mettre(&id, Format::Statique, Arc::new(v));
+                monde.lieu.mettre(b, Lieu::en(o, 0.0));
+                monde.rendu.mettre(b, Rendu { maillage: m, local: math::scale(1.0) });
+                monde.obstacles.mettre(b, vec![super::physique::Forme::Triangles(Arc::new(super::physique::Triangles::new(tri)))]);
+            }
+            None => {
+                if let Some(b) = c.bati.take() {
+                    maillages.ote(&id);
+                    monde.detruire(b);
+                }
+            }
+        }
+    }
+
     /// Ôte l'objet `e` du monde.
     pub fn oter(&mut self, monde: &mut Monde, maillages: &mut Maillages, e: Entite) {
         if let Some(l) = monde.lieu.get(e) {
