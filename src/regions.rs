@@ -1080,6 +1080,19 @@ impl Regions {
         if let Some(s) = garde.as_ref() {
             return s.clone();
         }
+        let s = self.lire_silhouettes();
+        *garde = Some(s.clone());
+        s
+    }
+
+    /// Relit toutes les silhouettes (après une régénération), sans bloquer le jeu qui
+    /// garde les anciennes jusque-là.
+    pub fn relire_silhouettes(&self) {
+        let s = self.lire_silhouettes();
+        *self.silhouettes.lock().unwrap() = Some(s);
+    }
+
+    fn lire_silhouettes(&self) -> Silhouettes {
         let cote = crate::carte::COTE;
         let mut carte = vec![(self.niveau - 20.0, [0.36, 0.38, 0.34]); cote * cote];
         let (mut relief, mut bati, mut bois, mut lues) = (Vec::new(), Vec::new(), Vec::new(), 0);
@@ -1102,9 +1115,56 @@ impl Regions {
                 }
             }
         }
-        let s = Silhouettes { relief: Arc::new(relief), bati: Arc::new(bati), bois: Arc::new(bois), carte: Arc::new(carte), lues };
-        *garde = Some(s.clone());
-        s
+        Silhouettes { relief: Arc::new(relief), bati: Arc::new(bati), bois: Arc::new(bois), carte: Arc::new(carte), lues }
+    }
+
+    /// Régénère les régions `liste` à partir du lieu réel du monde (`lieu.reel`), sur
+    /// `fils` fils : tout ce que les sources donnent est refait, sauf les instances
+    /// retouchées ou démolies, gardées telles quelles avec leurs définitions. Un bâtiment
+    /// refait qui tomberait dans l'un d'eux ne revient pas, ni un arbre dans un bâtiment
+    /// gardé. Rend (bâtiments refaits, instances gardées).
+    pub fn regenerer(&self, liste: &[(i32, i32)], av: &Avancement, fils: usize) -> Result<(usize, usize), String> {
+        av.total.store(liste.len(), Ordering::Relaxed);
+        av.faites.store(0, Ordering::Relaxed);
+        let chemin = self.dossier.join(LIEU);
+        let o = std::fs::read(&chemin).map_err(|e| format!("{LIEU} : {e}"))?;
+        let r = Reel::depuis_octets(&o).ok_or_else(|| format!("{LIEU} illisible"))?;
+        drop(o);
+        let c = Campagne::reelle(Arc::new(r));
+        let suivant = AtomicUsize::new(0);
+        let bilan: Mutex<Result<(usize, usize), String>> = Mutex::new(Ok((0, 0)));
+        std::thread::scope(|sc| {
+            for _ in 0..fils.max(1).min(liste.len().max(1)) {
+                sc.spawn(|| loop {
+                    if av.arret.load(Ordering::Relaxed) || bilan.lock().unwrap().is_err() {
+                        return;
+                    }
+                    let k = suivant.fetch_add(1, Ordering::Relaxed);
+                    let Some(&(ri, rj)) = liste.get(k) else { return };
+                    let r = regenerer_region(&c, &self.chemin(ri, rj), ri, rj);
+                    let mut b = bilan.lock().unwrap();
+                    match (r, &mut *b) {
+                        (Ok((x, y)), Ok(t)) => {
+                            t.0 += x;
+                            t.1 += y;
+                        }
+                        (Err(e), _) => *b = Err(e),
+                        _ => {}
+                    }
+                    av.faites.fetch_add(1, Ordering::Relaxed);
+                });
+            }
+        });
+        // Les régions se reliront, les silhouettes aussi
+        {
+            let mut cache = self.cache.lock().unwrap();
+            for k in liste {
+                cache.regions.remove(k);
+            }
+        }
+        self.relire_silhouettes();
+        self.version.fetch_add(1, Ordering::Relaxed);
+        bilan.into_inner().unwrap()
     }
 }
 
@@ -1148,6 +1208,75 @@ pub struct Avancement {
     pub faites: AtomicUsize,
     pub total: AtomicUsize,
     pub arret: AtomicBool,
+}
+
+/// Refait la région (ri, rj) de `c` dans `chemin`, en gardant de l'ancienne ses instances
+/// retouchées ou démolies et leurs définitions. Rend (bâtiments refaits, gardées).
+fn regenerer_region(c: &Campagne, chemin: &Path, ri: i32, rj: i32) -> Result<(usize, usize), String> {
+    let mut region = Region::materialiser(c, ri, rj);
+    let ancien = std::fs::read(chemin).ok().and_then(|o| Stuff::lire(&o).ok());
+    // Ce que l'on garde : les instances, leurs bâtiments, les définitions des enrichis
+    let (mut gardees, mut bati_garde, mut defs) = (Vec::new(), Vec::new(), Vec::new());
+    if let Some(a) = &ancien {
+        let definitions = a.get("definitions").and_then(J::liste).unwrap_or(&[]);
+        for i in a.get("instances").and_then(J::liste).unwrap_or(&[]) {
+            let oui = |k: &str| i.get(k).and_then(J::bool) == Some(true);
+            if !oui("retouche") && !oui("masquee") {
+                continue;
+            }
+            gardees.push(i.clone());
+            let b = match i.get("definition").and_then(J::txt) {
+                Some(d) => definitions.iter().find(|x| x.get("id").and_then(J::txt) == Some(d)).and_then(|x| crate::enrichi::lire(a, x)).and_then(|(params, modele)| {
+                    let b = Bati::depuis_params(i, &params);
+                    defs.push((d.to_string(), params, modele));
+                    b
+                }),
+                None => Bati::depuis_instance(i),
+            };
+            bati_garde.extend(b);
+        }
+    }
+    let ids: std::collections::HashSet<String> = gardees.iter().filter_map(|i| i.get("id").and_then(J::txt).map(String::from)).collect();
+    // Les bâtiments refaits, hors de la place des gardés
+    region.batiments.retain(|b| {
+        let c = b.b.centre();
+        !ids.contains(&b.id) && !bati_garde.iter().any(|g| g.touche(c[0], c[1], 0.0))
+    });
+    region.ponts.retain(|p| !ids.contains(&p.id));
+    // Les arbres, hors des bâtiments gardés
+    let debout: Vec<&Bati> = bati_garde.iter().filter(|b| !b.masquee).collect();
+    if !debout.is_empty() {
+        let (mut arbres, mut par_tuile) = (Vec::with_capacity(region.arbres.len()), Vec::with_capacity(region.par_tuile.len()));
+        for &[d, n] in &region.par_tuile {
+            let debut = arbres.len() as u32;
+            arbres.extend(region.arbres[d as usize..(d + n) as usize].iter().filter(|a| !debout.iter().any(|b| b.touche(a.pos[0], a.pos[2], 0.5))).cloned());
+            par_tuile.push([debut, arbres.len() as u32 - debut]);
+        }
+        region.arbres = arbres;
+        region.par_tuile = par_tuile;
+    }
+    let refaits = region.batiments.len();
+    let tous: Vec<Bati> = region.batiments.iter().chain(bati_garde.iter()).cloned().collect();
+    region.silhouette.bati = blocs(&tous);
+    let mut s = region.stuff();
+    let mut instances: Vec<J> = s.get("instances").and_then(J::liste).map(|l| l.to_vec()).unwrap_or_default();
+    instances.retain(|i| !i.get("id").and_then(J::txt).is_some_and(|x| ids.contains(x)));
+    let n = gardees.len();
+    instances.extend(gardees);
+    s.mettre("instances", J::Liste(instances));
+    if !defs.is_empty() {
+        let mut l = Vec::new();
+        for (d, params, modele) in defs {
+            let k = s.tampons.len().max(2);
+            let nom = modele.nom.clone().unwrap_or_else(|| d.clone());
+            l.push(crate::enrichi::ecrire(&mut s, k, &d, &nom, params, &modele));
+        }
+        s.mettre("definitions", J::Liste(l));
+    }
+    let tmp = chemin.with_extension("tmp");
+    std::fs::write(&tmp, s.octets()).map_err(|e| format!("{} : {e}", nom_fichier(ri, rj)))?;
+    std::fs::rename(&tmp, chemin).map_err(|e| format!("{} : {e}", nom_fichier(ri, rj)))?;
+    Ok((refaits, n))
 }
 
 /// Écrit toutes les régions du lieu réel `r` dans `dossier/regions/`, puis la fiche des
@@ -1269,6 +1398,38 @@ mod tests {
         let pont = Route { genre: ROUTE, largeur: 5.0, points: vec![[300.0, 300.0, 9.0], [360.0, 300.0, 9.0]] };
         let m = cote_sol(n);
         Arc::new(Reel::new("Essai", 49.0, 1.0, 0.0, 0.0, pas, -50.0, &h, &eau, vec![route], vec![maison], vec![pont]).avec_sol(vec![BOIS; m * m]))
+    }
+
+    #[test]
+    fn regenerer_une_region_garde_le_batiment_enrichi() {
+        let c = Campagne::reelle(lieu());
+        let reg = Region::materialiser(&c, 0, 0);
+        // Le bâtiment enrichi de son propre modèle, tourné : une retouche écrite
+        let mut b = reg.batiments[0].clone();
+        let d = crate::catalogue::decoder_glb(&crate::enrichi::glb(&b), Some(false)).unwrap();
+        let n = d.triangles.len();
+        b.cap = 0.5;
+        b.retouche = true;
+        b.refaire();
+        b.detail = Some(Detail::new(format!("def-{}", b.id), Arc::new(d), true));
+        let mut s = reg.stuff();
+        let def = crate::enrichi::ecrire(&mut s, 2, &format!("def-{}", b.id), &b.id, b.params(None), &b.detail.as_ref().unwrap().modele);
+        s.mettre("definitions", J::Liste(vec![def]));
+        let autres: Vec<J> = s.get("instances").and_then(J::liste).unwrap().iter().filter(|i| i.get("id").and_then(J::txt) != Some(&b.id)).cloned().collect();
+        s.mettre("instances", J::Liste(autres.into_iter().chain([b.instance(None)]).collect()));
+        let f = std::env::temp_dir().join(format!("sage-fragment-{}.stuff", std::process::id()));
+        std::fs::write(&f, s.octets()).unwrap();
+        // Régénérée : le bâtiment n'est pas refait, le gardé revient tel quel
+        let (refaits, gardes) = regenerer_region(&c, &f, 0, 0).unwrap();
+        assert_eq!((refaits, gardes), (0, 1));
+        let lu = Region::depuis(&Stuff::lire(&std::fs::read(&f).unwrap()).unwrap()).unwrap();
+        std::fs::remove_file(&f).unwrap();
+        assert_eq!(lu.batiments.len(), 1);
+        let x = &lu.batiments[0];
+        assert!(x.retouche && (x.cap - 0.5).abs() < 1e-3);
+        assert_eq!(x.detail.as_ref().map(|d| d.modele.triangles.len()), Some(n));
+        assert!(lu.arbres.len() <= reg.arbres.len());
+        assert_eq!(lu.ponts.len(), reg.ponts.len());
     }
 
     #[test]

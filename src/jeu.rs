@@ -165,6 +165,8 @@ pub struct App {
     /// La matérialisation du lieu réel qui se fait à part : où elle en est, et ce qu'elle
     /// rendra (les octets écrits).
     materialisation: Option<(Arc<crate::regions::Avancement>, std::sync::mpsc::Receiver<Result<u64, String>>)>,
+    /// Une régénération de fragment en cours : bâtiments refaits, instances gardées.
+    fragment: Option<(Arc<crate::regions::Avancement>, std::sync::mpsc::Receiver<Result<(usize, usize), String>>)>,
     /// Les bâtiments lointains suivent les retouches écrites jusqu'à celle-là.
     version_bati: u64,
 }
@@ -253,6 +255,7 @@ impl App {
             lointain: None,
             lointains: Vec::new(),
             materialisation: None,
+            fragment: None,
             version_bati: 0,
         };
         // Les modèles du catalogue : les objets déjà posés les retrouvent
@@ -296,6 +299,59 @@ impl App {
         self.dire("Matérialisation du lieu réel en régions .stuff…".into());
     }
 
+    /// Régénère la région du point visé (`rayon` 0), ou avec ses voisines (1), dans un
+    /// autre fil. Les retouches en attente s'écrivent d'abord.
+    fn lancer_fragment(&mut self, rayon: i32) {
+        let Some(m) = self.campagne.monde.clone() else { return };
+        if self.fragment.is_some() || self.materialisation.is_some() {
+            return;
+        }
+        if let Err(e) = m.ecrire() {
+            self.dire(format!("Bâtiments : {e}"));
+            return;
+        }
+        let o = match self.visee {
+            Some(v) => {
+                let (i, j) = Tuiles::tuile_de(&self.monde, v);
+                [i, j]
+            }
+            None => self.monde.origine,
+        };
+        let (ri, rj) = (crate::regions::de_tuile(o[0]), crate::regions::de_tuile(o[1]));
+        let e = crate::regions::etendue();
+        let liste: Vec<(i32, i32)> = (-rayon..=rayon).flat_map(|dj| (-rayon..=rayon).map(move |di| (ri + di, rj + dj))).filter(|(a, b)| e.contains(a) && e.contains(b)).collect();
+        let av = Arc::new(crate::regions::Avancement::default());
+        let (tx, rx) = std::sync::mpsc::channel();
+        let a = av.clone();
+        let fils = std::thread::available_parallelism().map_or(2, |n| n.get().saturating_sub(1).max(1));
+        std::thread::spawn(move || {
+            let _ = tx.send(m.regenerer(&liste, &a, fils));
+        });
+        self.fragment = Some((av, rx));
+        self.dire(format!("Régénération de {} autour de la région {ri} ; {rj}…", if rayon == 0 { "la région".to_string() } else { "9 régions".to_string() }));
+    }
+
+    /// La régénération finie : les tuiles et le lointain se refont.
+    fn suivre_fragment(&mut self) {
+        let Some((_, rx)) = &self.fragment else { return };
+        let fin = match rx.try_recv() {
+            Ok(f) => f,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => Err("régénération perdue".into()),
+        };
+        self.fragment = None;
+        match fin {
+            Ok((refaits, gardes)) => {
+                if let Some(m) = self.campagne.monde.clone() {
+                    self.editeur.bati = None;
+                    self.prendre_campagne(Campagne::materialisee(m));
+                }
+                self.dire(format!("Régénéré : {refaits} bâtiment{} refait{}, {gardes} instance{} gardée{}", pl(refaits), pl(refaits), pl(gardes), pl(gardes)));
+            }
+            Err(e) => self.dire(format!("Régénération : {e}")),
+        }
+    }
+
     /// Interrompt la matérialisation en cours, s'il y en a une.
     fn arreter_materialisation(&mut self) {
         if let Some((av, rx)) = self.materialisation.take() {
@@ -308,7 +364,8 @@ impl App {
     /// leurs blocs lointains suivent.
     fn suivre_retouches(&mut self) {
         let Some(m) = self.campagne.monde.clone() else { return };
-        if m.calme() {
+        // Pas d'écriture pendant qu'une régénération refait les régions
+        if self.fragment.is_none() && m.calme() {
             if let Err(e) = m.ecrire() {
                 self.dire(format!("Bâtiments : {e}"));
             }
@@ -326,6 +383,10 @@ impl App {
 
     /// Où en est le monde matérialisé, pour l'éditeur.
     fn etat_monde(&self) -> Option<String> {
+        if let Some((av, _)) = &self.fragment {
+            let (f, t) = (av.faites.load(std::sync::atomic::Ordering::Relaxed), av.total.load(std::sync::atomic::Ordering::Relaxed));
+            return Some(format!("régénération, {f} / {t} région{}", pl(t)));
+        }
         if let Some((av, _)) = &self.materialisation {
             let (f, t) = (av.faites.load(std::sync::atomic::Ordering::Relaxed), av.total.load(std::sync::atomic::Ordering::Relaxed));
             return Some(format!("matérialisation, {f} / {t} régions"));
@@ -879,6 +940,11 @@ impl App {
         self.carte_age += dt;
         self.suivre_erosion();
         self.suivre_materialisation();
+        self.suivre_fragment();
+        if let Some(r) = self.editeur.fragment.take() {
+            self.lancer_fragment(r);
+        }
+        self.editeur.fragment_possible = self.campagne.monde.is_some() && self.fragment.is_none() && self.materialisation.is_none();
         self.editeur.erosion = self.erosion_en_cours();
         self.editeur.lieu = self.campagne.nom_lieu();
         self.editeur.monde = self.etat_monde();
@@ -2031,4 +2097,9 @@ mod tests {
         assert!(x <= ((DEMI_CARTE + 1) as f32 * crate::moteur::TAILLE - CORPS) as f64 + 1e-3, "{x}");
         let _ = std::fs::remove_dir_all(&d);
     }
+}
+
+/// La marque du pluriel.
+fn pl(n: usize) -> &'static str {
+    if n > 1 { "s" } else { "" }
 }

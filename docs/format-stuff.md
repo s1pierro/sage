@@ -306,6 +306,12 @@ montre pas, et ses paramètres sont gardés.
   - `+` les combine : `osm/way/123+lidar`.
 - **`retouche`** : `true` dès qu'une main y a touché (déplacée, modifiée, niveau
   ajouté…). Une régénération la laisse alors en paix.
+
+  Ainsi en 0.29 : régénérer une région la refait entière à partir des sources, puis y
+  remet telles quelles les instances `retouche` ou `masquee` de l'ancienne, avec les
+  définitions auxquelles elles renvoient. Une instance refaite du même identifiant, ou
+  un bâtiment refait dont le centre tombe dans le contour d'un bâtiment gardé, n'est pas
+  écrit ; les arbres refaits dans un bâtiment gardé (debout) non plus.
 - **`surcharges`** : ce qui diffère de la définition pour cette instance seulement :
   des paramètres du générateur ou des matériaux. Sans objet pour une instance
   `procedural`, qui porte déjà ses propres paramètres.

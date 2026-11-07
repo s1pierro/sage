@@ -1009,3 +1009,19 @@ sur une grille qui déborde d'un point).
   garde le cap, le déplacement et la démolition, sans les réglages de forme ; sa
   surbrillance suit les faces du modèle.
 
+## 28. Régénérer un fragment (0.29)
+
+- **`Regions::regenerer(liste, av, fils)`** : relit `lieu.reel` du dossier du monde,
+  puis refait chaque région de la liste (`regenerer_region`, sur plusieurs fils) :
+  `Region::materialiser`, puis les instances `retouche` ou `masquee` de l'ancien fichier
+  reprises telles quelles (leurs bâtiments relus pour écarter les refaits à leur place
+  et les arbres dedans), leurs définitions réécrites (`enrichi::lire` puis `ecrire`), la
+  silhouette des bâtiments refaite avec eux. Les régions sont oubliées du cache, les
+  silhouettes relues (`relire_silhouettes`, hors du fil du jeu), `version` incrémentée.
+- **Jeu** : `lancer_fragment(rayon)` écrit d'abord les retouches en attente, prend la
+  région du point visé (et ses voisines), lance le fil ; les retouches ne s'écrivent pas
+  pendant ce temps. `suivre_fragment` reprend la campagne matérialisée à la fin : tuiles
+  rechargées, lointain refait.
+- **Éditeur** : onglet Carte, liens « Régénérer la région » et « Avec ses voisines »
+  quand rien d'autre ne tourne.
+

@@ -6,8 +6,17 @@ Il vise un monde ouvert, avec d'autres valeurs que la violence.
 
 ![Le mannequin marche dans le décor de S.A.G.E.](docs/apercu.png)
 
-**Télécharger l'APK** : [sage-0.28.apk](https://github.com/s1pierro/sage/releases/download/v0.28/sage-0.28.apk)
+**Télécharger l'APK** : [sage-0.29.apk](https://github.com/s1pierro/sage/releases/download/v0.29/sage-0.29.apk)
 (Android 8 ou plus récent, arm64).
+
+## Version 0.29 : régénérer un fragment du monde
+
+- Dans l'onglet Carte de l'éditeur, un monde matérialisé se **régénère par morceaux** :
+  la région du point visé (1 km de côté), ou avec ses 8 voisines. Elle est refaite à
+  partir du lieu réel, dans un autre fil, puis les tuiles et le lointain se refont.
+- Les **bâtiments retouchés, enrichis ou démolis restent** tels quels, avec leurs
+  modèles et leurs textures ; un bâtiment refait qui tomberait à leur place ne revient
+  pas, ni un arbre dans un bâtiment gardé.
 
 ## Version 0.28 : enrichir les bâtiments
 

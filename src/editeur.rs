@@ -138,6 +138,11 @@ pub struct Editeur {
     confirmer: Option<u32>,
     /// La carte à régénérer avec cette graine (l'application le fait).
     pub regeneration: Option<u32>,
+    /// Le fragment du monde matérialisé à régénérer autour du point visé : 0, la région
+    /// seule ; 1, avec ses voisines (l'application le fait).
+    pub fragment: Option<i32>,
+    /// Le monde matérialisé est prêt à régénérer un fragment (rien en cours).
+    pub fragment_possible: bool,
     /// L'érosion de cette graine se calcule : la carte se régénère quand elle est prête.
     pub erosion: Option<u32>,
     /// Le nom du lieu réel de la carte, s'il y en a un.
@@ -186,7 +191,7 @@ fn graine_au_hasard() -> u32 {
 
 impl Default for Editeur {
     fn default() -> Editeur {
-        Editeur { mode: Mode::Choisir, retours: Vec::new(), remplacement: None, export_bati: None, enrichir_bati: None, retournement: None, onglet: AJOUT, pinceau: Pinceau::default(), coup: None, saisie: None, gestes: 0, isolignes: 0.0, confirmer: None, regeneration: None, erosion: None, lieu: None, monde: None, importer: false, terrasse: Terrassement::default(), regions: None, bati: None, surbrillance: None, surbrillance_maillage: None, message: None }
+        Editeur { mode: Mode::Choisir, retours: Vec::new(), remplacement: None, export_bati: None, enrichir_bati: None, retournement: None, onglet: AJOUT, pinceau: Pinceau::default(), coup: None, saisie: None, gestes: 0, isolignes: 0.0, confirmer: None, regeneration: None, fragment: None, fragment_possible: false, erosion: None, lieu: None, monde: None, importer: false, terrasse: Terrassement::default(), regions: None, bati: None, surbrillance: None, surbrillance_maillage: None, message: None }
     }
 }
 
@@ -701,6 +706,13 @@ impl Editeur {
             cx.mesure(b, "Lieu réel", l);
             if let Some(m) = &self.monde {
                 cx.mesure(b, "Monde", m);
+            }
+            if self.fragment_possible {
+                match cx.liens(b, id("carte-fragment"), &["Régénérer la région", "Avec ses voisines"], None) {
+                    Some(k) => self.fragment = Some(k as i32),
+                    None => {}
+                }
+                cx.paragraph(b, "Refait à partir du lieu réel la région du point visé (1 km), ou les 9 autour ; les bâtiments retouchés, enrichis ou démolis restent tels quels.");
             }
             cx.paragraph(b, crate::reel::SOURCES);
         }
