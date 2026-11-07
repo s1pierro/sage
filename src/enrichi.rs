@@ -257,6 +257,37 @@ pub fn ecrire(s: &mut Stuff, k: usize, id: &str, nom: &str, params: J, d: &Decor
     ])
 }
 
+/// La forme d'un bâtiment tirée de son modèle : son emprise vue du dessus (l'enveloppe
+/// convexe de ses sommets), son pied à 0 et un toit plat au plus haut du modèle ; les
+/// couleurs de `base`. Rien si le modèle n'a pas d'emprise.
+pub fn forme_du_modele(d: &Decor, base: &crate::regions::Forme) -> Option<crate::regions::Forme> {
+    let mut p: Vec<[f32; 2]> = d.sommets.chunks(11).map(|q| [q[0], q[2]]).collect();
+    p.sort_by(|a, b| a[0].total_cmp(&b[0]).then(a[1].total_cmp(&b[1])));
+    p.dedup_by(|a, b| (a[0] - b[0]).abs() < 1e-4 && (a[1] - b[1]).abs() < 1e-4);
+    if p.len() < 3 {
+        return None;
+    }
+    // Andrew : la chaîne du bas, puis celle du haut, sens trigonométrique
+    let tourne = |o: [f32; 2], a: [f32; 2], b: [f32; 2]| (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+    let mut h: Vec<[f32; 2]> = Vec::with_capacity(p.len() * 2);
+    for passe in 0..2 {
+        let debut = h.len();
+        let l: Box<dyn Iterator<Item = &[f32; 2]>> = if passe == 0 { Box::new(p.iter()) } else { Box::new(p.iter().rev()) };
+        for &q in l {
+            while h.len() >= debut + 2 && tourne(h[h.len() - 2], h[h.len() - 1], q) <= 1e-6 {
+                h.pop();
+            }
+            h.push(q);
+        }
+        h.pop();
+    }
+    if h.len() < 3 || crate::reel::aire(&h).abs() < 0.01 {
+        return None;
+    }
+    let haut = d.boite.1[1].max(0.5);
+    Some(crate::regions::Forme { contour: h, pied: 0.0, egout: haut, faitage: haut, toit: crate::toits::PLAT, axe: 0.0, murs: base.murs, couverture: base.couverture })
+}
+
 /// Le tampon où une définition range ses données (celui de sa première partie).
 pub fn tampon(def: &J) -> Option<usize> {
     let p = def.get("parties")?.liste()?.first()?;
@@ -376,5 +407,19 @@ mod tests {
         be.detail = Some(crate::regions::Detail::new("def-bat-7".into(), r, false));
         let d2 = crate::catalogue::decoder_glb(&glb(&be), Some(false)).unwrap();
         assert_eq!(d2.triangles.len(), d.triangles.len());
+        // Son emprise : le rectangle de 12 × 10 m, à plat au faîtage
+        let f = forme_du_modele(&d, &bt.forme).unwrap();
+        assert_eq!(f.contour.len(), 4, "{:?}", f.contour);
+        assert!((crate::reel::aire(&f.contour).abs() - 120.0).abs() < 0.01);
+        assert!((f.faitage - 8.0).abs() < 1e-3 && f.toit == crate::toits::PLAT);
+        // Enrichi puis revenu au procédural : la forme d'avant revient
+        let mut x = bt.clone();
+        x.enrichir("def-bat-7".into(), Arc::new(d), true, None);
+        assert_eq!(x.forme.contour.len(), 4);
+        assert_eq!(x.detail.as_ref().and_then(|d| d.avant.clone()), Some(bt.forme.clone()));
+        let p = x.params_definition();
+        assert!(p.get("avant").is_some());
+        x.desenrichir();
+        assert_eq!(x.forme, bt.forme);
     }
 }

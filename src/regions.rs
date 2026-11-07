@@ -113,6 +113,47 @@ const TOITS: [&str; 4] = ["plat", "deux_pans", "croupe", "appentis"];
 // ---------------------------------------------------------------------------------------
 // La région
 
+impl Forme {
+    /// Lue des paramètres du générateur `batiment`.
+    pub fn lire(params: &J) -> Option<Forme> {
+        let contour: Vec<[f32; 2]> = params.get("contour").and_then(J::liste).unwrap_or(&[]).iter().filter_map(|q| q.nombres::<2>()).map(|q| [q[0] as f32, q[1] as f32]).collect();
+        if contour.len() < 3 {
+            return None;
+        }
+        let faitage = f(params.get("faitage")).unwrap_or(3.0);
+        let (m, c) = crate::reel::teintes_bati(crate::reel::MAISON);
+        Some(Forme {
+            contour,
+            pied: f(params.get("pied")).unwrap_or(0.0),
+            egout: f(params.get("egout")).unwrap_or(faitage),
+            faitage,
+            toit: params.get("toit").and_then(J::txt).and_then(|t| TOITS.iter().position(|x| *x == t)).unwrap_or(0) as u8,
+            axe: f(params.get("axe")).unwrap_or(0.0),
+            murs: lire_couleur(params.get("murs")).unwrap_or(m),
+            couverture: lire_couleur(params.get("couverture")).unwrap_or(c),
+        })
+    }
+
+    /// Les paramètres du générateur `batiment` ; partant des anciens, les clés inconnues
+    /// restent.
+    pub fn params(&self, anciens: Option<&J>) -> J {
+        let f = self;
+        let mut params = match anciens {
+            Some(J::Objet(p)) => p.clone(),
+            _ => Vec::new(),
+        };
+        mettre(&mut params, "contour", Some(J::Liste(f.contour.iter().map(|p| liste(p)).collect())));
+        mettre(&mut params, "pied", Some(num(f.pied as f64)));
+        mettre(&mut params, "egout", Some(num(f.egout as f64)));
+        mettre(&mut params, "faitage", Some(num(f.faitage as f64)));
+        mettre(&mut params, "toit", Some(txt(TOITS.get(f.toit as usize).unwrap_or(&"plat"))));
+        mettre(&mut params, "axe", Some(n4(f.axe)));
+        mettre(&mut params, "murs", Some(couleur(f.murs)));
+        mettre(&mut params, "couverture", Some(couleur(f.couverture)));
+        J::Objet(params)
+    }
+}
+
 /// La forme d'un bâtiment dans le repère de son instance : les paramètres du générateur
 /// `batiment` (hauteurs depuis la position, contour autour d'elle).
 #[derive(Clone, Debug, PartialEq)]
@@ -159,6 +200,8 @@ pub struct Detail {
     pub cle: String,
     /// Pas encore écrite dans la région.
     pub neuve: bool,
+    /// Sa forme procédurale d'avant l'enrichissement.
+    pub avant: Option<Forme>,
 }
 
 impl Detail {
@@ -170,7 +213,7 @@ impl Detail {
             x.to_bits().hash(&mut h);
         }
         modele.materiaux.iter().for_each(|m| m.source.as_ref().map(|s| s.len()).hash(&mut h));
-        Detail { cle: format!("def/{def}/{:016x}", h.finish()), def, modele, neuve }
+        Detail { cle: format!("def/{def}/{:016x}", h.finish()), def, modele, neuve, avant: None }
     }
 }
 
@@ -321,20 +364,40 @@ impl Bati {
     /// Les paramètres du générateur `batiment` ; partant des anciens, les clés inconnues
     /// restent.
     pub fn params(&self, anciens: Option<&J>) -> J {
-        let f = &self.forme;
-        let mut params = match anciens {
-            Some(J::Objet(p)) => p.clone(),
+        self.forme.params(anciens)
+    }
+
+    /// Les paramètres du premier niveau de sa définition : sa forme tirée du modèle, et
+    /// sa forme procédurale d'avant (`avant`), pour y revenir.
+    pub fn params_definition(&self) -> J {
+        let mut p = match self.forme.params(None) {
+            J::Objet(o) => o,
             _ => Vec::new(),
         };
-        mettre(&mut params, "contour", Some(J::Liste(f.contour.iter().map(|p| liste(p)).collect())));
-        mettre(&mut params, "pied", Some(num(f.pied as f64)));
-        mettre(&mut params, "egout", Some(num(f.egout as f64)));
-        mettre(&mut params, "faitage", Some(num(f.faitage as f64)));
-        mettre(&mut params, "toit", Some(txt(TOITS.get(f.toit as usize).unwrap_or(&"plat"))));
-        mettre(&mut params, "axe", Some(n4(f.axe)));
-        mettre(&mut params, "murs", Some(couleur(f.murs)));
-        mettre(&mut params, "couverture", Some(couleur(f.couverture)));
-        J::Objet(params)
+        mettre(&mut p, "avant", self.detail.as_ref().and_then(|d| d.avant.as_ref()).map(|a| a.params(None)));
+        J::Objet(p)
+    }
+
+    /// L'enrichit du modèle `modele` (définition `def`) : sa forme devient l'emprise du
+    /// modèle, sa forme procédurale d'avant est gardée (`avant`, sinon celle d'avant un
+    /// enrichissement précédent, sinon l'actuelle).
+    pub fn enrichir(&mut self, def: String, modele: Arc<crate::catalogue::Decor>, neuve: bool, avant: Option<Forme>) {
+        let avant = avant.or_else(|| self.detail.as_ref().and_then(|d| d.avant.clone())).unwrap_or_else(|| self.forme.clone());
+        if let Some(f) = crate::enrichi::forme_du_modele(&modele, &avant) {
+            self.forme = f;
+        }
+        let mut d = Detail::new(def, modele, neuve);
+        d.avant = Some(avant);
+        self.detail = Some(d);
+        self.refaire();
+    }
+
+    /// Revient au procédural : sa forme d'avant l'enrichissement.
+    pub fn desenrichir(&mut self) {
+        if let Some(f) = self.detail.take().and_then(|d| d.avant) {
+            self.forme = f;
+        }
+        self.refaire();
     }
 
     /// Relu d'une instance `batiment` ; rien si ce n'en est pas une.
@@ -351,22 +414,7 @@ impl Bati {
     pub fn depuis_params(i: &J, params: &J) -> Option<Bati> {
         let t = i.get("tuile")?.nombres::<2>()?;
         let pos = i.get("position")?.nombres::<3>()?;
-        let contour: Vec<[f32; 2]> = params.get("contour").and_then(J::liste).unwrap_or(&[]).iter().filter_map(|q| q.nombres::<2>()).map(|q| [q[0] as f32, q[1] as f32]).collect();
-        if contour.len() < 3 {
-            return None;
-        }
-        let faitage = f(params.get("faitage")).unwrap_or(3.0);
-        let (m, c) = crate::reel::teintes_bati(crate::reel::MAISON);
-        let forme = Forme {
-            contour,
-            pied: f(params.get("pied")).unwrap_or(0.0),
-            egout: f(params.get("egout")).unwrap_or(faitage),
-            faitage,
-            toit: params.get("toit").and_then(J::txt).and_then(|t| TOITS.iter().position(|x| *x == t)).unwrap_or(0) as u8,
-            axe: f(params.get("axe")).unwrap_or(0.0),
-            murs: lire_couleur(params.get("murs")).unwrap_or(m),
-            couverture: lire_couleur(params.get("couverture")).unwrap_or(c),
-        };
+        let forme = Forme::lire(params)?;
         let cap = i.get("rotation").and_then(|r| r.nombres::<4>()).map_or(0.0, |q| 2.0 * (q[1] as f32).atan2(q[3] as f32));
         let mut b = Bati::new(i.get("id").and_then(J::txt).unwrap_or("").to_string(), (t[0] as i32, t[1] as i32), pos.map(|x| x as f32), cap, forme, i.get("provenance").and_then(J::txt).unwrap_or("").to_string());
         b.retouche = i.get("retouche").and_then(J::bool) == Some(true);
@@ -701,7 +749,8 @@ impl Region {
                 let lu = definitions.iter().find(|x| x.get("id").and_then(J::txt) == Some(d)).and_then(|x| crate::enrichi::lire(s, x));
                 if let Some((params, modele)) = lu {
                     if let Some(mut b) = Bati::depuis_params(i, &params) {
-                        b.detail = Some(Detail::new(d.to_string(), modele, false));
+                        let avant = params.get("avant").and_then(Forme::lire);
+                        b.enrichir(d.to_string(), modele, false, avant);
                         batiments.push(b);
                     }
                 }
@@ -1099,8 +1148,7 @@ impl Regions {
             }
             if let Some(d) = b.detail.as_ref().filter(|d| d.neuve && !b.a_oter()) {
                 let k = (2..s.tampons.len()).find(|&k| s.tampons[k].is_empty()).unwrap_or(s.tampons.len().max(2));
-                let anciens = instances.iter().find(|i| i.get("id").and_then(J::txt) == Some(&b.id)).and_then(|i| i.get("procedural")).and_then(|p| p.get("params"));
-                defs.push(crate::enrichi::ecrire(&mut s, k, &d.def, &b.id, b.params(anciens), &d.modele));
+                defs.push(crate::enrichi::ecrire(&mut s, k, &d.def, &b.id, b.params_definition(), &d.modele));
                 changees = true;
             }
         }
@@ -1310,7 +1358,10 @@ fn regenerer_region(c: &Campagne, chemin: &Path, ri: i32, rj: i32) -> Result<(us
             gardees.push(i.clone());
             let b = match i.get("definition").and_then(J::txt) {
                 Some(d) => definitions.iter().find(|x| x.get("id").and_then(J::txt) == Some(d)).and_then(|x| crate::enrichi::lire(a, x)).and_then(|(params, modele)| {
-                    let b = Bati::depuis_params(i, &params);
+                    let b = Bati::depuis_params(i, &params).map(|mut b| {
+                        b.enrichir(d.to_string(), modele.clone(), false, params.get("avant").and_then(Forme::lire));
+                        b
+                    });
                     defs.push((d.to_string(), params, modele));
                     b
                 }),

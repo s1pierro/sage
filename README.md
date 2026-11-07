@@ -6,8 +6,18 @@ Il vise un monde ouvert, avec d'autres valeurs que la violence.
 
 ![Le mannequin marche dans le décor de S.A.G.E.](docs/apercu.png)
 
-**Télécharger l'APK** : [sage-0.31.apk](https://github.com/s1pierro/sage/releases/download/v0.31/sage-0.31.apk)
+**Télécharger l'APK** : [sage-0.32.apk](https://github.com/s1pierro/sage/releases/download/v0.32/sage-0.32.apk)
 (Android 8 ou plus récent, arm64).
+
+## Version 0.32 : l'emprise tirée du modèle
+
+- Un bâtiment enrichi d'un `.glb` prend la forme de son modèle : son contour est
+  l'emprise du modèle vu du dessus (son enveloppe), sa hauteur celle du modèle. Le
+  choisir au toucher, écarter les arbres, son bloc lointain et la place qu'il garde à
+  la régénération suivent le modèle, et non plus l'ancien contour.
+- Sa forme procédurale d'avant est gardée dans sa définition : « Revenir au
+  procédural » la rend. Les bâtiments enrichis avant la 0.32 prennent l'emprise de
+  leur modèle à la lecture.
 
 ## Version 0.31 : les arbres s'écartent des bâtiments
 

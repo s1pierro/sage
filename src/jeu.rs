@@ -582,7 +582,7 @@ impl App {
         };
         let (n, manque) = (d.triangles.len(), d.manquantes);
         let mut x = avant.clone();
-        x.detail = Some(crate::regions::Detail::new(format!("def-{ident}"), Arc::new(d), true));
+        x.enrichir(format!("def-{ident}"), Arc::new(d), true, None);
         x.retouche = true;
         m.retoucher(x);
         self.tuiles.refaire_bati(&mut self.monde, &mut self.maillages, avant.tuile);

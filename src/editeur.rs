@@ -1068,7 +1068,7 @@ impl Editeur {
             Some(1) => self.enrichir_bati = Some(((ri, rj), bt.id.clone())),
             Some(_) => {
                 let mut x = bt.clone();
-                x.detail = None;
+                x.desenrichir();
                 self.retoucher_bati(m, monde, maillages, tuiles, &bt, x, 0, "le retour au procédural");
                 return;
             }

@@ -290,7 +290,9 @@ montre pas, et ses paramètres sont gardés.
   `n0` (procédural, `jusqua` 3000) et `n1` (les parties du modèle importé, `jusqua`
   400), et `"collision": { "niveau": "n1" }`. Ses parties sont nommées `p0`, `p1`…, ses
   matériaux `m0`, `m1`… (`couleur`, `opacite`, `deux_cotes`, `texture`), ses textures
-  `t0`… Toutes ses données sont dans un tampon à elle (à partir du tampon 2), qui se vide
+  `t0`… Le niveau `n0` porte l'emprise du modèle (l'enveloppe convexe de ses sommets
+  vue du dessus, toit plat au plus haut du modèle) et, sous `avant`, les paramètres
+  procéduraux d'avant l'enrichissement, pour y revenir. Toutes ses données sont dans un tampon à elle (à partir du tampon 2), qui se vide
   quand la définition est remplacée ou ôtée. L'instance porte alors `definition` au lieu
   de `procedural` ; revenir au procédural fait l'inverse.
 - **`tuile`** : les indices (i, j) de la tuile de 64 m où se trouve l'instance, qui peuvent

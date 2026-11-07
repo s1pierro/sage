@@ -1050,3 +1050,17 @@ sur une grille qui déborde d'un point).
   la tuile de son centre.
 - La régénération écarte de la même façon les arbres refaits (`ECART_ARBRES`).
 
+## 31. L'emprise tirée du modèle (0.32)
+
+- **`enrichi::forme_du_modele(decor, base)`** : l'enveloppe convexe des sommets en
+  (x, z) (Andrew), pied à 0, toit plat au haut de la boîte, couleurs de `base`.
+- **`Bati::enrichir(def, modele, neuve, avant)`** : la forme devient celle du modèle,
+  `Detail::avant` garde la forme procédurale (celle donnée, sinon celle d'un
+  enrichissement précédent, sinon l'actuelle) ; `desenrichir` la rend.
+  `params_definition` écrit l'emprise et `avant` dans le niveau `n0`.
+- `Region::depuis` et la régénération enrichissent les bâtiments relus de la même
+  façon : l'emprise se recalcule à chaque lecture, `avant` vient de `n0` (ou, pour une
+  définition écrite avant la 0.32, de ses paramètres).
+- `Forme::lire` et `Forme::params` lisent et écrivent les paramètres du générateur
+  `batiment`, pour l'instance comme pour `avant`.
+
