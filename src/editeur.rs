@@ -268,9 +268,14 @@ impl Editeur {
             Retour::Bati { avant, .. } => {
                 let Some(m) = self.regions.clone() else { return };
                 let k = (crate::regions::de_tuile(avant.tuile.0), crate::regions::de_tuile(avant.tuile.1));
-                let ici = m.batiment(k.0, k.1, &avant.id).map(|b| b.tuile);
+                let mut l = m.batiment(k.0, k.1, &avant.id).map(|b| crate::regions::tuiles_de(&b)).unwrap_or_default();
+                for t in crate::regions::tuiles_de(&avant) {
+                    if !l.contains(&t) {
+                        l.push(t);
+                    }
+                }
                 m.retoucher(avant.clone());
-                for t in ici.into_iter().chain(std::iter::once(avant.tuile)) {
+                for t in l {
                     tuiles.refaire_bati(monde, maillages, t);
                 }
                 self.bati = (!avant.masquee).then(|| (k, avant.id.clone()));
@@ -1000,11 +1005,16 @@ impl Editeur {
         }
         x.retouche = true;
         x.refaire();
-        let (t0, t1) = (avant.tuile, x.tuile);
+        // Les tuiles qu'il recouvrait et qu'il recouvre : ses murs, et les arbres écartés
+        let mut l = crate::regions::tuiles_de(avant);
+        for t in crate::regions::tuiles_de(&x) {
+            if !l.contains(&t) {
+                l.push(t);
+            }
+        }
         m.retoucher(x);
-        tuiles.refaire_bati(monde, maillages, t0);
-        if t1 != t0 {
-            tuiles.refaire_bati(monde, maillages, t1);
+        for t in l {
+            tuiles.refaire_bati(monde, maillages, t);
         }
     }
 

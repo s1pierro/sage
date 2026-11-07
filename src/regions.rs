@@ -780,7 +780,7 @@ impl Region {
     /// Les bâtiments, les ponts et les arbres de la tuile (i, j), dans son repère ; les
     /// bâtiments retouchés (`retouches`, par identifiant) à la place des leurs.
     pub fn bati(&self, i: i32, j: i32, retouches: Option<&HashMap<String, Bati>>) -> Option<(Vec<f32>, Vec<[[f32; 3]; 3]>)> {
-        let rg = self.rang(i, j)?;
+        self.rang(i, j)?;
         let (ox, oz) = (i as f32 * TAILLE, j as f32 * TAILLE);
         let (mut v, mut t) = (Vec::new(), Vec::new());
         for p in self.ponts.iter().filter(|p| p.tuile == (i, j)) {
@@ -794,11 +794,37 @@ impl Region {
         for b in retouches.into_iter().flat_map(|r| r.values()).filter(|b| b.tuile == (i, j) && !b.masquee && b.detail.is_none()) {
             b.monter(i, j, &mut v, &mut t);
         }
-        let [d, n] = self.par_tuile[rg];
-        let (va, ta) = crate::vegetation::monter(&self.arbres[d as usize..(d + n) as usize], i, j);
+        let (va, ta) = crate::vegetation::monter(&self.arbres_libres(i, j, retouches), i, j);
         v.extend(va);
         t.extend(ta);
         (!v.is_empty()).then_some((v, t))
+    }
+
+    /// Les arbres de la tuile (i, j), sauf ceux qu'un bâtiment debout recouvre (retouches
+    /// comprises) : un bâtiment posé, déplacé ou agrandi les écarte aussitôt.
+    pub fn arbres_libres(&self, i: i32, j: i32, retouches: Option<&HashMap<String, Bati>>) -> Vec<Arbre> {
+        let Some(rg) = self.rang(i, j) else { return Vec::new() };
+        let [d, n] = self.par_tuile[rg];
+        let arbres = &self.arbres[d as usize..(d + n) as usize];
+        // Les bâtiments dont l'emprise touche la tuile
+        let (x0, z0) = (i as f32 * TAILLE - ECART_ARBRES, j as f32 * TAILLE - ECART_ARBRES);
+        let (x1, z1) = (x0 + TAILLE + 2.0 * ECART_ARBRES, z0 + TAILLE + 2.0 * ECART_ARBRES);
+        let retouche = |id: &str| retouches.is_some_and(|r| r.contains_key(id));
+        let proches: Vec<&Bati> = self
+            .batiments
+            .iter()
+            .filter(|b| !retouche(&b.id))
+            .chain(retouches.into_iter().flat_map(|r| r.values()))
+            .filter(|b| !b.masquee)
+            .filter(|b| {
+                let c = &b.b.contour;
+                c.iter().any(|p| p[0] >= x0) && c.iter().any(|p| p[0] <= x1) && c.iter().any(|p| p[1] >= z0) && c.iter().any(|p| p[1] <= z1)
+            })
+            .collect();
+        if proches.is_empty() {
+            return arbres.to_vec();
+        }
+        arbres.iter().filter(|a| !proches.iter().any(|b| b.touche(a.pos[0], a.pos[2], ECART_ARBRES))).copied().collect()
     }
 
     /// Les bâtiments enrichis de la tuile (i, j), retouches comprises.
@@ -807,6 +833,31 @@ impl Region {
         let a = self.batiments.iter().filter(|b| !retouche(&b.id));
         a.chain(retouches.into_iter().flat_map(|r| r.values())).filter(|b| b.tuile == (i, j) && !b.masquee && b.detail.is_some()).cloned().collect()
     }
+}
+
+/// Un arbre plus près que cela d'un mur ne pousse pas.
+pub const ECART_ARBRES: f32 = 1.0;
+
+/// Les tuiles que recouvre l'emprise du bâtiment (à `ECART_ARBRES` près) : celles à
+/// refaire quand il change.
+pub fn tuiles_de(b: &Bati) -> Vec<(i32, i32)> {
+    let c = &b.b.contour;
+    if c.is_empty() {
+        return vec![b.tuile];
+    }
+    let t = |v: f32| ((v / TAILLE).floor()) as i32;
+    let (mut lo, mut hi) = ([f32::MAX; 2], [f32::MIN; 2]);
+    for p in c {
+        for k in 0..2 {
+            lo[k] = lo[k].min(p[k]);
+            hi[k] = hi[k].max(p[k]);
+        }
+    }
+    let mut l: Vec<(i32, i32)> = (t(lo[1] - ECART_ARBRES)..=t(hi[1] + ECART_ARBRES)).flat_map(|j| (t(lo[0] - ECART_ARBRES)..=t(hi[0] + ECART_ARBRES)).map(move |i| (i, j))).collect();
+    if !l.contains(&b.tuile) {
+        l.push(b.tuile);
+    }
+    l
 }
 
 /// Les blocs lointains de ces bâtiments (ceux qui ne sont pas démolis).
@@ -1281,7 +1332,7 @@ fn regenerer_region(c: &Campagne, chemin: &Path, ri: i32, rj: i32) -> Result<(us
         let (mut arbres, mut par_tuile) = (Vec::with_capacity(region.arbres.len()), Vec::with_capacity(region.par_tuile.len()));
         for &[d, n] in &region.par_tuile {
             let debut = arbres.len() as u32;
-            arbres.extend(region.arbres[d as usize..(d + n) as usize].iter().filter(|a| !debout.iter().any(|b| b.touche(a.pos[0], a.pos[2], 0.5))).cloned());
+            arbres.extend(region.arbres[d as usize..(d + n) as usize].iter().filter(|a| !debout.iter().any(|b| b.touche(a.pos[0], a.pos[2], ECART_ARBRES))).cloned());
             par_tuile.push([debut, arbres.len() as u32 - debut]);
         }
         region.arbres = arbres;
@@ -1430,6 +1481,27 @@ mod tests {
         let pont = Route { genre: ROUTE, largeur: 5.0, points: vec![[300.0, 300.0, 9.0], [360.0, 300.0, 9.0]] };
         let m = cote_sol(n);
         Arc::new(Reel::new("Essai", 49.0, 1.0, 0.0, 0.0, pas, -50.0, &h, &eau, vec![route], vec![maison], vec![pont]).avec_sol(vec![BOIS; m * m]))
+    }
+
+    #[test]
+    fn un_batiment_pose_sur_un_arbre_l_ecarte() {
+        let c = Campagne::reelle(lieu());
+        let reg = Region::materialiser(&c, 0, 0);
+        let rg = reg.par_tuile.iter().position(|t| t[1] > 0).unwrap();
+        let (i, j) = (rg as i32 % TUILES, rg as i32 / TUILES);
+        let avant = reg.arbres_libres(i, j, None);
+        assert_eq!(avant.len(), reg.par_tuile[rg][1] as usize);
+        let a = avant[0];
+        let forme = Forme { contour: vec![[-3.0, -3.0], [3.0, -3.0], [3.0, 3.0], [-3.0, 3.0]], pied: 0.0, egout: 5.0, faitage: 5.0, toit: crate::toits::PLAT, axe: 0.0, murs: [0.8; 3], couverture: [0.5; 3] };
+        let b = Bati::new("main-1".into(), (i, j), [a.pos[0] - i as f32 * TAILLE, a.pos[1], a.pos[2] - j as f32 * TAILLE], 0.0, forme, "main".into());
+        assert!(tuiles_de(&b).contains(&(i, j)));
+        let mut r = HashMap::new();
+        r.insert(b.id.clone(), b.clone());
+        let apres = reg.arbres_libres(i, j, Some(&r));
+        assert!(apres.len() < avant.len() && !apres.contains(&a));
+        // Démoli, il les rend
+        r.get_mut("main-1").unwrap().masquee = true;
+        assert_eq!(reg.arbres_libres(i, j, Some(&r)).len(), avant.len());
     }
 
     #[test]

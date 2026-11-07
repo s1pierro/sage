@@ -6,8 +6,16 @@ Il vise un monde ouvert, avec d'autres valeurs que la violence.
 
 ![Le mannequin marche dans le décor de S.A.G.E.](docs/apercu.png)
 
-**Télécharger l'APK** : [sage-0.30.apk](https://github.com/s1pierro/sage/releases/download/v0.30/sage-0.30.apk)
+**Télécharger l'APK** : [sage-0.31.apk](https://github.com/s1pierro/sage/releases/download/v0.31/sage-0.31.apk)
 (Android 8 ou plus récent, arm64).
+
+## Version 0.31 : les arbres s'écartent des bâtiments
+
+- Un bâtiment posé, déplacé, tourné ou agrandi écarte aussitôt les arbres qu'il
+  recouvre (à un mètre de ses murs près) : ils ne se voient plus et n'arrêtent plus le
+  joueur. Démoli ou remis en place, il les rend.
+- Rien ne s'écrit pour cela : les arbres restent dans leur région, et c'est l'emprise
+  des bâtiments debout qui décide, tuile par tuile, de ceux qui poussent.
 
 ## Version 0.30 : de nouveaux bâtiments
 

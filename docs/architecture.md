@@ -1039,3 +1039,14 @@ sur une grille qui déborde d'un point).
   région (ajoutée à la liste) : rien d'autre ne change pour les tuiles, le lointain ou
   la régénération.
 
+## 30. Les arbres s'écartent des bâtiments (0.31)
+
+- **`Region::arbres_libres(i, j, retouches)`** : les arbres de la tuile, moins ceux à
+  moins de `ECART_ARBRES` (1 m) du contour d'un bâtiment debout (de la région ou des
+  retouches) dont l'emprise touche la tuile. `Region::bati` monte ceux-là : le dessin
+  et les collisions suivent.
+- **`tuiles_de(b)`** : les tuiles que recouvre l'emprise d'un bâtiment, marge comprise.
+  `retoucher_bati` et l'annulation refont celles d'avant et d'après, et pas seulement
+  la tuile de son centre.
+- La régénération écarte de la même façon les arbres refaits (`ECART_ARBRES`).
+
