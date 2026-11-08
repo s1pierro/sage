@@ -9,7 +9,7 @@
 use super::depot::{Depot, Fiche};
 use super::entites::{Entite, Lieu, Monde, Rendu};
 use super::objets::{Genre, Objet};
-use super::ressources::{Format, MaillageId, Maillages};
+use super::ressources::{Format, MaillageId, Maillages, Materiau, Partie, TextureId};
 use crate::math;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -203,7 +203,7 @@ pub trait Source: Send {
     /// Les bâtiments de la tuile, s'il y en a, qui ne se retouchent pas : leurs sommets
     /// (format `Statique`, repère de la tuile) et leurs triangles pour les collisions.
     /// Ils viennent toujours de la source, que la tuile soit relue du dépôt ou non.
-    fn bati(&self, _i: i32, _j: i32) -> Option<(Vec<f32>, Vec<[[f32; 3]; 3]>)> {
+    fn bati(&self, _i: i32, _j: i32) -> Option<Bati3d> {
         None
     }
 
@@ -212,6 +212,36 @@ pub trait Source: Send {
     fn enrichis(&self, _i: i32, _j: i32) -> Vec<Enrichi> {
         Vec::new()
     }
+}
+
+/// Le nombre de revêtements (le bitume, les pavés, l'uni sans texture), dans l'ordre de
+/// `Tuiles::revetements`.
+pub const REVETEMENTS: usize = 3;
+
+/// Les volumes fixes d'une tuile (bâtiments, ponts, trottoirs, chaussées, arbres) : leurs
+/// sommets (format `Statique`, repère de la tuile), leurs triangles pour les collisions, et
+/// les surfaces revêtues (format `Texture`), une liste par revêtement.
+#[derive(Default)]
+pub struct Bati3d {
+    pub sommets: Vec<f32>,
+    pub triangles: Vec<[[f32; 3]; 3]>,
+    pub revetus: [Vec<f32>; REVETEMENTS],
+}
+
+impl Bati3d {
+    pub fn vide(&self) -> bool {
+        self.sommets.is_empty() && self.revetus.iter().all(Vec::is_empty)
+    }
+
+    /// Lui-même s'il n'est pas vide.
+    pub fn non_vide(self) -> Option<Bati3d> {
+        (!self.vide()).then_some(self)
+    }
+}
+
+/// L'identifiant de l'entité des revêtements d'une tuile.
+pub fn ident_revetement(i: i32, j: i32) -> String {
+    format!("revetement/{i}/{j}")
 }
 
 /// Un bâtiment enrichi : sa position dans le repère de la tuile, son cap, son modèle et la
@@ -256,6 +286,8 @@ pub struct Chargee {
     pub lue: bool,
     /// Ses bâtiments, s'il y en a.
     pub bati: Option<Entite>,
+    /// Ses surfaces revêtues (trottoirs), s'il y en a.
+    pub revetement: Option<Entite>,
     /// Ses bâtiments enrichis, un par entité.
     pub enrichis: Vec<Entite>,
 }
@@ -285,6 +317,9 @@ pub struct Tuiles {
     /// Les bâtiments enrichis dont le modèle n'est pas encore dans le moteur : l'application
     /// l'installe (ses textures), puis les habille (`habiller`).
     pub a_habiller: Vec<(Entite, Enrichi)>,
+    /// Les textures des revêtements, que l'application installe (sans elles, la couleur
+    /// des sommets seule).
+    pub revetements: [Option<TextureId>; REVETEMENTS],
 }
 
 impl Tuiles {
@@ -308,6 +343,7 @@ impl Tuiles {
             erreur: None,
             retouches: 0,
             a_habiller: Vec::new(),
+            revetements: [None; REVETEMENTS],
         }
     }
 
@@ -338,6 +374,10 @@ impl Tuiles {
             monde.detruire(c.terrain);
             if let Some(b) = c.bati {
                 maillages.ote(&ident_bati(k.0, k.1));
+                monde.detruire(b);
+            }
+            if let Some(b) = c.revetement {
+                maillages.ote(&ident_revetement(k.0, k.1));
                 monde.detruire(b);
             }
             for e in c.enrichis {
@@ -415,16 +455,53 @@ impl Tuiles {
             placer(monde, maillages, e, el.objet, Lieu::en(p, el.cap));
         }
         // Les bâtiments : une entité de plus, son maillage et ses murs
-        let bati = self.source.bati(i, j).map(|(v, tri)| {
-            let b = monde.creer(&ident_bati(i, j));
-            let k = maillages.mettre(&ident_bati(i, j), Format::Statique, Arc::new(v));
-            monde.lieu.mettre(b, Lieu::en(o, 0.0));
-            monde.rendu.mettre(b, Rendu { maillage: k, local: math::scale(1.0) });
-            monde.obstacles.mettre(b, vec![super::physique::Forme::Triangles(Arc::new(super::physique::Triangles::new(tri)))]);
-            b
-        });
+        let (mut bati, mut revetement) = (None, None);
+        if let Some(b) = self.source.bati(i, j) {
+            self.poser_bati(monde, maillages, (i, j), o, b, &mut bati, &mut revetement);
+        }
         let enrichis = self.poser_enrichis(monde, maillages, (i, j));
-        self.chargees.insert((i, j), Chargee { terrain: t, couleurs: Arc::new(c.couleurs), proche, loin, lue, bati, enrichis });
+        self.chargees.insert((i, j), Chargee { terrain: t, couleurs: Arc::new(c.couleurs), proche, loin, lue, bati, revetement, enrichis });
+    }
+
+    /// Pose (ou refait, ou ôte s'ils sont vides) les volumes fixes de la tuile `k` : une
+    /// entité pour les sommets colorés, avec les murs, une autre pour les revêtements.
+    #[allow(clippy::too_many_arguments)]
+    fn poser_bati(&self, monde: &mut Monde, maillages: &mut Maillages, k: (i32, i32), o: [f32; 3], b: Bati3d, bati: &mut Option<Entite>, revetement: &mut Option<Entite>) {
+        let id = ident_bati(k.0, k.1);
+        if b.sommets.is_empty() && b.triangles.is_empty() {
+            if let Some(e) = bati.take() {
+                maillages.ote(&id);
+                monde.detruire(e);
+            }
+        } else {
+            let e = *bati.get_or_insert_with(|| monde.creer(&id));
+            let m = maillages.mettre(&id, Format::Statique, Arc::new(b.sommets));
+            monde.lieu.mettre(e, Lieu::en(o, 0.0));
+            monde.rendu.mettre(e, Rendu { maillage: m, local: math::scale(1.0) });
+            monde.obstacles.mettre(e, vec![super::physique::Forme::Triangles(Arc::new(super::physique::Triangles::new(b.triangles)))]);
+        }
+        let id = ident_revetement(k.0, k.1);
+        if b.revetus.iter().all(Vec::is_empty) {
+            if let Some(e) = revetement.take() {
+                maillages.ote(&id);
+                monde.detruire(e);
+            }
+            return;
+        }
+        let f = Format::Texture.flottants();
+        let (mut tout, mut parties) = (Vec::new(), Vec::new());
+        for (r, v) in b.revetus.into_iter().enumerate() {
+            if v.is_empty() {
+                continue;
+            }
+            let premier = (tout.len() / f) as u32;
+            parties.push(Partie { premier, nombre: (v.len() / f) as u32, materiau: Materiau { texture: self.revetements[r], ..Materiau::default() } });
+            tout.extend(v);
+        }
+        let e = *revetement.get_or_insert_with(|| monde.creer(&id));
+        let m = maillages.mettre_parties(&id, Format::Texture, Arc::new(tout), parties);
+        monde.lieu.mettre(e, Lieu::en(o, 0.0));
+        monde.rendu.mettre(e, Rendu { maillage: m, local: math::scale(1.0) });
     }
 
     /// Les bâtiments enrichis de la tuile `k` : leurs entités, leurs murs ; habillées tout
@@ -595,6 +672,10 @@ impl Tuiles {
                 maillages.ote(&ident_bati(k.0, k.1));
                 monde.detruire(b);
             }
+            if let Some(b) = c.revetement {
+                maillages.ote(&ident_revetement(k.0, k.1));
+                monde.detruire(b);
+            }
             for e in c.enrichis {
                 monde.detruire(e);
             }
@@ -638,25 +719,13 @@ impl Tuiles {
         if !self.chargees.contains_key(&k) {
             return;
         }
-        let neuf = self.source.bati(k.0, k.1);
+        let neuf = self.source.bati(k.0, k.1).unwrap_or_default();
         let o = Tuiles::coin(monde, k);
-        let id = ident_bati(k.0, k.1);
         let Some(c) = self.chargees.get_mut(&k) else { return };
-        match neuf {
-            Some((v, tri)) => {
-                let b = *c.bati.get_or_insert_with(|| monde.creer(&id));
-                let m = maillages.mettre(&id, Format::Statique, Arc::new(v));
-                monde.lieu.mettre(b, Lieu::en(o, 0.0));
-                monde.rendu.mettre(b, Rendu { maillage: m, local: math::scale(1.0) });
-                monde.obstacles.mettre(b, vec![super::physique::Forme::Triangles(Arc::new(super::physique::Triangles::new(tri)))]);
-            }
-            None => {
-                if let Some(b) = c.bati.take() {
-                    maillages.ote(&id);
-                    monde.detruire(b);
-                }
-            }
-        }
+        let (mut bati, mut revetement) = (c.bati.take(), c.revetement.take());
+        self.poser_bati(monde, maillages, k, o, neuf, &mut bati, &mut revetement);
+        let Some(c) = self.chargees.get_mut(&k) else { return };
+        (c.bati, c.revetement) = (bati, revetement);
         for e in std::mem::take(&mut c.enrichis) {
             monde.detruire(e);
         }

@@ -1064,3 +1064,256 @@ sur une grille qui déborde d'un point).
 - `Forme::lire` et `Forme::params` lisent et écrivent les paramètres du générateur
   `batiment`, pour l'instance comme pour `avant`.
 
+## 32. Les trottoirs (0.33)
+
+- **`trottoirs::monter(lieu, i, j, v, t)`** : pour chaque route de genre `GRANDE` à
+  `SERVICE` qui approche la tuile, des points de l'axe tous les 2 m ; de chaque côté,
+  au bord de la chaussée, en quartier (`Lieu::urbain`) : la largeur jusqu'à la première
+  façade en travers (`facade`, rayon contre les contours, `PORTEE` 12 m), arrêtée par
+  une autre chaussée ; sans façade, tirée entre deux façades à moins de 20 m, sinon
+  `LARGEUR` (2 m) ; lissée sur trois points. Chaque dalle (d'un point au suivant) va à
+  la tuile du milieu de sa bordure ; ses colonnes de 2 m au plus, à 15 cm au-dessus du
+  sol ou de la chaussée, s'arrêtent sur une chaussée ou dans l'eau. Bordure côté rue,
+  chant côté façade jusque sous le sol.
+- **`trottoirs::Lieu`** : routes et index, contours des bâtiments debout près de la
+  tuile, et trois fonctions (quartier, sol, eau). `Region::trottoirs` les tire de la
+  région (grilles de l'occupation et de l'eau, retouches comprises), `Reel::bati` du
+  lieu réel avec les mêmes grilles : les deux se voient pareil.
+- Rien ne s'écrit : `Region::bati` monte les trottoirs avec les bâtiments, et
+  `retoucher_bati` refait déjà les tuiles qu'un bâtiment recouvre.
+
+## 33. L'heure du jour (0.34)
+
+`Affichage.heure` (heure solaire, au quart d'heure, gardée dans `affichage.json`) donne
+chaque image `Soleil::a_heure(heure, lat, centre, rayon)` (`moteur/scene.rs`). La
+direction vient de `course(heure, lat, decl)` : angle horaire de 15° par heure, la
+déclinaison du solstice d'été (`DECLINAISON`), en x est, y haut, z sud. La latitude est
+celle du monde matérialisé (`sources.json`, `lieu.lat`) ou du lieu réel, sinon
+`LATITUDE` (Rouen). Le `Soleil` porte en plus `lumiere` (couleur et force de la lumière
+directe, dorée sous 25°, nulle sous l'horizon), `ambiance` (la diffuse, bleutée la nuit)
+et `ciel` (jour, crépuscule, nuit) : le rendu les passe en `u_lumiere`, `u_ambiance` et
+`u_ciel`, et efface le fond à la couleur du ciel. Sous 4° de hauteur, la direction reste
+à 4° pour la carte d'ombre, dont la profondeur ne suivrait pas des ombres plus longues.
+
+## 34. Le terrassement des routes (0.35)
+
+`src/terrassement.rs`, appliqué par `Reel::indexe` à chaque lecture du lieu (les routes
+et les ponts lus se gardent à part, `routes_lues` et `ponts_lus`, et s'écrivent seuls) :
+
+- `profiler` : une moyenne glissante sur cinq points (bouts tenus), puis les carrefours
+  (points partagés au centimètre) prennent la moyenne de leurs routes, ou la hauteur du
+  bout de pont qui s'y trouve ; l'écart se répartit en ligne droite (à l'abscisse) entre
+  deux carrefours d'une route, et s'efface sur 30 m vers un bout libre.
+- `sol` (via `Reel::hauteur`, avec `index_talus`, l'index des routes élargi de la
+  plateforme et de la portée) : pour chaque route proche, son point le plus proche ; sur
+  une plateforme (`plateforme(genre)` de part et d'autre de la chaussée), la plus basse ;
+  sinon, hors de l'eau, les talus des routes de la plus haute à la plus basse, chacun
+  bornant le sol à `PENTE × e` de sa chaussée (`e` : la distance à la plateforme), fondu
+  dans le relief sur les 5 derniers mètres de `PORTEE`.
+- `travees` : les segments de routes différentes qui se coupent hors de leurs bouts, à
+  plus de `SEUIL` d'écart (et pas trop biais) ; la plus haute reçoit un tablier le long
+  de son axe, sur la plateforme de l'autre plus un mètre, ajouté aux ponts (monté,
+  matérialisé et heurté comme eux).
+- `Reel::assis` descend le pied d'un bâtiment sous le sol terrassé de son contour (à la
+  matérialisation et dans `Reel::bati`).
+
+Les régions gardent le relief calculé à leur matérialisation : le terrassement n'y entre
+qu'en les régénérant.
+
+## 35. Les chaussées (0.36)
+
+`src/chaussees.rs`, appelé avec le `trottoirs::Lieu` de la tuile (`Region::trottoirs`,
+`Reel::bati`) : sur une grille d'un mètre couvrant la tuile, chaque nœud prend la route
+(genre ≤ `SERVICE`) dont le bord est le plus proche (`hors`, négatif dessus), sa hauteur
+et son genre ; un nœud au-delà du bout d'une route l'ignore (la chaussée s'y coupe net).
+Deux couches par carrés qui marchent : la chaussée (`hors < 0`, 3 cm au-dessus de la
+plateforme, couleur du genre) et l'accotement (`hors < ACCOTEMENT`, 1 cm, dessous), dont
+les bords reçoivent un chant jusqu'à 30 cm sous le sol. Une maille dont les nœuds
+dedans s'écartent de plus de 50 cm en hauteur (croisement à deux niveaux) reste vide.
+Le dessus des deux couches entre dans les collisions (0.38 : le sol dessous ne suit pas
+toujours la chaussée) ; les chants non.
+
+## 36. Les procédures réglables (0.37)
+
+`src/procedures.rs` : `Procedures` (chaussées, accotements, trottoirs, terrassement),
+gardées par `Reglages` dans `reglages/procedures.json` et rendues courantes dans un
+`RwLock` statique que les procédures lisent (`courantes()`), y compris dans les fils de
+chargement et de régénération (pas dans les tests, qui gardent les valeurs d'origine).
+`panneau` dessine l'onglet et rend un `Changement` : les tuiles chargées se refont 0,4 s
+après le dernier changement (`App::procedures_a_refaire`, `Tuiles::refaire_bati`) ; un
+changement du terrassement le dit seulement, il entre dans les régions régénérées.
+
+## 37. Le mode de terrassement (0.38)
+
+`Procedures::terrassement` : `TALUS` (`terrassement::sol`, et les travées dans
+`Reel::indexe`), `FONDU` (l'aplanissement d'avant la 0.35, par `Reel::route` et
+`epaule`) ou `AUCUN` (`Reel::relief`). Un changement du terrassement lève
+`Reglages::a_regenerer` (gardé dans `procedures.json`) ; l'onglet propose alors la
+régénération (`Changement::regenerer` : 0, 1, ou -1 pour toute la carte, passé à
+`App::lancer_fragment`), et `suivre_fragment` baisse le drapeau quand elle a réussi.
+
+## 38. Les abords des bâtiments (0.39)
+
+`terrassement::abords(routes, contours, distance, talus)`, appelé par `Reel::indexe` en
+mode talus avec `Procedures::abords` : pour chaque contour, la rue (genre ≤ `SERVICE`)
+dont le bord est le plus proche d'un de ses coins ; à moins de `distance` (et pas
+dessus), un `Abord` : l'enveloppe convexe du contour et du pied de chaque coin au bord
+de la rue, les segments de la rue qui le bordent, sa boîte ; rangé par case avec la
+marge des talus. `sol` les compte comme des plateformes : dedans, la hauteur de la rue
+au point le plus proche ; dehors, un talus depuis le contour. `Reel::assis` monte le
+bâtiment de ce que le sol a monté sous lui (terrassé contre relief, au plus bas du
+contour). Sur Rouen : 116 000 abords pour 195 000 bâtiments, 3 s de plus au chargement
+du lieu, une hauteur du sol 60 % plus lente.
+
+## 39. L'onglet Voirie (0.40)
+
+`editeur::VOIRIE`. `Campagne::routes_pres` rend les routes (absolues) qui ont un point
+dans un rectangle : celles des régions qui le couvrent, chacune une fois (clé : genre,
+nombre de points, bouts), sinon celles du lieu réel. `App::routes_voirie` les garde pour
+la tuile du point visé (`App::voirie`, oubliées quand la campagne change) ;
+`App::fils_voirie` les projette avec la caméra (`Camera::ecran`, 25 cm au-dessus de la
+chaussée, l'origine du monde retirée) et les trace en 2D, rognées à la vue (`rogner`),
+sans profondeur : les fils se voient à travers le décor. `couleur_voirie` donne la
+couleur du genre.
+
+## 40. Les tronçons de voirie (0.41)
+
+`src/voirie.rs` : un `Troncon` se reconnaît à ses deux bouts (absolus, au centimètre) et
+porte le genre, la largeur et la largeur minimale des trottoirs réglés (`None` : ceux de
+la route), avec ceux d'origine. Les retouches (`Voirie`, `monde/voirie.json`) sont
+rendues courantes dans un `RwLock` statique. `appliquer` coupe chaque route qui porte
+les deux bouts d'un tronçon retouché : le morceau du milieu prend ses réglages (deux
+fois appliquée, rien de plus). Elle s'applique à la lecture d'une région
+(`Regions::region`, l'index refait) et au lieu réel (`Reel::indexe`, pour le
+terrassement) ; les régions reçoivent `Reel::routes_profilees`, sans les retouches.
+`voirie::trottoir` rend la largeur minimale réglée d'une route qui est le morceau d'un
+tronçon : `trottoirs::monter` la prend pour largeur sans façade (0 : pas de trottoir),
+hors des quartiers aussi. `troncon_autour` étend un segment jusqu'aux points partagés
+avec une autre route. Côté `App` : `choisir_troncon` (le fil le plus proche du doigt à
+l'écran), `troncon_choisi`, `reglages_troncon`, le dessin dans `fils_voirie` et
+`panneau_troncon` ; une retouche oublie les régions gardées (`Regions::oublier`) et les
+routes de l'onglet, et refait les tuiles 0,4 s après ; la largeur et la priorité lèvent
+aussi la demande de régénération (`procedures::regeneration`, partagée avec l'onglet
+Procédures).
+
+## 41. Les voies piétonnes cèdent aux rues (0.42)
+
+`trottoirs::Lieu::chaussee` ne compte plus que les routes de genre ≤ `SERVICE`. Dans
+`terrassement::sol`, chaque proche porte s'il est « lourd » (route où l'on roule ou
+abord) : sur des plateformes qui se recouvrent, la plus basse des lourdes l'emporte, et
+celles des voies légères ne comptent qu'à défaut. `travees` ne joint que deux routes
+lourdes.
+
+## 42. Les trottoirs revêtus (0.43)
+
+`src/revetements.rs` fait au lancement deux images de 128 × 128 qui se raccordent à
+elles-mêmes : le bitume (`BITUME`, 2 m par répétition, bruit doux et gravillons) et les
+pavés (`PAVES`, 0,5 m par répétition, rangs décalés, joints sombres, une nuance par
+pavé). `App::new` les met dans `Textures` et donne leurs `TextureId` à
+`Tuiles::revetements`.
+
+`Source::bati` rend désormais un `Bati3d` : les sommets colorés (`Statique`) et leurs
+triangles, et `revetus`, une liste de sommets `Texture` par revêtement. `Tuiles::poser_bati`
+en fait deux entités : `bati/i/j` (maillage et murs, comme avant) et `revetement/i/j`
+(un maillage `Texture` en parties, une par revêtement non vide) ; les collisions du
+dessus restent dans les triangles de `bati/i/j`.
+
+Dans `trottoirs::monter`, la première colonne de chaque dalle est la bande de pavés
+(`BANDE`, la moitié du trottoir au plus), u suivant l'abscisse le long de la rue
+(rapportée près de zéro à chaque dalle), v en travers ; les colonnes suivantes sont du
+bitume, en coordonnées planes du repère de la tuile (64 m font un nombre entier de
+répétitions, d'où la continuité d'une tuile à l'autre). Les sommets revêtus sont blancs :
+la texture donne la couleur.
+
+## 43. Le profil en long lissé sur le réseau (0.44)
+
+`terrassement::profiler_avec(routes, ponts, lissage)` remplace la moyenne glissante par
+route (bouts tenus) et la répartition des écarts aux carrefours. Chaque position (clé au
+centimètre) est un nœud, à la moyenne des hauteurs qui s'y rencontrent ; les bouts des
+ponts sont fixes. Les voisins le long des routes pèsent l'inverse de leur distance. Une
+passe de Jacobi met chaque nœud libre à mi-chemin de la moyenne pesée de ses voisins :
+après k passes l'écart type vaut environ pas × √(k / 2), d'où
+k = ⌈2 (lissage / pas)²⌉ (400 au plus), le pas étant la longueur moyenne d'un segment.
+Deux temps : les nœuds des rues (genre ≤ `SERVICE`) avec les seules arêtes des rues,
+puis les autres avec les arêtes légères, les nœuds des rues faisant bord.
+`Procedures::lissage` (20 m, `LISSAGE`) appartient au terrassement : le changer demande
+une régénération, qui relit le lieu réel et refait le profil. Rouen : environ 0,9 s.
+
+## 44. Bordures pavées (0.45)
+
+La texture `revetements::PAVES` devient un seul rang de pavés de `PAVE` (0,5 m) :
+256 × 32 pixels pour `METRES_PAVES` (2 m) le long de la rue (u) ; en travers, v va de 0
+à 1 sur la largeur de la bande qui la porte. `trottoirs::BANDE` passe à 0,20 m (la
+moitié du trottoir au plus). `trottoirs::monter` ajoute, sous chaque dalle gardée, le
+caniveau : un quadrilatère de `RIGOLE` (0,15 m) sur la chaussée, du pied de la bordure
+vers l'axe, à `SUR_CHAUSSEE` (4 cm) au-dessus de la hauteur de la route, soit 1 cm
+au-dessus du dessus de la chaussée maillée ; ses sommets sont teintés `CANIVEAU`.
+
+## 45. Bordures pavées à leurs mesures (0.47)
+
+La texture `revetements::PAVES` est un rang de `PAVES_PAR_IMAGE` (4) pavés ; qui la
+pose choisit la longueur d'un pavé, une répétition en faisant quatre. Dans
+`trottoirs::monter` : le rang du trottoir `BANDE` = 0,20 m, pavés de `PAVE_TROTTOIR`
+= 1 m, teinté `TERNE` (0,74) ; le caniveau `RIGOLE` = 0,15 m, pavés de `PAVE_CANIVEAU`
+= 0,90 m, teinté `CANIVEAU` (0,90).
+
+## 46. La bordure pavée sur son épaisseur (0.48)
+
+La face de la bordure passe des sommets colorés (`BORDURE`, retirée) aux revêtus
+`PAVES`, teintée `TERNE` : même u que le rang du dessus (pavés de `PAVE_TROTTOIR`), v
+de 0 à l'arête à hauteur / `BANDE` en bas, d'où des pavés à la même échelle qui se
+replient sur l'arête.
+
+## 47. Les rues d'un seul tenant (0.49)
+
+`src/rues.rs` remplace `trottoirs.rs` et `chaussees.rs` ; `rues::monter(l, i, j, v, t,
+revetus)` fait tout, appelé par `Region::trottoirs` et `Reel::bati`.
+
+`Champ::new` range les segments des rues (genre ≤ `SERVICE`) proches de la tuile dans
+des seaux de 4 m, sur la tuile agrandie de `PORTEE_MAX + 10` (les coins des bâtiments
+voisins y cherchent leur rue : chaque tuile trouve la même) ; un bout de route que
+prolonge une autre rue (un point partagé) s'arrondit, sinon il se coupe net (vers un
+pont, une impasse). `Champ::proche` : pour chaque route, son plus petit écart (min
+franc entre ses segments) ; puis l'union arrondie `union_ronde` (fillet exact de rayon r
+entre deux demi-plans perpendiculaires), r multiplié par un facteur qui s'annule quand
+la route est presque parallèle (|cos| > 0,95) à l'une de celles déjà prises ; la
+hauteur fondue sur `FONDU` mètres entre routes à moins de `MARCHE`.
+
+Grille de `PAS` = 1 m (129 × 129 nœuds). Aux nœuds : `e`, `y`, `o` (limite du trottoir :
+min(e − largeur, max(abord, e − portée)), `LOIN` hors quartier ou si le tronçon dit
+« sans »), `b` (écart signé aux contours des bâtiments, calculé dans leur boîte), et
+l'abord (écart à l'enveloppe convexe du contour et des projections sur la bordure de
+ses coins à moins de la portée). Le sol se lit sur une grille de 2 m, seulement où il
+sert.
+
+Couches : chaussée `e ≤ 0` ; accotement `0 ≤ e ≤ accotement`, `o ≥ 0` ; caniveau
+`−RIGOLE ≤ e ≤ 0`, `o ≤ 0`, `b ≥ 0` ; rang de pavés `0 ≤ e ≤ BANDE` ; bitume `e ≥ BANDE`,
+ces deux dans `o ≤ 0`, `b ≥ 0`. `couper` découpe un triangle (Sutherland–Hodgman, champ
+linéaire) ; chaque sommet créé porte le bord de la condition qui l'a créé (`BORDURE`,
+`DEHORS`, `CHANT`), et une arête dont les deux bouts portent le même bord est sur cette
+limite : face de bordure revêtue, chant sombre côté façade, chant de l'accotement. Un
+nœud juste sur une limite compte dehors (aucune arête de la grille n'est prise pour une
+limite). Les mailles se parcourent par 4 m, divisées en quatre tant qu'une couche n'y
+est ni absente ni pleine (d'un seul niveau, hors de l'eau). Les pavés suivent
+l'abscisse de la route du premier coin du triangle (`Champ::abscisse`). Rouen : environ
+28 ms par tuile, bâtiments compris.
+
+## 48. Le trottoir jusque dans l'angle (0.50)
+
+L'abord en enveloppe convexe disparaît. Sur une grille élargie de `TROU` (10) nœuds,
+l'écart `e` (plus un anneau pour le gradient, par différences centrées) ; en chaque
+nœud à moins de la portée, `rayon` lance un rayon le long du gradient (droit devant,
+en diagonale dans les arrondis) jusqu'à la première façade à portée : `facade` = e +
+distance. La limite d'un nœud est sa façade, sinon l'interpolation entre les premières
+façades trouvées des deux côtés le long de la tangente (TROU nœuds au plus) ; elle ne
+vaut que si un rayon arrière jusqu'à la bordure ne croise aucun bâtiment (pas
+d'arrière-cour). o = e − max(largeur, min(limite, portée)). Rouen : environ 37 ms par
+tuile.
+
+## 49. La voirie seule (0.51)
+
+`revetements::UNI` (indice 2, `REVETEMENTS` = 3) : les surfaces des rues sans texture
+(chaussée, accotement, chants) vont avec les revêtus, en format `Texture` aux
+coordonnées nulles, dans une partie sans texture de l'entité `revetement/i/j`.
+`rues::monter` ne prend plus de sommets colorés. Dans l'onglet Voirie, `App::voirie_seule`
+ne garde de la scène que les maillages `tuile/` et `revetement/`.

@@ -173,7 +173,7 @@ pub fn trianguler(c: &[[f32; 2]]) -> Vec<[usize; 3]> {
 }
 
 /// Côté des cases de l'index des routes, en mètres.
-const CASE: f32 = 32.0;
+pub const CASE: f32 = 32.0;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Route {
@@ -218,14 +218,28 @@ pub struct Reel {
     pub h: Vec<u16>,
     /// Un bit par point : de l'eau.
     pub eau: Vec<u8>,
+    /// Les routes terrassées (`terrassement::profiler`) : leur chaussée d'accord aux
+    /// carrefours.
     pub routes: Vec<Route>,
+    /// Les routes telles que lues, qui s'écrivent.
+    routes_lues: Vec<Route>,
+    /// Les routes profilées, sans les retouches de la voirie : celles qui vont aux
+    /// régions.
+    pub routes_profilees: Vec<Route>,
     /// Pour chaque case, les segments (route, premier point) qui l'approchent.
     index: Index,
+    /// Les mêmes, avec la place des talus.
+    index_talus: Index,
+    /// Les abords des bâtiments proches des rues, terrassés à leur hauteur.
+    abords: crate::terrassement::Abords,
     pub batiments: Vec<Batiment>,
     /// Pour chaque tuile, les bâtiments dont le centre est chez elle.
     par_tuile: std::collections::HashMap<(i32, i32), Vec<u32>>,
-    /// Les ponts : une ligne par pont, la hauteur du tablier.
+    /// Les ponts : une ligne par pont, la hauteur du tablier ; puis les travées des
+    /// croisements sans carrefour (`terrassement::travees`).
     pub ponts: Vec<Route>,
+    /// Les ponts tels que lus, qui s'écrivent.
+    ponts_lus: Vec<Route>,
     /// Pour chaque tuile, les morceaux de pont (pont, premier point) dont le milieu est
     /// chez elle.
     ponts_par_tuile: std::collections::HashMap<(i32, i32), Vec<(u32, u32)>>,
@@ -349,9 +363,14 @@ pub type Index = std::collections::HashMap<(i32, i32), Vec<(u32, u32)>>;
 
 /// Range chaque segment de route dans les cases qu'il approche (chaussée et bas-côtés).
 pub fn indexer(routes: &[Route]) -> Index {
+    indexer_avec(routes, |r| r.largeur / 2.0 + epaule(r.genre))
+}
+
+/// Range chaque segment de route dans les cases qu'il approche à `marge(route)` près.
+pub fn indexer_avec(routes: &[Route], marge: impl Fn(&Route) -> f32) -> Index {
     let mut index: Index = Default::default();
     for (k, r) in routes.iter().enumerate() {
-        let m = r.largeur / 2.0 + epaule(r.genre);
+        let m = marge(r);
         for (i, s) in r.points.windows(2).enumerate() {
             let (x0, x1) = (s[0][0].min(s[1][0]) - m, s[0][0].max(s[1][0]) + m);
             let (z0, z1) = (s[0][1].min(s[1][1]) - m, s[0][1].max(s[1][1]) + m);
@@ -405,7 +424,7 @@ impl Reel {
         for (i, _) in eau.iter().enumerate().filter(|(_, e)| **e) {
             bits[i / 8] |= 1 << (i % 8);
         }
-        Reel { nom: nom.into(), lat, lon, x0, y0, pas, cote: n, niveau, base: lo, echelle, h: hv, eau: bits, routes, index: Default::default(), batiments, par_tuile: Default::default(), ponts, ponts_par_tuile: Default::default(), sol: Vec::new() }.indexe()
+        Reel { nom: nom.into(), lat, lon, x0, y0, pas, cote: n, niveau, base: lo, echelle, h: hv, eau: bits, routes, routes_lues: Vec::new(), routes_profilees: Vec::new(), index: Default::default(), index_talus: Default::default(), abords: Default::default(), batiments, par_tuile: Default::default(), ponts, ponts_lus: Vec::new(), ponts_par_tuile: Default::default(), sol: Vec::new() }.indexe()
     }
 
     /// Avec son occupation du sol (`cote_sol(cote)²` classes).
@@ -434,8 +453,22 @@ impl Reel {
 
     /// Range chaque segment de route dans les cases qu'il approche.
     fn indexe(mut self) -> Reel {
-        let index = indexer(&self.routes);
-        self.index = index;
+        // Le terrassement : les routes lues se gardent telles quelles pour l'écriture
+        self.routes_lues = self.routes.clone();
+        self.ponts_lus = self.ponts.clone();
+        crate::terrassement::profiler(&mut self.routes, &self.ponts);
+        self.routes_profilees = self.routes.clone();
+        crate::voirie::appliquer(&mut self.routes);
+        self.index = indexer(&self.routes);
+        // Les talus et les travées, avec le terrassement en talus seulement
+        let pr = crate::procedures::courantes();
+        if pr.terrassement == crate::procedures::TALUS {
+            self.index_talus = crate::terrassement::indexer(&self.routes);
+            let contours: Vec<&[[f32; 2]]> = self.batiments.iter().map(|b| b.contour.as_slice()).collect();
+            self.abords = crate::terrassement::abords(&self.routes, &contours, pr.abords, pr.talus);
+            let travees = crate::terrassement::travees(&self.routes, &self.index);
+            self.ponts.extend(travees);
+        }
         let mut par_tuile: std::collections::HashMap<(i32, i32), Vec<u32>> = Default::default();
         for (k, b) in self.batiments.iter().enumerate() {
             let c = b.centre();
@@ -456,9 +489,9 @@ impl Reel {
     /// Les bâtiments de la tuile (i, j), en volumes, dans son repère : les sommets
     /// (position, normale, couleur) et les triangles pour les collisions. Rien s'il n'y en
     /// a pas.
-    pub fn bati(&self, i: i32, j: i32) -> Option<(Vec<f32>, Vec<[[f32; 3]; 3]>)> {
+    pub fn bati(&self, i: i32, j: i32) -> Option<crate::moteur::Bati3d> {
         let (ox, oz) = (i as f32 * TAILLE, j as f32 * TAILLE);
-        let (mut v, mut t) = (Vec::new(), Vec::new());
+        let (mut v, mut t, mut r) = (Vec::new(), Vec::new(), <[Vec<f32>; crate::moteur::REVETEMENTS]>::default());
         // Les morceaux de pont : le tablier, et un parapet de chaque côté
         for &(k, s) in self.ponts_par_tuile.get(&(i, j)).map_or(&[][..], |l| l.as_slice()) {
             let p = &self.ponts[k as usize];
@@ -467,7 +500,7 @@ impl Reel {
             monter_pont(&mut v, &mut t, a, b, p.largeur, teinte(p.genre));
         }
         for &k in self.par_tuile.get(&(i, j)).map_or(&[][..], |l| l.as_slice()) {
-            let b = &self.batiments[k as usize];
+            let b = &self.assis(&self.batiments[k as usize]);
             let (murs, toit) = teintes_bati(b.genre);
             let mut tri = |p: [[f32; 3]; 3], n: [f32; 3], couleur: [f32; 3]| {
                 let p = p.map(|q| [q[0] - ox, q[1], q[2] - oz]);
@@ -480,7 +513,27 @@ impl Reel {
             };
             crate::toits::monter(b, murs, toit, &mut tri);
         }
-        (!v.is_empty()).then_some((v, t))
+        // Les trottoirs, comme ceux du monde matérialisé (mêmes grilles pour le quartier
+        // et l'eau)
+        let batis: Vec<&[[f32; 2]]> = (i - 1..=i + 1)
+            .flat_map(|a| (j - 1..=j + 1).map(move |b| (a, b)))
+            .flat_map(|k| self.par_tuile.get(&k).map_or(&[][..], |l| l.as_slice()))
+            .map(|&k| self.batiments[k as usize].contour.as_slice())
+            .collect();
+        let urbain = |x: f32, z: f32| {
+            let g = |v: f32| (v as f64 / 8.0).round() * 8.0;
+            let o = self.occupation(g(x), g(z));
+            let c = o.iter().fold((0u8, -1.0), |m, &(k, p)| if p > m.1 { (k, p) } else { m }).0;
+            matches!(c, HABITE | ZONE)
+        };
+        let sol = |x: f32, z: f32| self.hauteur(x as f64, z as f64) as f32;
+        let eau = |x: f32, z: f32| {
+            let g = |v: f32| (v as f64 / 2.0).round() * 2.0;
+            self.eau(g(x), g(z)) >= 0.5
+        };
+        let l = crate::rues::Lieu { routes: &self.routes, index: &self.index, batis, urbain: &urbain, sol: &sol, eau: &eau };
+        crate::rues::monter(&l, i, j, &mut t, &mut r);
+        crate::moteur::Bati3d { sommets: v, triangles: t, revetus: r }.non_vide()
     }
 
     /// La route la plus proche de (x, z), si l'on est sur elle ou ses bas-côtés ; la plus
@@ -585,17 +638,47 @@ impl Reel {
         self.eau[i / 8] & (1 << (i % 8)) != 0
     }
 
-    /// La hauteur du sol en (x, z) du jeu : le relief, aplani sous les routes.
+    /// La hauteur du sol en (x, z) du jeu : le relief, terrassé sous les routes
+    /// (`terrassement::sol`).
     pub fn hauteur(&self, x: f64, z: f64) -> f64 {
         let h = self.relief(x, z);
-        match self.route(x, z) {
-            Some(p) => {
-                let t = (p.hors() / epaule(p.genre)).clamp(0.0, 1.0) as f64;
-                let t = t * t * (3.0 - 2.0 * t);
-                p.hauteur as f64 + (h - p.hauteur as f64) * t
+        match crate::procedures::courantes().terrassement {
+            crate::procedures::TALUS => {}
+            // Comme avant la 0.35 : à la hauteur de la chaussée, fondu sur les bas-côtés
+            crate::procedures::FONDU => {
+                return match self.route(x, z) {
+                    Some(p) => {
+                        let t = (p.hors() / epaule(p.genre)).clamp(0.0, 1.0) as f64;
+                        let t = t * t * (3.0 - 2.0 * t);
+                        p.hauteur as f64 + (h - p.hauteur as f64) * t
+                    }
+                    None => h,
+                }
             }
-            None => h,
+            _ => return h,
         }
+        if !self.index_talus.contains_key(&((x as f32 / CASE).floor() as i32, (z as f32 / CASE).floor() as i32)) && !self.abords.pres(x as f32, z as f32) {
+            return h;
+        }
+        crate::terrassement::sol(&self.routes, &self.index_talus, &self.abords, x, z, h, self.eau(x, z) >= 0.5)
+    }
+
+    /// Le bâtiment `b`, le pied sous le sol terrassé le plus bas de son contour : un talus
+    /// ne le laisse pas en l'air ; et monté d'autant que le sol a monté sous lui.
+    pub fn assis(&self, b: &Batiment) -> Batiment {
+        let bas = b.contour.iter().map(|p| self.hauteur(p[0] as f64, p[1] as f64) as f32).fold(f32::MAX, f32::min);
+        let mut b = b.clone();
+        // Le sol remonté sous lui (un abord remblayé jusqu'à la rue) : le bâtiment monte
+        // d'autant, il garde sa hauteur au-dessus du sol
+        let avant = b.contour.iter().map(|p| self.relief(p[0] as f64, p[1] as f64) as f32).fold(f32::MAX, f32::min);
+        if bas > avant + 0.05 {
+            let d = bas - avant;
+            b.pied += d;
+            b.egout += d;
+            b.toit += d;
+        }
+        b.pied = b.pied.min(bas - 0.5);
+        b
     }
 
     /// La part d'eau en (x, z), de 0 à 1 : 1 au milieu de la Seine, entre deux sur la
@@ -627,7 +710,7 @@ impl Reel {
             o.extend_from_slice(&v.to_le_bytes());
         }
         o.extend_from_slice(&self.eau);
-        ecrire_routes(&mut o, &self.routes);
+        ecrire_routes(&mut o, &self.routes_lues);
         o.extend_from_slice(&(self.batiments.len() as u32).to_le_bytes());
         for b in &self.batiments {
             o.push(b.genre);
@@ -642,7 +725,7 @@ impl Reel {
                 o.extend_from_slice(&p[1].to_le_bytes());
             }
         }
-        ecrire_routes(&mut o, &self.ponts);
+        ecrire_routes(&mut o, &self.ponts_lus);
         // L'occupation du sol, par plages (classe, longueur de 1 à 255)
         let mut plages = Vec::new();
         let mut it = self.sol.iter().peekable();
@@ -735,7 +818,7 @@ impl Reel {
         if k != o.len() {
             return None;
         }
-        Some(Reel { nom, lat, lon, x0, y0, pas, cote: n, niveau, base, echelle, h, eau, routes, index: Default::default(), batiments, par_tuile: Default::default(), ponts, ponts_par_tuile: Default::default(), sol }.indexe())
+        Some(Reel { nom, lat, lon, x0, y0, pas, cote: n, niveau, base, echelle, h, eau, routes, routes_lues: Vec::new(), routes_profilees: Vec::new(), index: Default::default(), index_talus: Default::default(), abords: Default::default(), batiments, par_tuile: Default::default(), ponts, ponts_lus: Vec::new(), ponts_par_tuile: Default::default(), sol }.indexe())
     }
 }
 
@@ -789,7 +872,7 @@ mod tests {
             let b = Batiment::plat(MAISON, -1.0, 7.0, c);
             let r = Reel::new("Essai", 49.0, 1.0, 0.0, 0.0, pas, -50.0, &vec![0.0; n * n], &vec![false; n * n], Vec::new(), vec![b], Vec::new());
             assert!(r.bati(1, 0).is_none());
-            let (v, t) = r.bati(0, 0).expect("dans la tuile (0, 0)");
+            let crate::moteur::Bati3d { sommets: v, triangles: t, .. } = r.bati(0, 0).expect("dans la tuile (0, 0)");
             assert_eq!(t.len(), 6 * 2 + 4);
             assert_eq!(v.len(), t.len() * 3 * 9);
             // Les normales des murs regardent dehors, le toit vers le haut
@@ -820,7 +903,7 @@ mod tests {
         // Un pont de 5 m sur deux tuiles, à 8 m de haut, au-dessus d'un sol à 0
         let pont = Route { genre: ROUTE, largeur: 5.0, points: vec![[30.0, 20.0, 8.0], [60.0, 20.0, 8.0], [90.0, 20.0, 8.0]] };
         let r = Reel::new("Essai", 49.0, 1.0, 0.0, 0.0, pas, -50.0, &vec![0.0; n * n], &vec![false; n * n], Vec::new(), Vec::new(), vec![pont]);
-        let (v, t) = r.bati(0, 0).expect("le premier morceau");
+        let crate::moteur::Bati3d { sommets: v, triangles: t, .. } = r.bati(0, 0).expect("le premier morceau");
         assert!(r.bati(1, 0).is_some() && r.bati(2, 0).is_none());
         // Un tablier et deux parapets : trois pavés de douze triangles
         assert_eq!(t.len(), 36);
@@ -847,13 +930,15 @@ mod tests {
         let h: Vec<f32> = (0..n * n).map(|i| (origine() + (i % n) as f64 * pas) as f32 * 0.1).collect();
         let route = Route { genre: ROUTE, largeur: 6.0, points: vec![[0.0, -200.0, 5.0], [0.0, 200.0, 5.0]] };
         let r = Reel::new("Essai", 49.0, 1.0, 0.0, 0.0, pas, -50.0, &h, &vec![false; n * n], vec![route], Vec::new(), Vec::new());
-        // Sur la chaussée, sa hauteur ; au-delà des bas-côtés, le relief
-        for x in [-2.9, 0.0, 2.9] {
+        // Sur la chaussée et ses accotements, sa hauteur ; puis un talus (en remblai : le
+        // relief est plus bas) jusqu'à le rejoindre
+        for x in [-4.9, 0.0, 4.9] {
             assert!((r.hauteur(x, 10.0) - 5.0).abs() < 1e-4, "{x}");
         }
-        assert!((r.hauteur(7.0, 10.0) - r.relief(7.0, 10.0)).abs() < 1e-6);
-        let mi = r.hauteur(4.5, 10.0);
-        assert!(mi < 5.0 && mi > r.relief(4.5, 10.0), "{mi}");
+        let talus = 5.0 - 2.0 * crate::terrassement::PENTE as f64;
+        assert!((r.hauteur(7.0, 10.0) - talus).abs() < 1e-4 && (r.hauteur(-7.0, 10.0) - talus).abs() < 1e-4);
+        assert!((r.hauteur(22.0, 10.0) - r.relief(22.0, 10.0)).abs() < 1e-6);
+        assert!((r.hauteur(40.0, 10.0) - r.relief(40.0, 10.0)).abs() < 1e-6);
         assert_eq!(r.route(0.0, 10.0).map(|p| p.genre), Some(ROUTE));
         assert!(r.route(30.0, 10.0).is_none());
         let o = r.octets();

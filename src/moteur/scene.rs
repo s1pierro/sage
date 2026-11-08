@@ -57,14 +57,79 @@ pub struct Soleil {
     pub centre: [f32; 3],
     /// Demi-côté de la zone des ombres, en mètres.
     pub rayon: f32,
+    /// La lumière directe, couleur et force : nulle sous l'horizon.
+    pub lumiere: [f32; 3],
+    /// La lumière diffuse du ciel, couleur et force.
+    pub ambiance: [f32; 3],
+    /// La couleur du ciel, où se fond le lointain.
+    pub ciel: [f32; 3],
 }
 
 /// Le soleil de la campagne : haut, un peu de côté.
 pub const SOLEIL: [f32; 3] = [0.43968, 0.83050, 0.34197];
+/// Le ciel de plein jour.
+pub const CIEL: [f32; 3] = [0.70, 0.80, 0.92];
+const CIEL_CREPUSCULE: [f32; 3] = [0.86, 0.62, 0.48];
+const CIEL_NUIT: [f32; 3] = [0.05, 0.07, 0.13];
 /// Les ombres portées couvrent un carré de deux fois cela autour du joueur.
 pub const RAYON_OMBRES: f32 = 28.0;
+/// La latitude par défaut, en degrés : Rouen.
+pub const LATITUDE: f64 = 49.44;
+/// La déclinaison du soleil au solstice d'été, en degrés : les jours les plus longs.
+pub const DECLINAISON: f64 = 23.44;
+/// Sous cette hauteur, en degrés, la carte d'ombre garde le soleil : des ombres trop
+/// longues sortiraient de sa profondeur.
+const HAUTEUR_OMBRES: f64 = 4.0;
+
+fn lisse(a: f64, b: f64, x: f64) -> f32 {
+    let t = ((x - a) / (b - a)).clamp(0.0, 1.0);
+    (t * t * (3.0 - 2.0 * t)) as f32
+}
+
+fn melange(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
+    [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t]
+}
+
+/// Vers le soleil (x à l'est, y en haut, z au sud) à l'heure solaire `heure` (midi : le
+/// soleil au sud), à la latitude `lat`, le jour où sa déclinaison est `decl` (degrés) ; et
+/// sa hauteur sur l'horizon, en degrés.
+pub fn course(heure: f64, lat: f64, decl: f64) -> ([f32; 3], f64) {
+    let h = (15.0 * (heure - 12.0)).to_radians();
+    let (p, d) = (lat.to_radians(), decl.to_radians());
+    let est = -d.cos() * h.sin();
+    let nord = p.cos() * d.sin() - p.sin() * d.cos() * h.cos();
+    let haut = p.sin() * d.sin() + p.cos() * d.cos() * h.cos();
+    ([est as f32, haut as f32, -nord as f32], haut.clamp(-1.0, 1.0).asin().to_degrees())
+}
 
 impl Soleil {
+    /// Le soleil de `heure` (heure solaire, de 0 à 24) à la latitude `lat`, en été : sa
+    /// direction, et la lumière qu'il donne, dorée au lever et au coucher, nulle la nuit
+    /// où ne reste qu'un ciel bleu sombre.
+    pub fn a_heure(heure: f32, lat: f64, centre: [f32; 3], rayon: f32) -> Soleil {
+        let (d, e) = course(heure as f64, lat, DECLINAISON);
+        // Le soleil bas reste au-dessus de l'horizon pour la carte d'ombre
+        let direction = if e < HAUTEUR_OMBRES {
+            let y = HAUTEUR_OMBRES.to_radians().sin() as f32;
+            let k = ((1.0 - y * y) / (d[0] * d[0] + d[2] * d[2]).max(1e-6)).sqrt();
+            [d[0] * k, y, d[2] * k]
+        } else {
+            d
+        };
+        let force = lisse(-1.0, 8.0, e);
+        let teinte = melange([1.0, 0.55, 0.30], [1.0, 1.0, 1.0], lisse(0.0, 25.0, e));
+        let lumiere = teinte.map(|c| c * force);
+        let jour = lisse(-12.0, 10.0, e);
+        let ambiance = melange([0.22, 0.27, 0.42], [1.0, 1.0, 1.0], jour);
+        let ciel = melange(CIEL_NUIT, melange(CIEL_CREPUSCULE, CIEL, lisse(2.0, 20.0, e)), lisse(-10.0, 3.0, e));
+        Soleil { direction, centre, rayon, lumiere, ambiance, ciel }
+    }
+
+    /// Le soleil fixe d'avant les heures : haut, un peu de côté, en plein jour.
+    pub fn fixe(centre: [f32; 3], rayon: f32) -> Soleil {
+        Soleil { direction: SOLEIL, centre, rayon, lumiere: [1.0; 3], ambiance: [1.0; 3], ciel: CIEL }
+    }
+
     /// La vue du soleil, projection comprise, sur une carte de `cote` × `cote` texels : un
     /// carré de `2 × rayon` autour du centre, profond de 100 m. Le carré avance par texels
     /// entiers : les bords des ombres ne scintillent pas quand le joueur bouge.
@@ -120,7 +185,7 @@ impl Scene {
             let os = monde.squelette.get(e).map(|s| s.os.clone()).unwrap_or_default();
             dessins.push(Dessin { maillage: r.maillage, place, os, choisi: monde.choisie == Some(e) });
         }
-        let soleil = Soleil { direction: SOLEIL, centre: camera.oeil, rayon: RAYON_OMBRES };
+        let soleil = Soleil::fixe(camera.oeil, RAYON_OMBRES);
         Scene { camera, dessins, soleil, maillages: maillages.tous(), textures: textures.toutes(), brouillard: BROUILLARD, isolignes: 0.0, mer: None, temps: 0.0, trou: None }
     }
 }
@@ -131,7 +196,7 @@ mod tests_soleil {
 
     #[test]
     fn la_vue_du_soleil_couvre_le_carre_et_avance_par_texels() {
-        let s = Soleil { direction: SOLEIL, centre: [10.0, 3.0, -4.0], rayon: 20.0 };
+        let s = Soleil::fixe([10.0, 3.0, -4.0], 20.0);
         let m = s.matrice(1024);
         let c = math::appliquer(&m, s.centre);
         assert!(c[0].abs() < 2.0 / 1024.0 && c[1].abs() < 2.0 / 1024.0 && c[2].abs() < 1e-3, "{c:?}");
@@ -143,6 +208,22 @@ mod tests_soleil {
         let texel = 2.0 / 1024.0;
         let k = (m2[12] - m[12]) / texel;
         assert!((k - k.round()).abs() < 1e-2, "{k}");
+    }
+
+    #[test]
+    fn le_soleil_suit_l_heure() {
+        // À Rouen au solstice : à midi au sud, à 64° de haut ; le matin à l'est, le soir à
+        // l'ouest ; sous l'horizon à minuit
+        let (d, e) = course(12.0, LATITUDE, DECLINAISON);
+        assert!((e - 64.0).abs() < 0.1 && d[0].abs() < 1e-6 && d[2] > 0.0, "{d:?} {e}");
+        assert!(course(8.0, LATITUDE, DECLINAISON).0[0] > 0.0);
+        assert!(course(16.0, LATITUDE, DECLINAISON).0[0] < 0.0);
+        assert!(course(0.0, LATITUDE, DECLINAISON).1 < 0.0);
+        // Le soleil de midi éclaire, celui de minuit non, et la carte d'ombre le garde haut
+        let (midi, nuit) = (Soleil::a_heure(12.0, LATITUDE, [0.0; 3], 20.0), Soleil::a_heure(0.0, LATITUDE, [0.0; 3], 20.0));
+        assert!(midi.lumiere[0] > 0.99 && nuit.lumiere == [0.0; 3]);
+        assert!(nuit.direction[1] > 0.06 && (nuit.direction.iter().map(|c| c * c).sum::<f32>() - 1.0).abs() < 1e-4);
+        assert!(nuit.ciel[2] < 0.2 && midi.ciel == CIEL);
     }
 }
 

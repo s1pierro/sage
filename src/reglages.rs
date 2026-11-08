@@ -101,6 +101,8 @@ pub struct Affichage {
     pub brouillard: f32,
     /// Pas de brouillard du tout : on voit jusqu'à `VISIBILITE`.
     pub sans_brouillard: bool,
+    /// L'heure solaire, de 0 à 24, au quart d'heure : la course du soleil et les ombres.
+    pub heure: f32,
     fichier: Option<PathBuf>,
     pub erreur: Option<String>,
 }
@@ -110,12 +112,14 @@ pub const BROUILLARD_MIN: f32 = 30.0;
 /// Le plus loin que l'on voie en jeu, en mètres : au-delà des tuiles chargées, le relief
 /// lointain de toute la carte.
 pub const VISIBILITE: f32 = 3000.0;
+/// L'heure d'origine : le début d'après-midi.
+pub const HEURE: f32 = 14.0;
 
 impl Affichage {
     /// Les réglages relus de `dossier`, ou ceux d'origine.
     pub fn ouvrir(dossier: Option<PathBuf>, distance: i32, brouillard: f32) -> Affichage {
         let fichier = dossier.map(|d| d.join("affichage.json"));
-        let mut a = Affichage { distance, brouillard, sans_brouillard: false, fichier, erreur: None };
+        let mut a = Affichage { distance, brouillard, sans_brouillard: false, heure: HEURE, fichier, erreur: None };
         if let Some(j) = a.fichier.as_ref().and_then(|f| std::fs::read_to_string(f).ok()).and_then(|s| json::lire(&s)) {
             if let Some(v) = j.get("distance").and_then(J::num) {
                 a.distance = v.round() as i32;
@@ -125,6 +129,9 @@ impl Affichage {
             }
             if let Some(J::Bool(v)) = j.get("sans_brouillard") {
                 a.sans_brouillard = *v;
+            }
+            if let Some(v) = j.get("heure").and_then(J::num) {
+                a.heure = v as f32;
             }
         }
         a.borner();
@@ -145,6 +152,7 @@ impl Affichage {
     fn borner(&mut self) {
         self.distance = self.distance.clamp(1, DISTANCE_MAX);
         self.brouillard = self.brouillard.clamp(BROUILLARD_MIN, self.brouillard_max());
+        self.heure = if self.heure.is_finite() { (self.heure * 4.0).round().clamp(0.0, 96.0) / 4.0 } else { HEURE };
     }
 
     pub fn vers_json(&self) -> String {
@@ -153,6 +161,7 @@ impl Affichage {
             ("distance".into(), J::Num(self.distance as f64)),
             ("brouillard".into(), J::Num(self.brouillard.round() as f64)),
             ("sans_brouillard".into(), J::Bool(self.sans_brouillard)),
+            ("heure".into(), J::Num(self.heure as f64)),
         ]);
         let mut s = String::new();
         json::indente(&o, 0, &mut s);
@@ -170,6 +179,16 @@ impl Affichage {
     pub fn modifier(&mut self, distance: i32, brouillard: f32) {
         let sans = self.sans_brouillard;
         self.regler(distance, brouillard, sans);
+    }
+
+    /// Change l'heure et la garde.
+    pub fn mettre_heure(&mut self, heure: f32) {
+        let avant = self.clone();
+        self.heure = heure;
+        self.borner();
+        if *self != avant {
+            self.ecrire();
+        }
     }
 
     /// Change les réglages, brouillard ou pas, et les garde.
@@ -215,6 +234,12 @@ pub fn affichage(cx: &mut Cx, b: &mut Body, a: &mut Affichage) {
         }
     }
     a.regler(d, f, sans);
+    cx.section(b, "SOLEIL");
+    let mut h = a.heure;
+    let (hh, mm) = ((a.heure.floor() as i32) % 24, ((a.heure.fract() * 60.0).round() as i32));
+    cx.slider(b, id("heure-soleil"), "Heure", &format!("{hh} h {mm:02}"), &mut h, 0.0, 24.0);
+    a.mettre_heure(h);
+    cx.paragraph(b, "Heure solaire d'un jour d'été (midi : le soleil au sud). La nuit, le ciel s'assombrit et les ombres disparaissent.");
     if let Some(e) = &a.erreur {
         cx.paragraph(b, e);
     }
@@ -243,6 +268,15 @@ mod tests {
         assert_eq!(a.brouillard_vu(), 1.0e7);
         let c = Affichage::ouvrir(Some(d.clone()), 2, 144.0);
         assert!(c.sans_brouillard && c.brouillard == 300.0);
+        // L'heure, au quart d'heure près, se garde aussi
+        assert_eq!(c.heure, HEURE);
+        a.mettre_heure(18.6);
+        a.mettre_heure(30.0);
+        let e = Affichage::ouvrir(Some(d.clone()), 2, 144.0);
+        assert_eq!(e.heure, 24.0);
+        a.mettre_heure(18.6);
+        let e = Affichage::ouvrir(Some(d.clone()), 2, 144.0);
+        assert_eq!(e.heure, 18.5);
         let _ = std::fs::remove_dir_all(&d);
     }
 }

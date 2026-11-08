@@ -9,7 +9,6 @@
 
 use crate::draw::{DrawList, Vertex};
 use crate::gles::GlApi;
-use crate::jeu::CIEL;
 use crate::moteur::ressources::Maillage3d;
 use crate::moteur::{Alpha, Format, MaillageId, Partie, Scene, TextureId};
 use crate::personnage::OS_MAX;
@@ -89,6 +88,8 @@ uniform vec3 u_oeil;
 uniform vec3 u_ciel;
 uniform float u_brouillard;
 uniform vec3 u_soleil;
+uniform vec3 u_lumiere;
+uniform vec3 u_ambiance;
 uniform highp sampler2DShadow u_ombre;
 uniform mat4 u_lvp;
 uniform float u_ombres;
@@ -107,9 +108,9 @@ float ombre(vec3 p, vec3 n) {
 }
 vec3 eclairer(vec3 base, vec3 n, vec3 p) {
   float d = max(dot(n, u_soleil), 0.0);
-  if (d > 0.0) d *= ombre(p, n);
+  if (d > 0.0 && u_lumiere.r > 0.0) d *= ombre(p, n);
   float ciel = 0.5 + 0.5 * n.y;
-  vec3 c = base * (0.30 + 0.25 * ciel + 0.60 * d);
+  vec3 c = base * ((0.30 + 0.25 * ciel) * u_ambiance + 0.60 * d * u_lumiere);
   // Le lointain se fond dans le ciel : à u_brouillard, il n'en reste que 2 %
   float loin = 2.0 * distance(p, u_oeil) / u_brouillard;
   float f = 1.0 - exp(-loin * loin);
@@ -286,7 +287,7 @@ void main() {
   vec3 c = eclairer(vec3(0.10, 0.30, 0.36), n, v_monde);
   c = mix(c, u_ciel * 1.05, f);
   vec3 r = reflect(-v, n);
-  c += vec3(1.0, 0.95, 0.85) * pow(max(dot(r, u_soleil), 0.0), 180.0) * 1.5;
+  c += vec3(1.0, 0.95, 0.85) * u_lumiere * pow(max(dot(r, u_soleil), 0.0), 180.0) * 1.5;
   o_color = vec4(c, mix(0.62, 0.97, f));
 }";
 
@@ -586,7 +587,10 @@ impl Renderer {
         (gl.glUseProgram)(p);
         (gl.glUniformMatrix4fv)(self.loc(p, "u_vp"), 1, 0, vp.as_ptr());
         (gl.glUniform3f)(self.loc(p, "u_oeil"), o[0], o[1], o[2]);
-        (gl.glUniform3f)(self.loc(p, "u_ciel"), CIEL[0], CIEL[1], CIEL[2]);
+        let (c, l, a) = (s.soleil.ciel, s.soleil.lumiere, s.soleil.ambiance);
+        (gl.glUniform3f)(self.loc(p, "u_ciel"), c[0], c[1], c[2]);
+        (gl.glUniform3f)(self.loc(p, "u_lumiere"), l[0], l[1], l[2]);
+        (gl.glUniform3f)(self.loc(p, "u_ambiance"), a[0], a[1], a[2]);
         (gl.glUniform1f)(self.loc(p, "u_brouillard"), s.brouillard.max(1.0));
         (gl.glUniform1f)(self.loc(p, "u_isolignes"), s.isolignes.max(0.0));
         (gl.glUniform3f)(self.loc(p, "u_soleil"), d[0], d[1], d[2]);
@@ -697,7 +701,8 @@ impl Renderer {
             (gl.glEnable)(SCISSOR);
             (gl.glScissor)(x, y, vw, vh);
             (gl.glViewport)(x, y, vw, vh);
-            (gl.glClearColor)(CIEL[0], CIEL[1], CIEL[2], 1.0);
+            let c = scene.soleil.ciel;
+            (gl.glClearColor)(c[0], c[1], c[2], 1.0);
             (gl.glClear)(COLOR_BIT);
             (gl.glEnable)(DEPTH_TEST);
             (gl.glDisable)(BLEND);

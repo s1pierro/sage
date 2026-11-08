@@ -25,4 +25,4 @@ pub use ressources::{Alpha, Format, MaillageId, Maillages, Materiau, Partie, Tex
 pub use scene::{Camera, Dessin, Scene, Soleil};
 pub use modeles::{Gabarit, ModeleId, Modeles};
 pub use objets::{Genre, Objet};
-pub use tuiles::{Contenu, Element, Relief, Source, Tuiles, TAILLE};
+pub use tuiles::{Bati3d, Contenu, Element, Relief, Source, Tuiles, REVETEMENTS, TAILLE};

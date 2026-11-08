@@ -154,16 +154,23 @@ impl Cx<'_> {
     /// Rangée d'onglets dans l'en-tête d'un panneau. Renvoie l'onglet choisi.
     pub fn tabs(&mut self, id: Id, r: Rect, labels: &[&str], selected: usize) -> usize {
         let (mut x, mut result) = (r.x, selected);
+        // Trop d'onglets pour la place : les marges se serrent, puis le texte rapetisse
+        let n = labels.len().max(1) as f32;
+        let ecart = 6.0 * self.dp;
+        let textes: f32 = labels.iter().map(|l| self.text.measure(l, (15.0 * self.dp).round())).sum();
+        let libre = r.w - ecart * (n - 1.0);
+        let marge = ((libre - textes) / n).clamp(12.0 * self.dp, 32.0 * self.dp);
+        let taille = if textes + marge * n > libre { (15.0 * (libre - marge * n) / textes).max(11.0) } else { 15.0 };
         for (i, label) in labels.iter().enumerate() {
-            let w = self.text.measure(label, (15.0 * self.dp).round()) + 32.0 * self.dp;
+            let w = self.text.measure(label, (taille * self.dp).round()) + marge;
             let t = Rect::new(x, r.y, w, r.h);
             if self.ui.click(sub_id(id, i), t, None) {
                 result = i;
             }
             let on = i == selected;
             self.dl.rrect(t, r.h / 2.0, if on { ACCENT } else { CHIP });
-            self.centered(t, label, 15.0, if on { SURFACE } else { TEXT });
-            x += w + 6.0 * self.dp;
+            self.centered(t, label, taille, if on { SURFACE } else { TEXT });
+            x += w + ecart;
         }
         result
     }

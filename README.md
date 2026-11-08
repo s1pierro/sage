@@ -6,8 +6,205 @@ Il vise un monde ouvert, avec d'autres valeurs que la violence.
 
 ![Le mannequin marche dans le décor de S.A.G.E.](docs/apercu.png)
 
-**Télécharger l'APK** : [sage-0.32.apk](https://github.com/s1pierro/sage/releases/download/v0.32/sage-0.32.apk)
+**Télécharger l'APK** : [sage-0.51.apk](https://github.com/s1pierro/sage/releases/download/v0.51/sage-0.51.apk)
 (Android 8 ou plus récent, arm64).
+
+## Version 0.51 : la voirie seule
+
+- Dans l'onglet Voirie, **Tout / Voirie seule** : en voirie seule, la vue ne garde que
+  le terrain des tuiles et leurs rues (chaussées, caniveaux, bordures, trottoirs,
+  accotements) ; bâtiments, arbres, objets, ponts et lointain s'effacent. Les murs
+  arrêtent toujours le joueur.
+
+## Version 0.50 : le trottoir jusque dans l'angle
+
+- Le trottoir va jusqu'à la façade en regardant droit devant depuis chaque point, en
+  s'éloignant de la chaussée : dans l'angle d'un carrefour, ce regard part en diagonale
+  et rejoint l'angle du bâtiment ; plus de triangle de terrain entre le bâtiment et la
+  bordure arrondie.
+- Entre deux façades proches (jusqu'à 10 m de part et d'autre), la limite du trottoir se
+  tire de l'une à l'autre, comme avant la 0.49 ; pas derrière un bâtiment.
+
+## Version 0.49 : les rues d'un seul tenant
+
+- Chaussées, caniveaux, bordures, trottoirs et accotements sont désormais tirés d'un
+  **même champ**, calculé pour toutes les rues à la fois : la chaussée et le trottoir
+  partagent exactement la même bordure, et aux carrefours les trottoirs des rues qui se
+  croisent ne font qu'une surface, **sans trou ni recouvrement**.
+- Les angles des carrefours s'arrondissent : **Angles des carrefours** dans l'onglet
+  Procédures, section Chaussées (4 m d'origine, de 0 à 10 m ; 0 : angles vifs). Deux
+  morceaux d'une même rue, ou deux rues parallèles, ne s'arrondissent pas entre eux.
+- Le trottoir va jusqu'à la façade d'un bâtiment à moins de la portée (l'enveloppe du
+  bâtiment et de la bordure en face), sinon il garde sa largeur.
+- Au raccord de deux morceaux d'une rue coudée, la chaussée ne s'ouvre plus.
+- L'accotement ne se pose plus sous la chaussée et les trottoirs, seulement là où il se
+  voit.
+
+## Version 0.48 : la bordure pavée sur son épaisseur
+
+- La face de la bordure, côté chaussée, porte les mêmes pavés ternes que le rang du
+  trottoir, qui s'y replient sans raccord à l'arête.
+
+## Version 0.47 : bordures pavées à leurs mesures
+
+- Le long de la bordure, le trottoir porte un rang de pavés ternes de **20 cm de large
+  et 1 m de long**, puis le bitume jusqu'à la façade.
+- Côté chaussée, le caniveau pavé fait **15 cm de large**, en pavés de **90 cm de
+  long**.
+- La texture des pavés est un rang de quatre pavés ; chaque bande choisit la longueur
+  de ses pavés.
+
+## Version 0.45 : bordures pavées
+
+- Le long de la bordure, le trottoir porte un **rang de pavés clairs de 20 cm de large
+  et 50 cm de long**, puis le bitume sombre jusqu'à la façade.
+- Côté chaussée, au pied de la bordure, un **caniveau pavé** de 15 cm (pavés de 50 cm,
+  un peu plus sombres).
+- Les deux utilisent la même texture générique : un rang de pavés, étiré à la largeur
+  de la bande.
+
+## Version 0.44 : le profil des routes lissé sur tout le réseau
+
+- La hauteur des routes se lisse sur tout le réseau à la fois, sans s'arrêter au bout
+  de chaque voie : un carrefour est un seul point, d'une seule hauteur, lissé avec
+  toutes les routes qui y passent. Les bouts des ponts gardent la hauteur du tablier.
+  Les rues se lissent entre elles d'abord, puis les voies piétonnes, chemins et
+  sentiers, accrochés aux rues (ils ne les tirent plus vers le haut ou le bas).
+- Onglet Procédures, Terrassement : **Profil des routes lissé** (20 m d'origine, de 0 à
+  60 m). À Rouen, avec 20 m, les cassures de pente (plus de 8 % de différence d'un
+  segment à l'autre) passent de 1 563 à 236, et les pentes de plus de 25 % de 205 à 12.
+  (Il faut régénérer les régions.)
+
+## Version 0.43 : des trottoirs revêtus
+
+- Les trottoirs sont revêtus de deux petites textures génériques, faites au lancement et
+  réutilisables : une **bande de pavés clairs** (50 cm, pavés de 25 × 12,5 cm en rangs
+  décalés) le long de la bordure, puis du **bitume sombre** jusqu'à la façade, comme
+  dans le Rouen des années 1990. Le chant côté façade est sombre lui aussi.
+
+## Version 0.42 : les voies piétonnes cèdent aux rues
+
+- Les voies piétonnes, chemins et sentiers n'arrêtent plus un trottoir : celles qui
+  longent une rue (les trottoirs notés à part dans OSM) passent sous lui, et il va
+  jusqu'à la façade.
+- Au terrassement, les plateformes des rues et les abords des bâtiments passent avant
+  celles des voies piétonnes : une voie piétonne plus basse ne creuse plus le bord de la
+  rue. Entre une voie piétonne et une rue, pas de travée. (Il faut régénérer les régions
+  pour le terrassement.)
+
+## Version 0.41 : les tronçons de voirie
+
+- Dans l'onglet Voirie, toucher un fil choisit un **tronçon** : la part de la route d'un
+  carrefour à l'autre. Il se dessine le long du fil : son axe épais, les bords de sa
+  chaussée (à sa largeur), ceux de ses trottoirs s'ils sont réglés, et ses deux bouts.
+- Le panneau montre sa longueur, son genre et sa largeur d'origine, et règle pour ce
+  tronçon seulement :
+  - sa **priorité** (grande route, route, service, piétonne, chemin, sentier) ;
+  - la **largeur de la chaussée** (1,5 à 20 m) ;
+  - ses **trottoirs** : selon le quartier, sans, ou d'**au moins** une largeur (0,5 à
+    6 m, même hors des quartiers).
+- Chaussée et trottoirs se refont aussitôt ; la largeur et la priorité changent aussi
+  le terrassement, que le panneau propose de régénérer. « Valeurs d'origine » efface la
+  retouche. Les retouches sont gardées dans `monde/voirie.json`, à part des régions.
+
+## Version 0.40 : l'onglet Voirie
+
+- L'éditeur a un cinquième onglet, **Voirie**, pour éditer les routes. Pour commencer :
+  quand il est ouvert, un **fil** suit l'axe de chaque route à moins de 192 m du point
+  visé, par-dessus la vue, de la couleur de son genre (orange les grandes routes, jaune
+  les routes, blanc les voies de service, bleu les voies piétonnes, brun les chemins,
+  vert les sentiers).
+- L'onglet compte les routes alentour par genre, et leur longueur.
+- Les onglets se serrent quand la place manque.
+
+## Version 0.39 : les abords des bâtiments
+
+- Avec le terrassement en talus, un bâtiment dont un coin est à moins d'une distance
+  réglable du bord d'une rue (Procédures › « Bâtiments au niveau de la rue », 12 m
+  d'origine, 0 pour aucun) a son **abord** terrassé à la hauteur de la rue : sous lui,
+  et entre lui et la rue ; un talus le rejoint au-delà. Le trottoir va à plat jusqu'à
+  la façade.
+- Un bâtiment dont le sol a été remonté jusqu'à la rue monte d'autant : il garde sa
+  hauteur au-dessus du sol. Là où le sol descend, son pied descend.
+- Comme tout le terrassement, cela entre dans les régions en les régénérant (bâtiments
+  venus du lieu ; les retouchés, enrichis ou posés restent tels quels).
+
+## Version 0.38 : le terrassement au choix, et régénérer sur place
+
+- Procédures › Terrassement : **Talus** (plateforme et talus de la 0.35, avec les
+  travées), **Fondu** (le sol aplani sous la chaussée et fondu sur les bas-côtés, comme
+  avant) ou **Aucun** (le relief tel quel).
+- Quand le terrassement a changé, l'onglet propose de **régénérer** la région visée,
+  avec ses voisines, ou toute la carte, et suit l'avancement. Le besoin est gardé
+  jusqu'à la régénération, même après avoir fermé l'application.
+- La chaussée et l'accotement portent ce qui marche ou roule (le sol dessous ne suit
+  pas toujours : terrassement fondu ou absent, région pas encore régénérée).
+
+## Version 0.37 : l'onglet Procédures
+
+- L'éditeur a un quatrième onglet, **Procédures**, pour régler et essayer ce qui se
+  bâtit autour des routes :
+  - **Chaussées** maillées ou seulement peintes ; avec ou sans **accotements**, et leur
+    largeur ;
+  - **Trottoirs** ou non ; leur largeur sans façade, jusqu'où ils vont chercher la
+    façade, la hauteur de la bordure ;
+  - **Terrassement** : la plateforme, la pente et la portée des talus.
+- Chaussées, accotements et trottoirs se refont aussitôt sur les tuiles chargées ; le
+  terrassement entre dans le relief des régions, il s'applique en les régénérant.
+- « Valeurs d'origine » remet tout comme avant. Les réglages sont gardés
+  (`reglages/procedures.json`).
+
+## Version 0.36 : les chaussées
+
+- Les grandes routes, les rues et les voies de service ont leur propre **chaussée**,
+  posée sur la plateforme du terrassement, aux bords nets (au lieu d'être peintes sur la
+  grille du sol). Les carrefours se fondent d'eux-mêmes ; une route s'arrête net à son
+  bout.
+- De chaque côté, un **accotement** de 2 m (terre et gravier à la campagne, gris en
+  ville) rejoint le terrain ; il finit par un chant qui descend sous le sol, sans jour
+  sur les remblais. En ville, les trottoirs le recouvrent là où ils sont.
+- Calculées à la volée, tuile par tuile : rien à régénérer de plus que pour la 0.35.
+  Chemins, sentiers et voies piétonnes restent peints sur le sol.
+
+## Version 0.35 : le terrassement des routes
+
+- Le sol se terrasse sous les routes du lieu réel : la chaussée et, de chaque côté, la
+  place d'un trottoir ou d'un accotement (2 m, 50 cm pour les chemins) sont à plat ;
+  au-delà, un talus d'au plus 2 pour 3 rejoint le relief, en déblai ou en remblai, sur
+  20 m au plus. Dans l'eau, pas de talus : la berge reste un quai.
+- Le profil des routes est lissé une fois de plus, et toutes les routes d'un carrefour
+  s'y retrouvent à la même hauteur (celle du tablier au bout d'un pont).
+- Deux routes qui se croisent sans carrefour à plus d'un mètre d'écart : le sol est à
+  la hauteur de la plus basse, la plus haute passe sur une **travée** (un tablier avec
+  ses garde-corps) au-dessus de la plateforme de l'autre.
+- Un bâtiment au bord d'un talus descend son pied jusqu'au sol terrassé.
+- Le terrassement se calcule en relisant le lieu (`lieu.reel` inchangé) : il faut
+  **régénérer** les régions (Carte › Régénérer) pour qu'il apparaisse ; les retouches
+  sont gardées.
+
+## Version 0.34 : l'heure du jour
+
+- **Réglages → Affichage → Soleil** : un curseur règle l'heure, au quart d'heure, de
+  0 h à 24 h. Le soleil suit sa course d'un jour d'été à la latitude du lieu (celle de
+  Rouen pour l'île) : levé au nord-est, au sud à midi, couché au nord-ouest. Les ombres
+  portées tournent et s'allongent avec lui.
+- Au lever et au coucher, la lumière se dore et le ciel rosit ; la nuit, plus de
+  lumière directe ni d'ombres, un ciel bleu sombre où se fond le lointain.
+- L'heure est gardée avec les autres réglages d'affichage.
+
+## Version 0.33 : les trottoirs
+
+- Les grandes routes, les rues et les voies de service des quartiers (zones habitées
+  et d'activités) ont des **trottoirs** : une dalle à 15 cm au-dessus de la chaussée,
+  avec sa bordure, qui va jusqu'à la façade du bâtiment voisin quand elle est à moins
+  de 12 m, sinon large de 2 m. Entre deux façades proches, la largeur se tire de l'une à
+  l'autre ; elle est lissée le long de la rue. À la campagne, pas de trottoir.
+- Un trottoir s'arrête à la chaussée d'une autre rue (aux carrefours) et à l'eau. Il se
+  monte sans sauter, et arrête ce qui roule ou marche comme le reste du décor.
+- Calculés à la volée tuile par tuile, comme les arbres écartés : un bâtiment posé,
+  déplacé ou agrandi refait aussitôt le trottoir devant lui. Rien ne s'écrit, les
+  régions n'ont pas à être refaites.
+- La chaussée est peinte pleine jusqu'à son bord.
 
 ## Version 0.32 : l'emprise tirée du modèle
 

@@ -89,9 +89,10 @@ pub fn couleur_lieu(r: &dyn Sol, x: f64, z: f64, h: f64, n: [f32; 3]) -> [f32; 3
     let dessus = h - r.niveau() as f64;
     c = melange(c, [0.50, 0.47, 0.38], e.max(rampe(1.0, 0.2, dessus)));
     c = melange(c, [0.36, 0.38, 0.34], rampe(-0.5, -4.0, dessus));
-    // La chaussée, son bord en douceur sur un mètre
+    // La chaussée, pleine jusqu'à son bord (au pied de la bordure du trottoir), en
+    // douceur sur un demi-mètre au-delà
     if let Some(p) = r.route(x, z) {
-        c = melange(c, crate::reel::teinte(p.genre), rampe(0.5, -0.5, p.hors() as f64));
+        c = melange(c, crate::reel::teinte(p.genre), rampe(0.5, 0.0, p.hors() as f64));
     }
     c
 }
@@ -155,6 +156,35 @@ fn rampe(a: f64, b: f64, x: f64) -> f64 {
 }
 
 impl Campagne {
+    /// Les routes (absolues) dont un point est dans le rectangle (x, z bas, x, z hauts) :
+    /// celles des régions du monde matérialisé (une seule fois chacune), sinon du lieu réel.
+    pub fn routes_pres(&self, x0: f32, z0: f32, x1: f32, z1: f32) -> Vec<crate::reel::Route> {
+        let touche = |r: &crate::reel::Route| r.points.iter().any(|p| p[0] >= x0 && p[0] <= x1 && p[1] >= z0 && p[1] <= z1);
+        if let Some(m) = &self.monde {
+            let mut vues = std::collections::HashSet::new();
+            let mut l = Vec::new();
+            let g = |v: f32| (v as f64 / crate::regions::METRES).floor() as i32;
+            for rj in g(z0)..=g(z1) {
+                for ri in g(x0)..=g(x1) {
+                    let Some(r) = m.region(ri, rj) else { continue };
+                    for ro in r.routes.iter().filter(|ro| touche(ro)) {
+                        let (a, b) = (ro.points[0], ro.points[ro.points.len() - 1]);
+                        if vues.insert((ro.genre, ro.points.len(), a[0].to_bits(), a[1].to_bits(), b[0].to_bits(), b[1].to_bits())) {
+                            l.push(ro.clone());
+                        }
+                    }
+                }
+            }
+            return l;
+        }
+        self.reel.as_ref().map_or_else(Vec::new, |r| r.routes.iter().filter(|ro| touche(ro)).cloned().collect())
+    }
+
+    /// La latitude du lieu, en degrés : celle du lieu réel, ou celle de Rouen pour l'île.
+    pub fn latitude(&self) -> f64 {
+        self.monde.as_ref().and_then(|m| m.lat).or(self.reel.as_ref().map(|r| r.lat)).unwrap_or(crate::moteur::scene::LATITUDE)
+    }
+
     /// Le relief brut de `graine`, sans érosion.
     pub fn brute(graine: u32) -> Campagne {
         Campagne { graine, erosion: None, reel: None, monde: None }
@@ -327,15 +357,15 @@ impl Source for Campagne {
     }
 
     /// Les bâtiments et les ponts de la tuile, et ses arbres.
-    fn bati(&self, i: i32, j: i32) -> Option<(Vec<f32>, Vec<[[f32; 3]; 3]>)> {
+    fn bati(&self, i: i32, j: i32) -> Option<crate::moteur::Bati3d> {
         if let Some(m) = &self.monde {
             return m.bati(i, j);
         }
-        let (mut v, mut t) = self.reel.as_ref()?.bati(i, j).unwrap_or_default();
+        let mut b = self.reel.as_ref()?.bati(i, j).unwrap_or_default();
         let (va, ta) = crate::vegetation::arbres(self, i, j);
-        v.extend(va);
-        t.extend(ta);
-        (!v.is_empty()).then_some((v, t))
+        b.sommets.extend(va);
+        b.triangles.extend(ta);
+        b.non_vide()
     }
 
     fn tuile(&self, i: i32, j: i32) -> Contenu {

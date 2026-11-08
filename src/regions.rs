@@ -537,8 +537,10 @@ impl Region {
         }
         // Les routes qui approchent la région
         let dans = |x0b: f32, x1b: f32, z0b: f32, z1b: f32| x1b >= x0 as f32 && x0b <= (x0 + METRES) as f32 && z1b >= z0 as f32 && z0b <= (z0 + METRES) as f32;
+        // (Les routes lues et profilées, sans les retouches de la voirie : elles
+        // s'appliquent à la lecture)
         let routes: Vec<Route> = r
-            .routes
+            .routes_profilees
             .iter()
             .filter(|ro| {
                 let m = ro.largeur / 2.0 + crate::reel::epaule(ro.genre) + 1.0;
@@ -554,7 +556,7 @@ impl Region {
             let c = b.centre();
             let t = tuile(c[0], c[1]);
             if chez_nous(t) {
-                batiments.push(Bati::du_lieu(format!("bat-{k}"), b));
+                batiments.push(Bati::du_lieu(format!("bat-{k}"), &r.assis(b)));
             }
         }
         let mut ponts = Vec::new();
@@ -828,10 +830,10 @@ impl Region {
 
     /// Les bâtiments, les ponts et les arbres de la tuile (i, j), dans son repère ; les
     /// bâtiments retouchés (`retouches`, par identifiant) à la place des leurs.
-    pub fn bati(&self, i: i32, j: i32, retouches: Option<&HashMap<String, Bati>>) -> Option<(Vec<f32>, Vec<[[f32; 3]; 3]>)> {
+    pub fn bati(&self, i: i32, j: i32, retouches: Option<&HashMap<String, Bati>>) -> Option<crate::moteur::Bati3d> {
         self.rang(i, j)?;
         let (ox, oz) = (i as f32 * TAILLE, j as f32 * TAILLE);
-        let (mut v, mut t) = (Vec::new(), Vec::new());
+        let (mut v, mut t, mut r) = (Vec::new(), Vec::new(), <[Vec<f32>; crate::moteur::REVETEMENTS]>::default());
         for p in self.ponts.iter().filter(|p| p.tuile == (i, j)) {
             let (a, b) = ([p.a[0] - ox, p.a[1] - oz, p.a[2]], [p.b[0] - ox, p.b[1] - oz, p.b[2]]);
             crate::reel::monter_pont(&mut v, &mut t, a, b, p.largeur, p.teinte);
@@ -843,10 +845,62 @@ impl Region {
         for b in retouches.into_iter().flat_map(|r| r.values()).filter(|b| b.tuile == (i, j) && !b.masquee && b.detail.is_none()) {
             b.monter(i, j, &mut v, &mut t);
         }
+        // Les chaussées, leurs accotements, et les trottoirs des rues jusqu'aux façades
+        self.trottoirs(i, j, retouches, &mut t, &mut r);
         let (va, ta) = crate::vegetation::monter(&self.arbres_libres(i, j, retouches), i, j);
         v.extend(va);
         t.extend(ta);
-        (!v.is_empty()).then_some((v, t))
+        crate::moteur::Bati3d { sommets: v, triangles: t, revetus: r }.non_vide()
+    }
+
+    /// La hauteur du sol en (x, z) absolus, rognée à la région.
+    fn sol_en(&self, x: f32, z: f32) -> f32 {
+        let gx = ((x as f64 - coin(self.ri)) / PAS).clamp(0.0, (N - 1) as f64);
+        let gz = ((z as f64 - coin(self.rj)) / PAS).clamp(0.0, (N - 1) as f64);
+        let (a, b) = (gx.floor() as usize, gz.floor() as usize);
+        let (u, v) = (gx - a as f64, gz - b as f64);
+        let (h00, h10, h01, h11) = (self.point(a, b), self.point(a + 1, b), self.point(a, b + 1), self.point(a + 1, b + 1));
+        ((h00 * (1.0 - u) + h10 * u) * (1.0 - v) + (h01 * (1.0 - u) + h11 * u) * v) as f32
+    }
+
+    fn grille(&self, x: f32, z: f32, pas: f64, n: usize) -> (usize, usize) {
+        let g = |v: f32, r: i32| ((v as f64 - coin(r)) / pas).round().clamp(0.0, (n - 1) as f64) as usize;
+        (g(x, self.ri), g(z, self.rj))
+    }
+
+    /// Les trottoirs et les chaussées de la tuile (i, j), ajoutés à ses sommets et à ses
+    /// triangles.
+    #[allow(clippy::too_many_arguments)]
+    fn trottoirs(&self, i: i32, j: i32, retouches: Option<&HashMap<String, Bati>>, t: &mut Vec<[[f32; 3]; 3]>, r: &mut [Vec<f32>; crate::moteur::REVETEMENTS]) {
+        let m = crate::procedures::PORTEE_MAX + 8.0;
+        let batis = self.batis_pres(i as f32 * TAILLE - m, j as f32 * TAILLE - m, (i + 1) as f32 * TAILLE + m, (j + 1) as f32 * TAILLE + m, retouches);
+        let urbain = |x: f32, z: f32| {
+            let (a, b) = self.grille(x, z, PAS_SOL, N_SOL);
+            matches!(self.sol[b * N_SOL + a], crate::reel::HABITE | crate::reel::ZONE)
+        };
+        let sol = |x: f32, z: f32| self.sol_en(x, z);
+        let eau = |x: f32, z: f32| {
+            let (a, b) = self.grille(x, z, PAS, N);
+            self.est_eau(a, b)
+        };
+        let batis = batis.into_iter().map(|b| b.b.contour.as_slice()).collect();
+        let l = crate::rues::Lieu { routes: &self.routes, index: &self.index, batis, urbain: &urbain, sol: &sol, eau: &eau };
+        crate::rues::monter(&l, i, j, t, r);
+    }
+
+    /// Les bâtiments debout (retouches comprises) dont l'emprise touche le rectangle.
+    fn batis_pres<'a>(&'a self, x0: f32, z0: f32, x1: f32, z1: f32, retouches: Option<&'a HashMap<String, Bati>>) -> Vec<&'a Bati> {
+        let retouche = |id: &str| retouches.is_some_and(|r| r.contains_key(id));
+        self.batiments
+            .iter()
+            .filter(|b| !retouche(&b.id))
+            .chain(retouches.into_iter().flat_map(|r| r.values()))
+            .filter(|b| !b.masquee)
+            .filter(|b| {
+                let c = &b.b.contour;
+                c.iter().any(|p| p[0] >= x0) && c.iter().any(|p| p[0] <= x1) && c.iter().any(|p| p[1] >= z0) && c.iter().any(|p| p[1] <= z1)
+            })
+            .collect()
     }
 
     /// Les arbres de la tuile (i, j), sauf ceux qu'un bâtiment debout recouvre (retouches
@@ -858,18 +912,7 @@ impl Region {
         // Les bâtiments dont l'emprise touche la tuile
         let (x0, z0) = (i as f32 * TAILLE - ECART_ARBRES, j as f32 * TAILLE - ECART_ARBRES);
         let (x1, z1) = (x0 + TAILLE + 2.0 * ECART_ARBRES, z0 + TAILLE + 2.0 * ECART_ARBRES);
-        let retouche = |id: &str| retouches.is_some_and(|r| r.contains_key(id));
-        let proches: Vec<&Bati> = self
-            .batiments
-            .iter()
-            .filter(|b| !retouche(&b.id))
-            .chain(retouches.into_iter().flat_map(|r| r.values()))
-            .filter(|b| !b.masquee)
-            .filter(|b| {
-                let c = &b.b.contour;
-                c.iter().any(|p| p[0] >= x0) && c.iter().any(|p| p[0] <= x1) && c.iter().any(|p| p[1] >= z0) && c.iter().any(|p| p[1] <= z1)
-            })
-            .collect();
+        let proches = self.batis_pres(x0, z0, x1, z1, retouches);
         if proches.is_empty() {
             return arbres.to_vec();
         }
@@ -966,6 +1009,8 @@ pub struct Regions {
     dossier: PathBuf,
     pub nom: String,
     pub niveau: f32,
+    /// La latitude du lieu, en degrés, s'il est connu : la course du soleil.
+    pub lat: Option<f64>,
     cache: Mutex<Cache>,
     silhouettes: Mutex<Option<Silhouettes>>,
     /// Les blocs lointains de chaque région, pour refaire ceux d'une région retouchée.
@@ -989,12 +1034,18 @@ impl Regions {
             dossier: dossier.to_path_buf(),
             nom: lieu.and_then(|l| l.get("nom")).and_then(J::txt).unwrap_or("Monde").to_string(),
             niveau: lieu.and_then(|l| f(l.get("niveau"))).unwrap_or(0.0),
+            lat: lieu.and_then(|l| l.get("lat")).and_then(J::num),
             cache: Mutex::new(Cache { regions: HashMap::new(), horloge: 0 }),
             silhouettes: Mutex::new(None),
             blocs: Mutex::new(HashMap::new()),
             retouches: Mutex::new(Retouches::default()),
             version: Default::default(),
         })
+    }
+
+    /// Oublie les régions gardées : elles seront relues (après une retouche de la voirie).
+    pub fn oublier(&self) {
+        self.cache.lock().unwrap().regions.clear();
     }
 
     fn chemin(&self, ri: i32, rj: i32) -> PathBuf {
@@ -1010,7 +1061,15 @@ impl Regions {
             e.1 = h;
             return e.0.clone();
         }
-        let r = std::fs::read(self.chemin(ri, rj)).ok().and_then(|o| Stuff::lire(&o).ok()).and_then(|s| Region::depuis(&s).ok()).map(Arc::new);
+        // Les retouches de la voirie, par-dessus les routes écrites
+        let r = std::fs::read(self.chemin(ri, rj)).ok().and_then(|o| Stuff::lire(&o).ok()).and_then(|s| Region::depuis(&s).ok()).map(|mut r| {
+            let n = r.routes.len();
+            crate::voirie::appliquer(&mut r.routes);
+            if r.routes.len() != n || !crate::voirie::courantes().is_empty() {
+                r.index = crate::reel::indexer(&r.routes);
+            }
+            Arc::new(r)
+        });
         if c.regions.len() >= CAPACITE {
             if let Some(k) = c.regions.iter().min_by_key(|(_, e)| e.1).map(|(k, _)| *k) {
                 c.regions.remove(&k);
@@ -1046,7 +1105,7 @@ impl Regions {
     }
 
     /// Les bâtiments, ponts et arbres de la tuile (i, j).
-    pub fn bati(&self, i: i32, j: i32) -> Option<(Vec<f32>, Vec<[[f32; 3]; 3]>)> {
+    pub fn bati(&self, i: i32, j: i32) -> Option<crate::moteur::Bati3d> {
         let (ri, rj) = (de_tuile(i), de_tuile(j));
         self.region(ri, rj)?.bati(i, j, self.retouches_de(ri, rj).as_ref())
     }
@@ -1608,8 +1667,8 @@ mod tests {
         }
         // Les bâtiments, ponts et arbres de chaque tuile : autant de triangles qu'avant
         for (i, j) in [(1, 1), (4, 4), (5, 4), (0, 0), (7, 3)] {
-            let avant = c.bati(i, j).map_or(0, |(_, t)| t.len());
-            let apres = lu.bati(i, j, None).map_or(0, |(_, t)| t.len());
+            let avant = c.bati(i, j).map_or(0, |b| b.triangles.len());
+            let apres = lu.bati(i, j, None).map_or(0, |b| b.triangles.len());
             assert_eq!(avant, apres, "tuile ({i}, {j})");
         }
         // Le bâtiment revient au même endroit, à la même hauteur
@@ -1643,7 +1702,7 @@ mod tests {
             for k in 0..a.relief.h.len() {
                 assert!((a.relief.h[k] - b.relief.h[k]).abs() < 0.01, "tuile ({i}, {j}), point {k}");
             }
-            assert_eq!(avant.bati(i, j).map(|x| x.1.len()), apres.bati(i, j).map(|x| x.1.len()), "tuile ({i}, {j})");
+            assert_eq!(avant.bati(i, j).map(|x| x.triangles.len()), apres.bati(i, j).map(|x| x.triangles.len()), "tuile ({i}, {j})");
         }
         // Le lointain et la carte, d'un tenant ou par régions : autant de sommets
         assert_eq!(crate::lointain::sommets(&avant).len(), crate::lointain::sommets(&apres).len());
@@ -1653,7 +1712,7 @@ mod tests {
         // inconnues gardées ; démoli, il ne se voit plus mais reste dans le fichier
         let b = m.bati_sous(1, 1, 106.0, 105.0).expect("la maison");
         assert!(m.bati_sous(1, 1, 90.0, 90.0).is_none());
-        let tri = |m: &Regions| m.bati(1, 1).map_or(0, |x| x.1.len());
+        let tri = |m: &Regions| m.bati(1, 1).map_or(0, |x| x.triangles.len());
         let avant_tri = tri(&m);
         let mut x = b.clone();
         x.forme.toit = crate::toits::DEUX_PANS;

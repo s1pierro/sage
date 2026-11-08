@@ -86,7 +86,9 @@ impl Retour {
 pub const AJOUT: usize = 0;
 pub const TOPOLOGIE: usize = 1;
 pub const CARTE: usize = 2;
-pub const ONGLETS: [&str; 3] = ["Ajout", "Topologie", "Carte"];
+pub const PROCEDURES: usize = 3;
+pub const VOIRIE: usize = 4;
+pub const ONGLETS: [&str; 5] = ["Ajout", "Topologie", "Carte", "Procédures", "Voirie"];
 
 /// Les poignées de l'objet choisi.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

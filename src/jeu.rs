@@ -51,7 +51,11 @@ const TANGAGE: f32 = 0.35;
 pub const JOUEUR: &str = "joueur";
 /// Tuiles chargées jusqu'à cette distance du joueur (en tuiles), gardées jusqu'à la
 /// suivante : 25 tuiles, 320 m de côté.
+use crate::moteur::TAILLE;
+
 const RAYON_TUILES: i32 = 2;
+/// L'onglet Voirie : les routes à moins de tant du point visé ont leur fil (m).
+const RAYON_VOIRIE: f32 = 192.0;
 const GARDE_TUILES: i32 = 3;
 /// En édition, on voit jusqu'à tant de tuiles, sans brouillard : 1 km.
 pub const EDITION_TUILES: i32 = 16;
@@ -92,8 +96,6 @@ pub const PROFONDEUR: f32 = 1.2;
 
 /// En édition, tant de tuiles se chargent par image.
 const EDITION_CHARGE: usize = 4;
-
-pub const CIEL: [f32; 3] = [0.70, 0.80, 0.92];
 
 /// Un fichier à déposer hors de l'application.
 #[derive(Clone, Debug, PartialEq)]
@@ -143,6 +145,20 @@ pub struct App {
     pub onglet_reglages: usize,
     /// La distance d'affichage et le brouillard.
     pub affichage: Affichage,
+    /// Les réglages des procédures (onglet Procédures de l'éditeur), et dans combien de
+    /// secondes les tuiles chargées se refont après un changement.
+    pub procedures: crate::procedures::Reglages,
+    procedures_a_refaire: Option<f32>,
+    /// Les routes autour du point visé (absolues), pour l'onglet Voirie, et la tuile
+    /// (absolue) autour de laquelle elles ont été prises.
+    voirie: Option<((i32, i32), Vec<crate::reel::Route>)>,
+    /// Les retouches de la voirie (`monde/voirie.json`), le tronçon choisi (ses bouts,
+    /// absolus) et s'il faut relire les régions (après une retouche).
+    pub retouches_voirie: crate::voirie::Voirie,
+    troncon: Option<([f32; 2], [f32; 2])>,
+    voirie_a_relire: bool,
+    /// Dans l'onglet Voirie, ne dessiner que la voirie et le terrain des tuiles.
+    voirie_seule: bool,
     /// L'éditeur ouvert, le jeu est en pause et le joueur caché : la caméra tourne autour
     /// de ce point du sol, que la manette déplace.
     pub visee: Option<[f32; 3]>,
@@ -185,6 +201,8 @@ impl App {
         let mut maillages = Maillages::default();
         let manettes = Manettes::new(dossier.as_ref().map(|d| d.join("reglages").join("manettes")));
         let affichage = Affichage::ouvrir(dossier.as_ref().map(|d| d.join("reglages")), RAYON_TUILES, crate::moteur::scene::BROUILLARD);
+        let procedures = crate::procedures::Reglages::ouvrir(dossier.as_ref().map(|d| d.join("reglages")));
+        let retouches_voirie = crate::voirie::Voirie::ouvrir(dossier.as_ref().map(|d| d.join("monde").join("voirie.json")));
         let (catalogue, relus) = Catalogue::ouvrir(dossier.as_ref().map(|d| d.join("catalogue")));
         let depot = dossier.map(|d| d.join("monde")).map_or_else(Depot::memoire, Depot::dossier);
         let fiche = depot.lire_fiche().unwrap_or_default();
@@ -214,6 +232,11 @@ impl App {
         let campagne = relue.unwrap_or_else(|| Campagne::brute(fiche.graine));
         let source = Box::new(campagne.clone());
         let mut tuiles = Tuiles::avec(source, depot, fiche, affichage.distance, affichage.distance + GARDE_TUILES - RAYON_TUILES);
+        // Les revêtements (bitume, pavés des trottoirs), faits une fois pour toutes
+        let mut textures = Textures::default();
+        for (k, im) in crate::revetements::images().into_iter().enumerate() {
+            tuiles.revetements[k] = Some(textures.mettre(crate::revetements::IDENTIFIANTS[k], Arc::new(im)));
+        }
         let o = monde.origine;
         tuiles.suivre(&mut monde, &mut maillages, (o[0], o[1]), usize::MAX);
         physique::poser(&mut monde);
@@ -223,7 +246,7 @@ impl App {
         let mut a = App {
             monde,
             maillages,
-            textures: Textures::default(),
+            textures,
             tuiles,
             horloge: Horloge::default(),
             joueur,
@@ -245,6 +268,13 @@ impl App {
             remplacer: None,
             onglet_reglages: 0,
             affichage,
+            procedures,
+            procedures_a_refaire: None,
+            voirie: None,
+            retouches_voirie,
+            troncon: None,
+            voirie_a_relire: false,
+            voirie_seule: false,
             visee: None,
             instant: 0.0,
             carte: None,
@@ -319,7 +349,13 @@ impl App {
         };
         let (ri, rj) = (crate::regions::de_tuile(o[0]), crate::regions::de_tuile(o[1]));
         let e = crate::regions::etendue();
-        let liste: Vec<(i32, i32)> = (-rayon..=rayon).flat_map(|dj| (-rayon..=rayon).map(move |di| (ri + di, rj + dj))).filter(|(a, b)| e.contains(a) && e.contains(b)).collect();
+        // Un rayon négatif : toute la carte
+        let liste: Vec<(i32, i32)> = if rayon < 0 {
+            e.clone().flat_map(|b| e.clone().map(move |a| (a, b))).collect()
+        } else {
+            (-rayon..=rayon).flat_map(|dj| (-rayon..=rayon).map(move |di| (ri + di, rj + dj))).filter(|(a, b)| e.contains(a) && e.contains(b)).collect()
+        };
+        let n = liste.len();
         let av = Arc::new(crate::regions::Avancement::default());
         let (tx, rx) = std::sync::mpsc::channel();
         let a = av.clone();
@@ -328,7 +364,11 @@ impl App {
             let _ = tx.send(m.regenerer(&liste, &a, fils));
         });
         self.fragment = Some((av, rx));
-        self.dire(format!("Régénération de {} autour de la région {ri} ; {rj}…", if rayon == 0 { "la région".to_string() } else { "9 régions".to_string() }));
+        self.dire(match rayon {
+            0 => format!("Régénération de la région {ri} ; {rj}…"),
+            1 => format!("Régénération de 9 régions autour de la région {ri} ; {rj}…"),
+            _ => format!("Régénération des {n} régions de la carte…"),
+        });
     }
 
     /// La régénération finie : les tuiles et le lointain se refont.
@@ -342,6 +382,7 @@ impl App {
         self.fragment = None;
         match fin {
             Ok((refaits, gardes)) => {
+                self.procedures.regenere();
                 if let Some(m) = self.campagne.monde.clone() {
                     self.editeur.bati = None;
                     self.prendre_campagne(Campagne::materialisee(m));
@@ -480,6 +521,7 @@ impl App {
     /// Le relief de la carte change de générateur (le même, érodé) : les tuiles se
     /// rechargent, le joueur se repose sur le sol.
     pub fn prendre_campagne(&mut self, c: Campagne) {
+        self.voirie = None;
         self.campagne = c.clone();
         self.tuiles.changer_source(&mut self.monde, &mut self.maillages, Box::new(c));
         let o = self.monde.origine;
@@ -1109,6 +1151,14 @@ impl App {
         } else {
             self.editeur.peindre(&mut self.monde, &mut self.maillages, &mut self.tuiles, None, dt);
         }
+        if edite && self.editeur.onglet == editeur::VOIRIE {
+            if let Some((None | Some(MANETTE), x, y)) = cx.ui.appui_bref() {
+                if w.contains(x, y) {
+                    self.choisir_troncon(&camera, x, y, cx.dp);
+                }
+            }
+            self.fils_voirie(cx, &camera, w);
+        }
         if edite && self.editeur.onglet == editeur::AJOUT {
             tenue = self.editeur.poignees(cx, &camera, w, &mut self.monde, &mut self.maillages, &mut self.tuiles);
         }
@@ -1164,10 +1214,29 @@ impl App {
             scene.trou = Some((trouees, [a[0] + 1.0, a[2] + 1.0, b[0] - 1.0, b[2] - 1.0]));
         }
         self.instant += dt;
+        // Les procédures ont changé : les tuiles chargées se refont, un peu après le
+        // dernier changement (pas à chaque pas d'un curseur)
+        if let Some(t) = self.procedures_a_refaire.as_mut() {
+            *t -= dt;
+            if *t <= 0.0 {
+                self.procedures_a_refaire = None;
+                // Une retouche de la voirie : les régions et les routes se relisent
+                if std::mem::take(&mut self.voirie_a_relire) {
+                    if let Some(m) = &self.campagne.monde {
+                        m.oublier();
+                    }
+                    self.voirie = None;
+                }
+                let tuiles: Vec<(i32, i32)> = self.tuiles.chargees.keys().copied().collect();
+                for k in tuiles {
+                    self.tuiles.refaire_bati(&mut self.monde, &mut self.maillages, k);
+                }
+            }
+        }
         scene.mer = Some(self.campagne.mer());
         scene.temps = self.instant % 3600.0;
         // Les ombres portées autour du joueur ; en pause, autour du point visé, sans lui
-        scene.soleil.centre = self.lieu().interpole(u).0;
+        scene.soleil = crate::moteur::scene::Soleil::a_heure(self.affichage.heure, self.campagne.latitude(), self.lieu().interpole(u).0, scene.soleil.rayon);
         if let Some(v) = self.visee {
             scene.soleil.centre = v;
             if let Some(k) = self.monde.rendu.get(self.joueur).map(|r| r.maillage) {
@@ -1176,6 +1245,11 @@ impl App {
         }
         // En topologie : le relief seul, et ses courbes de niveau, plus espacées de haut
         self.editeur.isolignes = 0.0;
+        // En voirie seule : le terrain des tuiles et leurs rues
+        if edite && self.editeur.onglet == editeur::VOIRIE && self.voirie_seule {
+            let m = &self.maillages;
+            scene.dessins.retain(|d| m.get(d.maillage).is_some_and(|x| x.id.starts_with("tuile/") || x.id.starts_with("revetement/")));
+        }
         if topo {
             let m = &self.maillages;
             scene.dessins.retain(|d| m.get(d.maillage).is_some_and(|x| x.id.starts_with("tuile/")));
@@ -1289,6 +1363,113 @@ impl App {
 
     /// L'onglet Carte, à côté de la carte : le point visé, où le joueur peut être
     /// téléporté, et le joueur.
+    /// L'onglet Voirie : le tronçon choisi et ses réglages, sinon les routes autour du
+    /// point visé, par genre.
+    fn panneau_voirie(&mut self, cx: &mut Cx, b: &mut widgets::Body) {
+        if let Some((t, r, ia, ib)) = self.reglages_troncon() {
+            self.panneau_troncon(cx, b, t, &r, ia, ib);
+            return;
+        }
+        if self.troncon.is_some() {
+            // Le tronçon n'est plus autour du point visé
+            self.troncon = None;
+        }
+        cx.section(b, "VOIRIE");
+        if let Some(k) = cx.liens(b, id("voirie-seule"), &["Tout", "Voirie seule"], Some(self.voirie_seule as usize)) {
+            self.voirie_seule = k == 1;
+        }
+        let o = self.monde.origine;
+        let c = self.visee.unwrap_or(self.lieu().pos);
+        let (x, z) = (c[0] + o[0] as f32 * TAILLE, c[2] + o[1] as f32 * TAILLE);
+        let routes = self.routes_voirie();
+        // Les routes dont un point est à portée, et leur longueur dans le cercle
+        let mut par_genre = [(0usize, 0.0f32); 6];
+        for r in routes {
+            let dans = |p: &[f32; 3]| (p[0] - x).hypot(p[1] - z) <= RAYON_VOIRIE;
+            if !r.points.iter().any(dans) {
+                continue;
+            }
+            let g = (r.genre as usize).min(5);
+            par_genre[g].0 += 1;
+            par_genre[g].1 += r.points.windows(2).filter(|s| dans(&s[0]) && dans(&s[1])).map(|s| (s[1][0] - s[0][0]).hypot(s[1][1] - s[0][1])).sum::<f32>();
+        }
+        let noms = ["Grandes routes", "Routes", "Voies de service", "Voies piétonnes", "Chemins", "Sentiers"];
+        let mut aucune = true;
+        for (k, (n, l)) in par_genre.iter().enumerate().filter(|(_, (n, _))| *n > 0) {
+            aucune = false;
+            cx.mesure(b, noms[k], &format!("{n} · {} m", dec(*l, 0)));
+        }
+        if aucune {
+            cx.paragraph(b, "Aucune route autour du point visé.");
+        }
+        cx.paragraph(b, &format!("Un fil suit l'axe de chaque route à moins de {} m du point visé, de la couleur de son genre : orange les grandes routes, jaune les routes, blanc les voies de service, bleu les voies piétonnes, brun les chemins, vert les sentiers. Touchez un fil pour choisir un tronçon (d'un carrefour à l'autre).", RAYON_VOIRIE as i32));
+    }
+
+    /// Les réglages du tronçon choisi.
+    fn panneau_troncon(&mut self, cx: &mut Cx, b: &mut widgets::Body, t: crate::voirie::Troncon, r: &crate::reel::Route, ia: usize, ib: usize) {
+        use crate::voirie::Troncon;
+        const NOMS: [&str; 6] = ["Grande route", "Route", "Service", "Piétonne", "Chemin", "Sentier"];
+        let (g0, l0) = t.origine;
+        let mut genre = t.genre.unwrap_or(g0);
+        let mut largeur = t.largeur.unwrap_or(l0);
+        cx.section(b, "TRONÇON");
+        cx.mesure(b, "Longueur", &format!("{} m", dec(crate::voirie::longueur(r, ia, ib), 0)));
+        cx.mesure(b, "D'origine", &format!("{} · {} m", NOMS[(g0 as usize).min(5)], dec(l0, 1)));
+        cx.section(b, "PRIORITÉ");
+        if let Some(k) = cx.liens(b, id("troncon-genre"), &NOMS, Some((genre as usize).min(5))) {
+            genre = k as u8;
+        }
+        cx.section(b, "CHAUSSÉE");
+        cx.slider(b, id("troncon-largeur"), "Largeur", &format!("{} m", dec(largeur, 1)), &mut largeur, 1.5, 20.0);
+        largeur = (largeur * 2.0).round() / 2.0;
+        cx.section(b, "TROTTOIRS");
+        let mut trottoir = t.trottoir;
+        let mode = match trottoir {
+            None => 0,
+            Some(w) if w <= 0.0 => 1,
+            Some(_) => 2,
+        };
+        if let Some(k) = cx.liens(b, id("troncon-trottoirs"), &["Selon le quartier", "Sans", "Au moins"], Some(mode)) {
+            trottoir = match k {
+                0 => None,
+                1 => Some(0.0),
+                _ => Some(trottoir.filter(|&w| w > 0.0).unwrap_or(crate::procedures::courantes().trottoir)),
+            };
+        }
+        if let Some(w) = trottoir.as_mut().filter(|w| **w > 0.0) {
+            cx.slider(b, id("troncon-trottoir"), "Largeur minimale", &format!("{} m", dec(*w, 2)), w, 0.5, 6.0);
+            *w = (*w * 4.0).round() / 4.0;
+        }
+        if genre > crate::reel::SERVICE {
+            cx.paragraph(b, "Les voies piétonnes, chemins et sentiers restent peints sur le sol, sans chaussée maillée ni trottoirs.");
+        }
+        let neuf = Troncon { genre: (genre != g0).then_some(genre), largeur: ((largeur - l0).abs() > 0.01).then_some(largeur), trottoir, ..t.clone() };
+        let liens: &[&str] = if t.vide() { &["Laisser le tronçon"] } else { &["Laisser le tronçon", "Valeurs d'origine"] };
+        let neuf = match cx.liens(b, id("troncon-actions"), liens, None) {
+            Some(0) => {
+                self.troncon = None;
+                neuf
+            }
+            Some(_) => Troncon { genre: None, largeur: None, trottoir: None, ..t.clone() },
+            None => neuf,
+        };
+        let terrain = (neuf.genre, neuf.largeur) != (t.genre, t.largeur);
+        if self.retouches_voirie.regler(neuf) {
+            self.voirie_a_relire = true;
+            self.procedures_a_refaire = Some(0.4);
+            if terrain {
+                self.procedures.demander_regeneration();
+            }
+        }
+        if let Some(e) = &self.retouches_voirie.erreur {
+            cx.paragraph(b, e);
+        }
+        let avancement = self.fragment.as_ref().map(|(av, _)| (av.faites.load(std::sync::atomic::Ordering::Relaxed), av.total.load(std::sync::atomic::Ordering::Relaxed)));
+        if let Some(r) = crate::procedures::regeneration(cx, b, &self.procedures, self.editeur.fragment_possible, avancement) {
+            self.editeur.fragment = Some(r);
+        }
+    }
+
     fn panneau_carte(&mut self, cx: &mut Cx, b: &mut widgets::Body) {
         let km = |p: [f64; 3]| format!("{} · {} km", dec((p[0] / 1000.0) as f32, 2), dec((p[2] / 1000.0) as f32, 2));
         cx.section(b, "POINT VISÉ");
@@ -1346,6 +1527,122 @@ impl App {
     /// l'édition en pause.
     fn rayon_vu(&self) -> i32 {
         if self.visee.is_some() { EDITION_TUILES } else { self.affichage.distance }
+    }
+
+    /// Les routes autour du point visé (absolues), reprises quand il change de tuile.
+    fn routes_voirie(&mut self) -> &[crate::reel::Route] {
+        let o = self.monde.origine;
+        let c = self.visee.unwrap_or(self.lieu().pos);
+        let (x, z) = (c[0] + o[0] as f32 * TAILLE, c[2] + o[1] as f32 * TAILLE);
+        let t = ((x / TAILLE).floor() as i32, (z / TAILLE).floor() as i32);
+        if self.voirie.as_ref().is_none_or(|v| v.0 != t) {
+            let r = RAYON_VOIRIE + TAILLE;
+            let (cx, cz) = ((t.0 as f32 + 0.5) * TAILLE, (t.1 as f32 + 0.5) * TAILLE);
+            self.voirie = Some((t, self.campagne.routes_pres(cx - r, cz - r, cx + r, cz + r)));
+        }
+        &self.voirie.as_ref().unwrap().1
+    }
+
+    /// Le tronçon dont le fil passe au plus près du point (x, y) de l'écran, s'il en passe
+    /// un à moins d'un doigt ; sinon plus de tronçon choisi.
+    fn choisir_troncon(&mut self, camera: &Camera, x: f32, y: f32, dp: f32) {
+        let o = self.monde.origine;
+        let (ox, oz) = (o[0] as f32 * TAILLE, o[1] as f32 * TAILLE);
+        let routes = self.routes_voirie().to_vec();
+        let mut mieux: Option<(f32, usize, usize)> = None;
+        for (k, r) in routes.iter().enumerate() {
+            let e: Vec<Option<[f32; 2]>> = r.points.iter().map(|p| camera.ecran([p[0] - ox, p[2] + 0.25, p[1] - oz])).collect();
+            for i in 0..e.len().saturating_sub(1) {
+                let (Some(a), Some(b)) = (e[i], e[i + 1]) else { continue };
+                let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+                let l2 = dx * dx + dy * dy;
+                let t = if l2 > 0.0 { (((x - a[0]) * dx + (y - a[1]) * dy) / l2).clamp(0.0, 1.0) } else { 0.0 };
+                let d = (x - a[0] - dx * t).hypot(y - a[1] - dy * t);
+                if mieux.is_none_or(|m| d < m.0) {
+                    mieux = Some((d, k, i));
+                }
+            }
+        }
+        self.troncon = mieux.filter(|m| m.0 < 28.0 * dp).map(|(_, k, i)| {
+            let (a, b) = crate::voirie::troncon_autour(&routes, k, i);
+            let (p, q) = (routes[k].points[a], routes[k].points[b]);
+            ([p[0], p[1]], [q[0], q[1]])
+        });
+    }
+
+    /// Le tronçon choisi : la route (lue) qui le porte, et les indices de ses bouts.
+    fn troncon_choisi(&mut self) -> Option<(crate::reel::Route, usize, usize)> {
+        let (a, b) = self.troncon?;
+        self.routes_voirie().iter().find_map(|r| crate::voirie::bornes(r, a, b).map(|(i, j)| (r.clone(), i, j)))
+    }
+
+    /// Les réglages du tronçon choisi : retouchés, sinon ceux de la route qui le porte ;
+    /// et ceux d'origine.
+    fn reglages_troncon(&mut self) -> Option<(crate::voirie::Troncon, crate::reel::Route, usize, usize)> {
+        let (a, b) = self.troncon?;
+        let (r, i, j) = self.troncon_choisi()?;
+        let t = self.retouches_voirie.troncon(a, b).cloned().unwrap_or(crate::voirie::Troncon { a, b, origine: (r.genre, r.largeur), genre: None, largeur: None, trottoir: None });
+        Some((t, r, i, j))
+    }
+
+    /// L'onglet Voirie : un fil sur l'axe de chaque route proche, de la couleur de son
+    /// genre, par-dessus la vue ; le tronçon choisi, sa chaussée et ses trottoirs.
+    fn fils_voirie(&mut self, cx: &mut Cx, camera: &Camera, w: Rect) {
+        let o = self.monde.origine;
+        let (ox, oz) = (o[0] as f32 * TAILLE, o[1] as f32 * TAILLE);
+        let c = self.visee.unwrap_or(self.lieu().pos);
+        let epais = 2.0 * cx.dp;
+        let routes = self.routes_voirie().to_vec();
+        for r in &routes {
+            let couleur = couleur_voirie(r.genre);
+            let mut avant: Option<[f32; 2]> = None;
+            for p in &r.points {
+                let q = [p[0] - ox, p[2] + 0.25, p[1] - oz];
+                let loin = (q[0] - c[0]).hypot(q[2] - c[2]) > RAYON_VOIRIE;
+                let e = if loin { None } else { camera.ecran(q) };
+                if let (Some(a), Some(b)) = (avant, e) {
+                    if let Some((a, b)) = rogner(a, b, w) {
+                        cx.dl.line(a, b, epais, couleur);
+                    }
+                }
+                avant = e;
+            }
+        }
+        // Le tronçon choisi : son axe, les bords de sa chaussée, ceux de ses trottoirs
+        let Some((t, r, ia, ib)) = self.reglages_troncon() else { return };
+        let demi = t.largeur.unwrap_or(t.origine.1) / 2.0;
+        let pts = &r.points[ia..=ib];
+        let n = pts.len();
+        let decale = |k: usize, d: f32| -> Option<[f32; 2]> {
+            let (p, q) = (pts[k.saturating_sub(1)], pts[(k + 1).min(n - 1)]);
+            let (dx, dz) = (q[0] - p[0], q[1] - p[1]);
+            let l = dx.hypot(dz).max(1e-3);
+            let c = pts[k];
+            camera.ecran([c[0] - ox - dz / l * d, c[2] + 0.25, c[1] - oz + dx / l * d])
+        };
+        let trait_ = |cx: &mut Cx, d: f32, epais: f32, couleur: Color| {
+            for k in 0..n - 1 {
+                if let (Some(a), Some(b)) = (decale(k, d), decale(k + 1, d)) {
+                    if let Some((a, b)) = rogner(a, b, w) {
+                        cx.dl.line(a, b, epais, couleur);
+                    }
+                }
+            }
+        };
+        let blanc: Color = [255, 255, 255, 240];
+        trait_(cx, 0.0, 5.0 * cx.dp, couleur_voirie(t.genre.unwrap_or(t.origine.0)));
+        trait_(cx, -demi, 2.5 * cx.dp, blanc);
+        trait_(cx, demi, 2.5 * cx.dp, blanc);
+        if let Some(tr) = t.trottoir.filter(|&w| w > 0.0) {
+            trait_(cx, -demi - tr, 1.5 * cx.dp, [255, 255, 255, 160]);
+            trait_(cx, demi + tr, 1.5 * cx.dp, [255, 255, 255, 160]);
+        }
+        for k in [0, n - 1] {
+            if let Some(p) = decale(k, 0.0).filter(|p| w.contains(p[0], p[1])) {
+                let r = 6.0 * cx.dp;
+                cx.dl.rrect(Rect::new(p[0] - r, p[1] - r, 2.0 * r, 2.0 * r), r, blanc);
+            }
+        }
     }
 
     /// Le cercle du pinceau, sur le relief : sous le doigt, sinon au point visé.
@@ -1514,6 +1811,17 @@ impl App {
             let mut b = cx.body(crate::ui::sub_id(id("corps-editeur"), self.editeur.onglet), corps, &self.scrolls);
             if self.editeur.onglet == editeur::CARTE {
                 self.panneau_carte(cx, &mut b);
+            } else if self.editeur.onglet == editeur::VOIRIE {
+                self.panneau_voirie(cx, &mut b);
+            } else if self.editeur.onglet == editeur::PROCEDURES {
+                let avancement = self.fragment.as_ref().map(|(av, _)| (av.faites.load(std::sync::atomic::Ordering::Relaxed), av.total.load(std::sync::atomic::Ordering::Relaxed)));
+                let c = crate::procedures::panneau(cx, &mut b, &mut self.procedures, self.editeur.fragment_possible, avancement);
+                if let Some(r) = c.regenerer {
+                    self.editeur.fragment = Some(r);
+                }
+                if c.tuiles {
+                    self.procedures_a_refaire = Some(0.4);
+                }
             } else if self.editeur.onglet == editeur::TOPOLOGIE {
                 self.editeur.panneau_topologie(cx, &mut b, &mut self.monde, &mut self.maillages, &mut self.tuiles);
             } else {
@@ -1631,6 +1939,40 @@ impl App {
 
 pub fn translation(t: [f32; 3]) -> math::Mat4 {
     [1., 0., 0., 0., 0., 1., 0., 0., 0., 0., 1., 0., t[0], t[1], t[2], 1.]
+}
+
+/// La couleur du fil d'une route de ce genre, dans l'onglet Voirie.
+fn couleur_voirie(genre: u8) -> Color {
+    match genre {
+        crate::reel::GRANDE => [0xF0, 0x90, 0x30, 230],
+        crate::reel::ROUTE => [0xF0, 0xD0, 0x40, 230],
+        crate::reel::SERVICE => [0xF4, 0xF4, 0xF4, 230],
+        crate::reel::PIETONNE => [0x80, 0xC8, 0xF0, 230],
+        crate::reel::CHEMIN => [0xC0, 0x98, 0x70, 230],
+        _ => [0x98, 0xC8, 0x88, 230],
+    }
+}
+
+/// Le segment (a, b) de l'écran rogné au rectangle `w` (Liang et Barsky) ; rien s'il en
+/// sort tout entier.
+fn rogner(a: [f32; 2], b: [f32; 2], w: Rect) -> Option<([f32; 2], [f32; 2])> {
+    let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+    let (mut t0, mut t1) = (0.0f32, 1.0f32);
+    for (p, q) in [(-dx, a[0] - w.x), (dx, w.right() - a[0]), (-dy, a[1] - w.y), (dy, w.bottom() - a[1])] {
+        if p == 0.0 {
+            if q < 0.0 {
+                return None;
+            }
+        } else {
+            let r = q / p;
+            if p < 0.0 {
+                t0 = t0.max(r);
+            } else {
+                t1 = t1.min(r);
+            }
+        }
+    }
+    (t0 <= t1).then(|| ([a[0] + dx * t0, a[1] + dy * t0], [a[0] + dx * t1, a[1] + dy * t1]))
 }
 
 #[cfg(test)]
