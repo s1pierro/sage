@@ -1334,8 +1334,17 @@ ne garde de la scène que les maillages `tuile/` et `revetement/`.
 - **L'outil** `examples/lieu_reel.rs` n'est plus qu'un appel de `generer` avec curl.
 - **Flow** (le contexte Lieux) dépend de la même crate : il génère depuis le téléphone,
   explore et édite les lieux.
-- **L'emprise** (`Demande.largeur`, `longueur`, en m ; `generer::emprise`) : un
-  rectangle centré sur le départ, dans la carte de 20 km. Seul lui se télécharge (relief
-  par morceaux, cadre d'Overpass resserré à l'emprise + 1 km, réponses gardées sous un
-  nom suffixé `_<largeur>x<longueur>`). Le format ne change pas : hors de l'emprise, le
-  relief prolonge les bords, sans eau, sol, routes ni bâtiments. 0 vaut la carte entière.
+- **Les lieux rectangulaires** (format 7) : un lieu couvre un rectangle de la carte de
+  20 km, `Grille { a0, b0, nx, nz }` (en points de la grille de la carte entière, `a0`
+  et `b0` pairs pour que la grille du sol tombe juste). Le fichier ne garde que lui. Les
+  méthodes de `Lieu` (`h_point`, `relief`, `est_eau`, `eau`, `occupation`, `classe`,
+  `part_sol`, `modifier_relief`, `poser_eau`) prennent toujours les indices de la carte
+  entière et les ramènent au rectangle ; hors de lui, le relief prolonge ses bords, sans
+  eau. Le jeu n'a rien eu à changer. `poser_hauteurs` et les tableaux (`h`, `eau`,
+  `sol`) sont, eux, indexés dans le rectangle (`Grille::indice`, `point`). Les formats
+  1 à 6 se lisent comme la carte entière. `Lieu::sur`, `vierge_sur`, `etendue`,
+  `recadrer` (et l'exemple `recadrer`).
+- **L'emprise** (`Demande.largeur`, `longueur`, en m ; `Grille::emprise`) : le rectangle
+  centré sur le départ ; 0 vaut la carte entière. Seul lui se calcule et se télécharge
+  (relief par morceaux, cadre d'Overpass resserré à l'emprise + 1 km, réponses gardées
+  sous un nom suffixé `_<largeur>x<longueur>`).

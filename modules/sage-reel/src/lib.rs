@@ -34,7 +34,7 @@ pub const DEMI_CARTE: i32 = 156;
 pub const DEPART: [f32; 2] = [TAILLE / 2.0, TAILLE / 2.0];
 
 pub const MAGIQUE: &[u8; 8] = b"SAGEREEL";
-pub const FORMAT: u32 = 6;
+pub const FORMAT: u32 = 7;
 
 /// Le texte à citer.
 pub const SOURCES: &str = "Relief et hauteurs © IGN (RGE ALTI, LiDAR HD) · eau, routes, bâtiments et occupation du sol © les contributeurs OpenStreetMap";
@@ -190,6 +190,100 @@ pub fn cote_sol(n: usize) -> usize {
 }
 
 
+/// Le côté de la carte entière, en mètres.
+pub fn cote_carte() -> f64 {
+    (2 * DEMI_CARTE + 1) as f64 * TAILLE as f64
+}
+
+/// La grille d'un lieu : un rectangle de `nx` × `nz` points, découpé dans la grille de la
+/// carte entière (`cote(pas)` points de côté) à partir du point (`a0`, `b0`). Les indices
+/// (a, b) des méthodes de `Lieu` sont ceux de la carte entière ; hors du rectangle, le
+/// relief prolonge ses bords, sans eau. `a0` et `b0` sont pairs : la grille du sol (au
+/// double pas) tombe sur la même.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Grille {
+    pub a0: usize,
+    pub b0: usize,
+    pub nx: usize,
+    pub nz: usize,
+}
+
+impl Grille {
+    /// La carte entière.
+    pub fn entiere(pas: f64) -> Grille {
+        let n = cote(pas);
+        Grille { a0: 0, b0: 0, nx: n, nz: n }
+    }
+
+    /// Un rectangle de `largeur` (est-ouest) × `longueur` (nord-sud) mètres, centré sur le
+    /// départ, borné à la carte ; 0 (ou plus que la carte) : toute la carte dans ce sens.
+    pub fn emprise(pas: f64, largeur: f64, longueur: f64) -> Grille {
+        let n = cote(pas);
+        let borne = |c: f64, l: f64| -> (usize, usize) {
+            if l <= 0.0 || l >= cote_carte() {
+                return (0, n);
+            }
+            let c = (c - origine()) / pas;
+            let d = l / 2.0 / pas;
+            // Le début pair ; au moins deux points
+            let a0 = (((c - d).floor().max(0.0)) as usize) & !1;
+            let a1 = ((c + d).ceil() as usize).min(n - 1).max(a0 + 1);
+            (a0, a1 - a0 + 1)
+        };
+        let (a0, nx) = borne(DEPART[0] as f64, largeur);
+        let (b0, nz) = borne(DEPART[1] as f64, longueur);
+        Grille { a0, b0, nx, nz }
+    }
+
+    /// Toute la carte ?
+    pub fn est_entiere(&self, pas: f64) -> bool {
+        *self == Grille::entiere(pas)
+    }
+
+    /// Le nombre de points.
+    pub fn points(&self) -> usize {
+        self.nx * self.nz
+    }
+
+    /// L'indice dans les tableaux du lieu du point (a, b) de la carte, s'il est dedans.
+    pub fn indice(&self, a: i64, b: i64) -> Option<usize> {
+        let (a, b) = (a - self.a0 as i64, b - self.b0 as i64);
+        (a >= 0 && b >= 0 && a < self.nx as i64 && b < self.nz as i64).then(|| b as usize * self.nx + a as usize)
+    }
+
+    /// L'indice du point de la grille le plus proche de (a, b).
+    pub fn borner(&self, a: i64, b: i64) -> usize {
+        let a = (a - self.a0 as i64).clamp(0, self.nx as i64 - 1) as usize;
+        let b = (b - self.b0 as i64).clamp(0, self.nz as i64 - 1) as usize;
+        b * self.nx + a
+    }
+
+    /// Le point (a, b) de la carte d'un indice.
+    pub fn point(&self, i: usize) -> (i64, i64) {
+        ((self.a0 + i % self.nx) as i64, (self.b0 + i / self.nx) as i64)
+    }
+
+    /// Les dimensions de la grille du sol (au double pas).
+    pub fn sol(&self) -> (usize, usize) {
+        (cote_sol(self.nx), cote_sol(self.nz))
+    }
+
+    /// L'indice dans le sol du point (a, b) de la grille du sol de la carte (au double
+    /// pas), le plus proche dedans.
+    pub fn borner_sol(&self, a: i64, b: i64) -> usize {
+        let (mx, mz) = self.sol();
+        let a = (a - (self.a0 / 2) as i64).clamp(0, mx as i64 - 1) as usize;
+        let b = (b - (self.b0 / 2) as i64).clamp(0, mz as i64 - 1) as usize;
+        b * mx + a
+    }
+
+    /// L'étendue au repère du jeu, pour un pas : [x0, z0, x1, z1].
+    pub fn etendue(&self, pas: f64) -> [f64; 4] {
+        let (x0, z0) = (origine() + self.a0 as f64 * pas, origine() + self.b0 as f64 * pas);
+        [x0, z0, x0 + (self.nx - 1) as f64 * pas, z0 + (self.nz - 1) as f64 * pas]
+    }
+}
+
 /// Le coin de la grille (au repère du jeu) : le coin de la première tuile de la carte.
 pub fn origine() -> f64 {
     -(DEMI_CARTE as f64) * TAILLE as f64
@@ -271,7 +365,8 @@ pub struct Lieu {
     pub x0: f64,
     pub y0: f64,
     pub pas: f64,
-    pub cote: usize,
+    /// Le rectangle de la carte que couvre le lieu.
+    pub grille: Grille,
     /// La surface de l'eau, en mètres.
     pub niveau: f32,
     pub base: f32,
@@ -282,8 +377,8 @@ pub struct Lieu {
     pub routes: Vec<Route>,
     pub batiments: Vec<Batiment>,
     pub ponts: Vec<Route>,
-    /// L'occupation du sol, une classe par point de la grille de `2 × pas` (`cote_sol`
-    /// points de côté) ; vide : rien de dit.
+    /// L'occupation du sol, une classe par point de la grille de `2 × pas`
+    /// (`grille.sol()`) ; vide : rien de dit.
     pub sol: Vec<u8>,
 }
 
@@ -293,17 +388,23 @@ fn quantum(lo: f32, hi: f32) -> f32 {
 }
 
 impl Lieu {
-    /// Les hauteurs `h` (en mètres) et l'eau, d'une grille de `cote(pas)` points ; les
-    /// hauteurs s'encodent sur 16 bits.
+    /// Les hauteurs `h` (en mètres) et l'eau, sur la carte entière (`cote(pas)` points de
+    /// côté) ; les hauteurs s'encodent sur 16 bits.
     #[allow(clippy::too_many_arguments)]
     pub fn new(nom: &str, lat: f64, lon: f64, x0: f64, y0: f64, pas: f64, niveau: f32, h: &[f32], eau: &[bool], routes: Vec<Route>, batiments: Vec<Batiment>, ponts: Vec<Route>) -> Lieu {
-        let n = cote(pas);
-        assert!(h.len() == n * n && eau.len() == n * n);
-        let mut bits = vec![0u8; (n * n).div_ceil(8)];
+        Lieu::sur(nom, lat, lon, x0, y0, pas, Grille::entiere(pas), niveau, h, eau, routes, batiments, ponts)
+    }
+
+    /// Pareil, sur le rectangle `grille` de la carte (`grille.points()` hauteurs).
+    #[allow(clippy::too_many_arguments)]
+    pub fn sur(nom: &str, lat: f64, lon: f64, x0: f64, y0: f64, pas: f64, grille: Grille, niveau: f32, h: &[f32], eau: &[bool], routes: Vec<Route>, batiments: Vec<Batiment>, ponts: Vec<Route>) -> Lieu {
+        let n = grille.points();
+        assert!(h.len() == n && eau.len() == n);
+        let mut bits = vec![0u8; n.div_ceil(8)];
         for (i, _) in eau.iter().enumerate().filter(|(_, e)| **e) {
             bits[i / 8] |= 1 << (i % 8);
         }
-        let mut l = Lieu { nom: nom.into(), lat, lon, x0, y0, pas, cote: n, niveau, base: 0.0, echelle: 1.0, h: Vec::new(), eau: bits, routes, batiments, ponts, sol: Vec::new() };
+        let mut l = Lieu { nom: nom.into(), lat, lon, x0, y0, pas, grille, niveau, base: 0.0, echelle: 1.0, h: Vec::new(), eau: bits, routes, batiments, ponts, sol: Vec::new() };
         l.fixer_hauteurs(h);
         l
     }
@@ -311,19 +412,70 @@ impl Lieu {
     /// Un lieu sans rien : un relief plat à `altitude`, sans eau (son niveau 10 m plus
     /// bas), centré sur (lat, lon).
     pub fn vierge(nom: &str, lat: f64, lon: f64, pas: f64, altitude: f32) -> Lieu {
-        let n = cote(pas);
+        Lieu::vierge_sur(nom, lat, lon, pas, Grille::entiere(pas), altitude)
+    }
+
+    /// Pareil, sur le rectangle `grille` de la carte.
+    pub fn vierge_sur(nom: &str, lat: f64, lon: f64, pas: f64, grille: Grille, altitude: f32) -> Lieu {
+        let n = grille.points();
         let (xc, yc) = lambert93(lat, lon);
         let (x0, y0) = (xc - DEPART[0] as f64, yc + DEPART[1] as f64);
-        let m = cote_sol(n);
-        let mut l = Lieu::new(nom, lat, lon, x0, y0, pas, altitude - 10.0, &vec![altitude; n * n], &vec![false; n * n], Vec::new(), Vec::new(), Vec::new());
-        l.sol = vec![0; m * m];
+        let (mx, mz) = grille.sol();
+        let mut l = Lieu::sur(nom, lat, lon, x0, y0, pas, grille, altitude - 10.0, &vec![altitude; n], &vec![false; n], Vec::new(), Vec::new(), Vec::new());
+        l.sol = vec![0; mx * mz];
         l
     }
 
-    /// Avec son occupation du sol (`cote_sol(cote)²` classes).
+    /// Le lieu réduit au rectangle `g` (pris dans le sien) : le relief, l'eau et le sol
+    /// découpés ; les bâtiments gardés s'ils sont entiers dedans, les routes et les ponts
+    /// coupés à son bord.
+    pub fn recadrer(&self, g: Grille) -> Lieu {
+        let (a1, b1) = ((g.a0 + g.nx).min(self.grille.a0 + self.grille.nx), (g.b0 + g.nz).min(self.grille.b0 + self.grille.nz));
+        let a0 = g.a0.max(self.grille.a0).next_multiple_of(2);
+        let b0 = g.b0.max(self.grille.b0).next_multiple_of(2);
+        let g = Grille { a0, b0, nx: a1.saturating_sub(a0).max(2), nz: b1.saturating_sub(b0).max(2) };
+        let n = g.points();
+        let h: Vec<f32> = (0..n).map(|i| { let (a, b) = g.point(i); self.h_point(a, b) }).collect();
+        let eau: Vec<bool> = (0..n).map(|i| { let (a, b) = g.point(i); self.est_eau(a, b) }).collect();
+        let [x0, z0, x1, z1] = g.etendue(self.pas);
+        let dans = |p: &[f32]| (p[0] as f64) >= x0 && (p[0] as f64) <= x1 && (p[1] as f64) >= z0 && (p[1] as f64) <= z1;
+        let couper = |l: &[Route]| -> Vec<Route> {
+            let mut v = Vec::new();
+            for r in l {
+                let mut m: Vec<[f32; 3]> = Vec::new();
+                for p in &r.points {
+                    if dans(p) {
+                        m.push(*p);
+                    } else if m.len() > 1 {
+                        v.push(Route { genre: r.genre, largeur: r.largeur, points: std::mem::take(&mut m) });
+                    } else {
+                        m.clear();
+                    }
+                }
+                if m.len() > 1 {
+                    v.push(Route { genre: r.genre, largeur: r.largeur, points: m });
+                }
+            }
+            v
+        };
+        let batiments = self.batiments.iter().filter(|b| b.contour.iter().all(|p| dans(p))).cloned().collect();
+        let mut l = Lieu::sur(&self.nom, self.lat, self.lon, self.x0, self.y0, self.pas, g, self.niveau, &h, &eau, couper(&self.routes), batiments, couper(&self.ponts));
+        if !self.sol.is_empty() {
+            let (mx, mz) = g.sol();
+            l.sol = (0..mx * mz).map(|i| self.sol[self.grille.borner_sol((g.a0 / 2 + i % mx) as i64, (g.b0 / 2 + i / mx) as i64)]).collect();
+        }
+        l
+    }
+
+    /// L'étendue du lieu au repère du jeu : [x0, z0, x1, z1].
+    pub fn etendue(&self) -> [f64; 4] {
+        self.grille.etendue(self.pas)
+    }
+
+    /// Avec son occupation du sol (`grille.sol()` classes).
     pub fn avec_sol(mut self, sol: Vec<u8>) -> Lieu {
-        let m = cote_sol(self.cote);
-        assert_eq!(sol.len(), m * m);
+        let (mx, mz) = self.grille.sol();
+        assert_eq!(sol.len(), mx * mz);
         self.sol = sol;
         self
     }
@@ -343,32 +495,32 @@ impl Lieu {
         self.h = h.iter().map(|v| ((v - lo) / echelle).round().clamp(0.0, 65535.0) as u16).collect();
     }
 
-    /// La hauteur du point (a, b) de la grille, en mètres (bornée à la grille).
+    /// La hauteur du point (a, b) de la carte, en mètres (bornée à la grille du lieu).
     pub fn h_point(&self, a: i64, b: i64) -> f32 {
-        let n = self.cote as i64;
-        let i = (b.clamp(0, n - 1) * n + a.clamp(0, n - 1)) as usize;
+        let i = self.grille.borner(a, b);
         self.base + self.h[i] as f32 * self.echelle
     }
 
-    /// Change des hauteurs de la grille : `f` reçoit chaque point (a, b) du carré
-    /// `a0..=a1`, `b0..=b1` et sa hauteur, et rend la nouvelle. Si elles sortent de ce que
-    /// les 16 bits couvrent, tout est réencodé.
+    /// Change des hauteurs : `f` reçoit chaque point (a, b) de la carte du carré
+    /// `a0..=a1`, `b0..=b1` (borné à la grille du lieu) et sa hauteur, et rend la nouvelle.
+    /// Si elles sortent de ce que les 16 bits couvrent, tout est réencodé.
     pub fn modifier_relief(&mut self, (a0, b0): (i64, i64), (a1, b1): (i64, i64), mut f: impl FnMut(i64, i64, f32) -> f32) {
-        let n = self.cote as i64;
-        let (a0, a1, b0, b1) = (a0.max(0), a1.min(n - 1), b0.max(0), b1.min(n - 1));
+        let g = self.grille;
+        let (a0, a1) = (a0.max(g.a0 as i64), a1.min((g.a0 + g.nx) as i64 - 1));
+        let (b0, b1) = (b0.max(g.b0 as i64), b1.min((g.b0 + g.nz) as i64 - 1));
         let mut changes = Vec::new();
         for b in b0..=b1 {
             for a in a0..=a1 {
                 let v = f(a, b, self.h_point(a, b));
-                if v.is_finite() {
-                    changes.push(((b * n + a) as usize, v));
+                if let (true, Some(i)) = (v.is_finite(), g.indice(a, b)) {
+                    changes.push((i, v));
                 }
             }
         }
         self.poser_hauteurs(&changes);
     }
 
-    /// Pose des hauteurs (indice dans la grille, mètres). Si elles sortent de ce que les
+    /// Pose des hauteurs (indice dans les tableaux du lieu, mètres). Si elles sortent de ce que les
     /// 16 bits couvrent, tout est réencodé.
     pub fn poser_hauteurs(&mut self, changes: &[(usize, f32)]) {
         let haut = self.base + 65535.0 * self.echelle;
@@ -400,23 +552,15 @@ impl Lieu {
         cr(l(b - 1), l(b), l(b + 1), l(b + 2), v)
     }
 
-    /// Le point (a, b) de la grille est-il dans l'eau ?
+    /// Le point (a, b) de la carte est-il dans l'eau ? (Jamais hors du lieu.)
     pub fn est_eau(&self, a: i64, b: i64) -> bool {
-        let n = self.cote as i64;
-        if a < 0 || b < 0 || a >= n || b >= n {
-            return false;
-        }
-        let i = (b * n + a) as usize;
+        let Some(i) = self.grille.indice(a, b) else { return false };
         self.eau[i / 8] & (1 << (i % 8)) != 0
     }
 
-    /// Met ou retire l'eau au point (a, b) de la grille.
+    /// Met ou retire l'eau au point (a, b) de la carte (rien hors du lieu).
     pub fn poser_eau(&mut self, a: i64, b: i64, oui: bool) {
-        let n = self.cote as i64;
-        if a < 0 || b < 0 || a >= n || b >= n {
-            return;
-        }
-        let i = (b * n + a) as usize;
+        let Some(i) = self.grille.indice(a, b) else { return };
         if oui {
             self.eau[i / 8] |= 1 << (i % 8);
         } else {
@@ -441,13 +585,12 @@ impl Lieu {
         if self.sol.is_empty() {
             return [(0, 1.0), (0, 0.0), (0, 0.0), (0, 0.0)];
         }
-        let m = cote_sol(self.cote) as i64;
         let p = self.pas * 2.0;
         let (gx, gz) = ((x - origine()) / p, (z - origine()) / p);
         let (a, b) = (gx.floor(), gz.floor());
         let (u, v) = (gx - a, gz - b);
         let (a, b) = (a as i64, b as i64);
-        let c = |a: i64, b: i64| self.sol[(b.clamp(0, m - 1) * m + a.clamp(0, m - 1)) as usize];
+        let c = |a: i64, b: i64| self.sol[self.grille.borner_sol(a, b)];
         [(c(a, b), (1.0 - u) * (1.0 - v)), (c(a + 1, b), u * (1.0 - v)), (c(a, b + 1), (1.0 - u) * v), (c(a + 1, b + 1), u * v)]
     }
 
@@ -456,10 +599,9 @@ impl Lieu {
         if self.sol.is_empty() {
             return 0;
         }
-        let m = cote_sol(self.cote) as i64;
         let p = self.pas * 2.0;
         let (a, b) = (((x - origine()) / p).round() as i64, ((z - origine()) / p).round() as i64);
-        self.sol[(b.clamp(0, m - 1) * m + a.clamp(0, m - 1)) as usize]
+        self.sol[self.grille.borner_sol(a, b)]
     }
 
     /// La part (de 0 à 1) des points d'occupation de la `classe` dans le carré de demi-côté
@@ -468,15 +610,16 @@ impl Lieu {
         if self.sol.is_empty() {
             return 0.0;
         }
-        let m = cote_sol(self.cote) as i64;
+        let (mx, mz) = self.grille.sol();
+        let (sa, sb) = ((self.grille.a0 / 2) as i64, (self.grille.b0 / 2) as i64);
         let p = self.pas * 2.0;
-        let (a0, a1) = (((x - r - origine()) / p).ceil() as i64, ((x + r - origine()) / p).floor() as i64);
-        let (b0, b1) = (((z - r - origine()) / p).ceil() as i64, ((z + r - origine()) / p).floor() as i64);
+        let (a0, a1) = (((x - r - origine()) / p).ceil() as i64 - sa, ((x + r - origine()) / p).floor() as i64 - sa);
+        let (b0, b1) = (((z - r - origine()) / p).ceil() as i64 - sb, ((z + r - origine()) / p).floor() as i64 - sb);
         let (mut oui, mut tous) = (0, 0);
-        for b in b0.max(0)..=b1.min(m - 1) {
-            for a in a0.max(0)..=a1.min(m - 1) {
+        for b in b0.max(0)..=b1.min(mz as i64 - 1) {
+            for a in a0.max(0)..=a1.min(mx as i64 - 1) {
                 tous += 1;
-                oui += (self.sol[(b * m + a) as usize] == classe) as i32;
+                oui += (self.sol[b as usize * mx + a as usize] == classe) as i32;
             }
         }
         // Un carré plus petit que la grille : le point le plus proche
@@ -507,7 +650,10 @@ impl Lieu {
         for v in [self.lat, self.lon, self.x0, self.y0, self.pas] {
             o.extend_from_slice(&v.to_le_bytes());
         }
-        o.extend_from_slice(&(self.cote as u32).to_le_bytes());
+        let g = self.grille;
+        for v in [g.a0, g.b0, g.nx, g.nz] {
+            o.extend_from_slice(&(v as u32).to_le_bytes());
+        }
         for v in [self.niveau, self.base, self.echelle] {
             o.extend_from_slice(&v.to_le_bytes());
         }
@@ -561,7 +707,7 @@ impl Lieu {
     /// Lit un fichier ; une erreur dite en clair.
     pub fn lire(f: &std::path::Path) -> Result<Lieu, String> {
         let o = std::fs::read(f).map_err(|e| e.to_string())?;
-        Lieu::depuis_octets(&o).ok_or_else(|| "ce n'est pas un lieu réel lisible (format SAGEREEL 1 à 6)".to_string())
+        Lieu::depuis_octets(&o).ok_or_else(|| "ce n'est pas un lieu réel lisible (format SAGEREEL 1 à 7)".to_string())
     }
 
     /// Relu ; rien si ce n'est pas un lieu réel de ce format, ou pour une autre carte.
@@ -587,17 +733,36 @@ impl Lieu {
             *v = f64::from_le_bytes(prendre(8)?.try_into().ok()?);
         }
         let [lat, lon, x0, y0, pas] = f;
-        let n = u32_(prendre(4)?) as usize;
-        if !(pas > 0.0) || n != cote(pas) {
+        if !(pas > 0.0) {
             return None;
         }
+        // Jusqu'au format 6, la carte entière ; au 7, un rectangle de la carte
+        let grille = if format >= 7 {
+            let mut v = [0usize; 4];
+            for x in &mut v {
+                *x = u32_(prendre(4)?) as usize;
+            }
+            let g = Grille { a0: v[0], b0: v[1], nx: v[2], nz: v[3] };
+            let c = cote(pas);
+            if g.nx < 2 || g.nz < 2 || g.a0 % 2 != 0 || g.b0 % 2 != 0 || g.a0 + g.nx > c || g.b0 + g.nz > c {
+                return None;
+            }
+            g
+        } else {
+            let n = u32_(prendre(4)?) as usize;
+            if n != cote(pas) {
+                return None;
+            }
+            Grille::entiere(pas)
+        };
+        let n = grille.points();
         let mut g = [0f32; 3];
         for v in &mut g {
             *v = f32::from_le_bytes(prendre(4)?.try_into().ok()?);
         }
         let [niveau, base, echelle] = g;
-        let h = prendre(n * n * 2)?.chunks(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
-        let eau = prendre((n * n).div_ceil(8))?.to_vec();
+        let h = prendre(n * 2)?.chunks(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+        let eau = prendre(n.div_ceil(8))?.to_vec();
         let f32_ = |s: &[u8]| f32::from_le_bytes(s.try_into().unwrap());
         macro_rules! lire_routes { () => {{
             let mut routes = Vec::new();
@@ -631,15 +796,15 @@ impl Lieu {
             for c in prendre(l * 2)?.chunks(2) {
                 sol.extend(std::iter::repeat_n(c[0], c[1] as usize));
             }
-            let m = cote_sol(n);
-            if !sol.is_empty() && sol.len() != m * m {
+            let (mx, mz) = grille.sol();
+            if !sol.is_empty() && sol.len() != mx * mz {
                 return None;
             }
         }
         if k != o.len() {
             return None;
         }
-        Some(Lieu { nom, lat, lon, x0, y0, pas, cote: n, niveau, base, echelle, h, eau, routes, batiments, ponts, sol })
+        Some(Lieu { nom, lat, lon, x0, y0, pas, grille, niveau, base, echelle, h, eau, routes, batiments, ponts, sol })
     }
 }
 
@@ -688,5 +853,57 @@ mod tests {
         assert!((v.relief(0.0, 0.0) - 100.0).abs() < 0.02);
         let (la, lo) = v.vers_degres(DEPART[0] as f64, DEPART[1] as f64);
         assert!((la - 49.0).abs() < 1e-7 && (lo - 1.0).abs() < 1e-7);
+    }
+
+    #[test]
+    fn l_emprise_se_centre_sur_le_depart_et_se_borne_a_la_carte() {
+        let n = cote(4.0);
+        assert_eq!(Grille::emprise(4.0, 0.0, 0.0), Grille::entiere(4.0));
+        assert_eq!(Grille::emprise(4.0, 50_000.0, 50_000.0), Grille { a0: 0, b0: 0, nx: n, nz: n });
+        let g = Grille::emprise(4.0, 2000.0, 1000.0);
+        assert!(g.a0 % 2 == 0 && g.b0 % 2 == 0);
+        // Le départ (en points) est au milieu de l'emprise
+        let c = (DEPART[0] as f64 - origine()) / 4.0;
+        assert!(((g.a0 as f64 + (g.nx - 1) as f64 / 2.0) - c).abs() <= 1.5);
+        assert!(((g.nx - 1) as f64 * 4.0 - 2000.0).abs() <= 12.0);
+        assert!(((g.nz - 1) as f64 * 4.0 - 1000.0).abs() <= 12.0);
+    }
+
+    #[test]
+    fn un_lieu_rectangulaire_se_relit_et_prolonge_ses_bords() {
+        let pas = 16.0;
+        let g = Grille::emprise(pas, 1000.0, 600.0);
+        let n = g.points();
+        // Le relief monte vers l'est : 1 m par point de la carte
+        let h: Vec<f32> = (0..n).map(|i| g.point(i).0 as f32).collect();
+        let eau: Vec<bool> = (0..n).map(|i| i % g.nx < 3).collect();
+        let (mx, mz) = g.sol();
+        let sol: Vec<u8> = (0..mx * mz).map(|i| if i % mx < mx / 2 { BOIS } else { PRE }).collect();
+        let l = Lieu::sur("Rect", 49.0, 1.0, 0.0, 0.0, pas, g, 0.0, &h, &eau, Vec::new(), Vec::new(), Vec::new()).avec_sol(sol);
+        let o = l.octets();
+        let r = Lieu::depuis_octets(&o).unwrap();
+        assert_eq!(r, l);
+        assert!(o.len() < 100_000);
+        let [x0, z0, x1, z1] = l.etendue();
+        assert!((l.relief(x0 + 3.0 * pas, z0) - (g.a0 + 3) as f64).abs() < 0.02);
+        // Hors du lieu : le bord, sans eau
+        assert!((l.relief(x1 + 500.0, z1 + 500.0) - (g.a0 + g.nx - 1) as f64).abs() < 0.02);
+        assert!((l.relief(x0 - 500.0, 0.0) - g.a0 as f64).abs() < 0.02);
+        assert!(l.est_eau(g.a0 as i64, g.b0 as i64) && !l.est_eau(g.a0 as i64 - 1, g.b0 as i64));
+        assert_eq!(l.classe(x0, z0), BOIS);
+        assert_eq!(l.classe(x1 + 1000.0, z0), PRE);
+        assert_eq!(l.part_sol(BOIS, x0, z0, 20.0), 1.0);
+        // Une retouche hors du lieu ne change rien
+        let mut e = l.clone();
+        e.modifier_relief((0, 0), (3, 3), |_, _, v| v + 50.0);
+        assert_eq!(e.h, l.h);
+        // Recadré : le même relief au même endroit
+        let c = l.recadrer(Grille { a0: g.a0 + 4, b0: g.b0 + 2, nx: 10, nz: 6 });
+        assert_eq!((c.grille.nx, c.grille.nz), (10, 6));
+        assert!((c.relief(x0 + 6.0 * pas, z0 + 3.0 * pas) - l.relief(x0 + 6.0 * pas, z0 + 3.0 * pas)).abs() < 0.02);
+        assert_eq!(Lieu::depuis_octets(&c.octets()), Some(c));
+        // Un vierge rectangulaire
+        let v = Lieu::vierge_sur("V", 49.0, 1.0, pas, g, 100.0);
+        assert_eq!(Lieu::depuis_octets(&v.octets()), Some(v));
     }
 }

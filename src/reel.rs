@@ -11,7 +11,7 @@
 
 use crate::moteur::TAILLE;
 pub use sage_reel::{
-    aire, cote, cote_sol, epaule, lambert93, lambert93_inverse, origine, teinte, teintes_bati, trianguler, Batiment, Lieu, Route, ANNEXE, BOIS, CHAMP, CHEMIN, CLASSES, EDIFICE, GRANDE, HABITE, IMMEUBLE, INDUSTRIEL, MAISON, PIETONNE, PRE, ROUTE, SENTIER, SERVICE, SOURCES, ZONE,
+    aire, cote, cote_sol, epaule, lambert93, lambert93_inverse, origine, teinte, teintes_bati, trianguler, Batiment, Grille, Lieu, Route, ANNEXE, BOIS, CHAMP, CHEMIN, CLASSES, EDIFICE, GRANDE, HABITE, IMMEUBLE, INDUSTRIEL, MAISON, PIETONNE, PRE, ROUTE, SENTIER, SERVICE, SOURCES, ZONE,
 };
 
 // Les mesures de la carte de la crate sont celles du moteur

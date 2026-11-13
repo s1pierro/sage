@@ -38,7 +38,7 @@
 //! niveau d'eau.
 
 use crate::json::{self, J};
-use crate::{cote, lambert93, origine, toits, Batiment, Lieu, Route, DEPART};
+use crate::{cote_carte, lambert93, toits, Batiment, Grille, Lieu, Route, DEPART};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
@@ -98,31 +98,9 @@ pub struct Demande {
     pub sortie: PathBuf,
     pub toits: bool,
     /// L'emprise, en mètres : est-ouest et nord-sud, centrée sur le point ; 0 (ou plus
-    /// que la carte) pour la carte entière. Hors d'elle, rien ne se télécharge : le relief
-    /// prolonge ses bords, sans eau, routes ni bâtiments.
+    /// que la carte) pour la carte entière. Le lieu ne couvre qu'elle (`Grille::emprise`).
     pub largeur: f64,
     pub longueur: f64,
-}
-
-/// Le côté de la carte entière, en mètres.
-pub fn cote_carte() -> f64 {
-    (2 * crate::DEMI_CARTE + 1) as f64 * crate::TAILLE as f64
-}
-
-/// L'emprise en points de la grille (pas de `pas` m) : [a0, a1, b0, b1], bornes comprises.
-pub fn emprise(pas: f64, largeur: f64, longueur: f64) -> [usize; 4] {
-    let n = cote(pas);
-    let borne = |c: f64, l: f64| -> (usize, usize) {
-        if l <= 0.0 || l >= cote_carte() {
-            return (0, n - 1);
-        }
-        let c = (c - origine()) / pas;
-        let d = l / 2.0 / pas;
-        (((c - d).floor().max(0.0)) as usize, ((c + d).ceil() as usize).min(n - 1))
-    };
-    let (a0, a1) = borne(DEPART[0] as f64, largeur);
-    let (b0, b1) = borne(DEPART[1] as f64, longueur);
-    [a0, a1, b0, b1]
 }
 
 /// L'avancement d'une génération, lu par un autre thread : l'étape, sa part du tout (de 0
@@ -193,36 +171,32 @@ pub fn generer(d: &Demande, r: &dyn Reseau, s: &Suivi) -> Result<Lieu, String> {
     }
     let cache = cache(&d.sortie);
     std::fs::create_dir_all(&cache).map_err(|e| format!("{} : {e}", cache.display()))?;
-    let n = cote(pas);
-    let [ea0, ea1, eb0, eb1] = emprise(pas, d.largeur, d.longueur);
-    let entiere = [ea0, ea1, eb0, eb1] == [0, n - 1, 0, n - 1];
-    let hors = |a: usize, b: usize| a < ea0 || a > ea1 || b < eb0 || b > eb1;
+    let g = Grille::emprise(pas, d.largeur, d.longueur);
+    let entiere = g.est_entiere(pas);
+    // La grille du lieu : nx × nz points, le premier en (ox, oz) au repère du jeu
+    let (nx, nz) = (g.nx, g.nz);
+    let [ox, oz, _, _] = g.etendue(pas);
     // Les réponses d'OSM dépendent de l'emprise : gardées sous un autre nom
     let suffixe = if entiere { String::new() } else { format!("_{:.0}x{:.0}", d.largeur.min(cote_carte()), d.longueur.min(cote_carte())) };
     // Le point demandé est au départ du jeu
     let (xc, yc) = lambert93(lat, lon);
     let (x0, y0) = (xc - DEPART[0] as f64, yc + DEPART[1] as f64);
-    let lx = |a: usize| x0 + origine() + a as f64 * pas;
-    let ly = |b: usize| y0 - (origine() + b as f64 * pas);
-    s.noter(&format!("{nom} : Lambert-93 ({xc:.0}, {yc:.0}), {n} × {n} points de {pas} m"));
-    if !entiere {
-        s.noter(&format!("emprise de {:.1} × {:.1} km", (ea1 - ea0) as f64 * pas / 1000.0, (eb1 - eb0) as f64 * pas / 1000.0));
-    }
+    let lx = |a: usize| x0 + ox + a as f64 * pas;
+    let ly = |b: usize| y0 - (oz + b as f64 * pas);
+    s.noter(&format!("{nom} : Lambert-93 ({xc:.0}, {yc:.0}), {nx} × {nz} points de {pas} m ({:.1} × {:.1} km)", (nx - 1) as f64 * pas / 1000.0, (nz - 1) as f64 * pas / 1000.0));
 
     s.etape("relief de l'IGN", 0.0);
     // 1. Le relief, par morceaux : chaque pixel est centré sur un point de la grille
-    let mut h = vec![f32::NAN; n * n];
-    for b0 in (0..n).step_by(MORCEAU) {
-        for a0 in (0..n).step_by(MORCEAU) {
+    let mut h = vec![f32::NAN; nx * nz];
+    for b0 in (0..nz).step_by(MORCEAU) {
+        for a0 in (0..nx).step_by(MORCEAU) {
             s.suivre()?;
-            s.etape("relief de l'IGN", 0.15 * (b0 * n + a0) as f32 / (n * n) as f32);
-            let (w, ht) = (MORCEAU.min(n - a0), MORCEAU.min(n - b0));
-            if a0 + w <= ea0 || a0 > ea1 || b0 + ht <= eb0 || b0 > eb1 {
-                continue;
-            }
+            s.etape("relief de l'IGN", 0.15 * (b0 * nx + a0) as f32 / (nx * nz) as f32);
+            let (w, ht) = (MORCEAU.min(nx - a0), MORCEAU.min(nz - b0));
             let (minx, maxy) = (lx(a0) - pas / 2.0, ly(b0) + pas / 2.0);
             let (maxx, miny) = (minx + w as f64 * pas, maxy - ht as f64 * pas);
-            let f = cache.join(format!("ign_{a0}_{b0}_{pas}.bil"));
+            // Nommé par sa place dans la carte (et sa taille, pour une emprise)
+            let f = cache.join(if entiere { format!("ign_{a0}_{b0}_{pas}.bil") } else { format!("ign_{}_{}_{w}x{ht}_{pas}.bil", g.a0 + a0, g.b0 + b0) });
             if !f.exists() {
                 let url = format!(
                     "https://data.geopf.fr/wms-r/wms?SERVICE=WMS&VERSION=1.3.0&REQUEST=GetMap&LAYERS=ELEVATION.ELEVATIONGRIDCOVERAGE.HIGHRES&STYLES=&FORMAT=image/x-bil;bits=32&CRS=EPSG:2154&BBOX={minx},{miny},{maxx},{maxy}&WIDTH={w}&HEIGHT={ht}"
@@ -239,14 +213,14 @@ pub fn generer(d: &Demande, r: &dyn Reseau, s: &Suivi) -> Result<Lieu, String> {
                 for c in 0..w {
                     let k = (r * w + c) * 4;
                     let v = f32::from_le_bytes([o[k], o[k + 1], o[k + 2], o[k + 3]]);
-                    h[(b0 + r) * n + a0 + c] = if v > -1000.0 { v } else { f32::NAN };
+                    h[(b0 + r) * nx + a0 + c] = if v > -1000.0 { v } else { f32::NAN };
                 }
             }
         }
     }
     // Les trous (hors de France, en mer) : le plus proche connu, ligne par ligne
-    let manque = (0..n * n).filter(|&i| h[i].is_nan() && !hors(i % n, i / n)).count();
-    if manque > 0 || !entiere {
+    let manque = h.iter().filter(|v| v.is_nan()).count();
+    if manque > 0 {
         s.noter(&format!("{manque} points sans relief, comblés"));
         let connu = h.iter().cloned().find(|v| !v.is_nan()).unwrap_or(0.0);
         let mut der = connu;
@@ -257,24 +231,14 @@ pub fn generer(d: &Demande, r: &dyn Reseau, s: &Suivi) -> Result<Lieu, String> {
                 der = *v;
             }
         }
-        // Hors de l'emprise : le bord le plus proche, prolongé
-        if !entiere {
-            for b in 0..n {
-                for a in 0..n {
-                    if hors(a, b) {
-                        h[b * n + a] = h[b.clamp(eb0, eb1) * n + a.clamp(ea0, ea1)];
-                    }
-                }
-            }
-        }
     }
 
     s.etape("eau", 0.15);
     // 2. L'eau d'OpenStreetMap, dans un cadre en degrés qui contient la carte
     let mut cadre = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
     // Un kilomètre de marge autour de l'emprise
-    let demi = |a: usize, b: usize| ((b - a) as f64 * pas / 2.0 + 1000.0).min(11_000.0);
-    let (dlat, dlon) = (demi(eb0, eb1) / 111_000.0, demi(ea0, ea1) / (111_000.0 * lat.to_radians().cos()));
+    let demi = |n: usize| ((n - 1) as f64 * pas / 2.0 + 1000.0).min(11_000.0);
+    let (dlat, dlon) = (demi(nz) / 111_000.0, demi(nx) / (111_000.0 * lat.to_radians().cos()));
     cadre = (cadre.0.min(lat - dlat), cadre.1.min(lon - dlon), cadre.2.max(lat + dlat), cadre.3.max(lon + dlon));
     let bb = format!("{:.5},{:.5},{:.5},{:.5}", cadre.0, cadre.1, cadre.2, cadre.3);
     let j = overpass(r, s, &cache.join(format!("osm_eau{suffixe}.json")), "eau", &format!("(way[\"natural\"=\"water\"]({bb});relation[\"natural\"=\"water\"]({bb});way[\"waterway\"=\"riverbank\"]({bb});relation[\"waterway\"=\"riverbank\"]({bb}););out geom;"))?;
@@ -282,7 +246,7 @@ pub fn generer(d: &Demande, r: &dyn Reseau, s: &Suivi) -> Result<Lieu, String> {
     let vers_grille = |p: &J| -> Option<(f64, f64)> {
         let (la, lo) = (p.get("lat")?.num()?, p.get("lon")?.num()?);
         let (x, y) = lambert93(la, lo);
-        Some(((x - x0 - origine()) / pas, (y0 - y - origine()) / pas))
+        Some(((x - x0 - ox) / pas, (y0 - y - oz) / pas))
     };
     let ligne = |g: &J| -> Vec<(f64, f64)> { g.liste().map(|l| l.iter().filter_map(vers_grille).collect()).unwrap_or_default() };
     let mut surfaces: Vec<Vec<Vec<(f64, f64)>>> = Vec::new();
@@ -301,16 +265,11 @@ pub fn generer(d: &Demande, r: &dyn Reseau, s: &Suivi) -> Result<Lieu, String> {
             _ => {}
         }
     }
-    let mut eau = vec![false; n * n];
+    let mut eau = vec![false; nx * nz];
     for s in &surfaces {
-        remplir(s, n, &mut eau);
+        remplir(s, nx, nz, &mut eau);
     }
-    for i in 0..n * n {
-        if hors(i % n, i / n) {
-            eau[i] = false;
-        }
-    }
-    let dans_eau: Vec<f32> = (0..n * n).filter(|&i| eau[i]).map(|i| h[i]).collect();
+    let dans_eau: Vec<f32> = (0..nx * nz).filter(|&i| eau[i]).map(|i| h[i]).collect();
     s.noter(&format!("{} surfaces d'eau, {:.2} km²", surfaces.len(), dans_eau.len() as f64 * pas * pas / 1e6));
 
     // 3. Le niveau de l'eau, le fond creusé
@@ -323,9 +282,9 @@ pub fn generer(d: &Demande, r: &dyn Reseau, s: &Suivi) -> Result<Lieu, String> {
     };
     // Seules les eaux à ce niveau (la Seine et ce qui la touche) se gardent : un étang
     // plus haut serait creusé jusqu'à lui ; il reste de la terre
-    let mut vu = vec![false; n * n];
+    let mut vu = vec![false; nx * nz];
     let mut ecartes = 0;
-    for i in 0..n * n {
+    for i in 0..nx * nz {
         if !eau[i] || vu[i] {
             continue;
         }
@@ -335,13 +294,13 @@ pub fn generer(d: &Demande, r: &dyn Reseau, s: &Suivi) -> Result<Lieu, String> {
         while k < groupe.len() {
             let j = groupe[k];
             k += 1;
-            let (a, b) = (j % n, j / n);
+            let (a, b) = (j % nx, j / nx);
             for (da, db) in [(1i64, 0i64), (-1, 0), (0, 1), (0, -1)] {
                 let (x, y) = (a as i64 + da, b as i64 + db);
-                if x < 0 || y < 0 || x >= n as i64 || y >= n as i64 {
+                if x < 0 || y < 0 || x >= nx as i64 || y >= nz as i64 {
                     continue;
                 }
-                let q = y as usize * n + x as usize;
+                let q = y as usize * nx + x as usize;
                 if eau[q] && !vu[q] {
                     vu[q] = true;
                     groupe.push(q);
@@ -358,8 +317,8 @@ pub fn generer(d: &Demande, r: &dyn Reseau, s: &Suivi) -> Result<Lieu, String> {
         }
     }
     s.noter(&format!("{ecartes} plans d'eau hors du niveau, laissés à sec"));
-    let berge = distance_berge(&eau, n);
-    for i in 0..n * n {
+    let berge = distance_berge(&eau, nx, nz);
+    for i in 0..nx * nz {
         if eau[i] {
             let fond = niveau - (0.8 + berge[i] * pas as f32 * 0.08).min(8.0);
             h[i] = h[i].min(fond);
@@ -371,10 +330,10 @@ pub fn generer(d: &Demande, r: &dyn Reseau, s: &Suivi) -> Result<Lieu, String> {
     // 4. Les routes, hors ponts et tunnels, la chaussée lissée le long de la route
     let jr = overpass(r, s, &cache.join(format!("osm_routes{suffixe}.json")), "routes", &format!("way[\"highway\"]({bb});out tags geom;"))?;
     let relief = |gx: f64, gz: f64| -> f32 {
-        let (a, b) = (gx.clamp(0.0, (n - 1) as f64), gz.clamp(0.0, (n - 1) as f64));
-        let (a0, b0) = ((a as usize).min(n - 2), (b as usize).min(n - 2));
+        let (a, b) = (gx.clamp(0.0, (nx - 1) as f64), gz.clamp(0.0, (nz - 1) as f64));
+        let (a0, b0) = ((a as usize).min(nx - 2), (b as usize).min(nz - 2));
         let (u, v) = ((a - a0 as f64) as f32, (b - b0 as f64) as f32);
-        let p = |a: usize, b: usize| h[b * n + a];
+        let p = |a: usize, b: usize| h[b * nx + a];
         (p(a0, b0) * (1.0 - u) + p(a0 + 1, b0) * u) * (1.0 - v) + (p(a0, b0 + 1) * (1.0 - u) + p(a0 + 1, b0 + 1) * u) * v
     };
     let mut routes = Vec::new();
@@ -425,7 +384,7 @@ pub fn generer(d: &Demande, r: &dyn Reseau, s: &Suivi) -> Result<Lieu, String> {
         }
     }
     let marge = 20.0 / pas;
-    let dans = |p: &(f64, f64)| p.0 > ea0 as f64 - marge && p.1 > eb0 as f64 - marge && p.0 < ea1 as f64 + marge && p.1 < eb1 as f64 + marge;
+    let dans = |p: &(f64, f64)| p.0 > -marge && p.1 > -marge && p.0 < (nx - 1) as f64 + marge && p.1 < (nz - 1) as f64 + marge;
     for (k, (genre, largeur, l)) in lignes_ponts.iter().enumerate() {
         let g = racine(&mut groupe, k);
         let c = culees.get(&g).cloned().unwrap_or_default();
@@ -450,7 +409,7 @@ pub fn generer(d: &Demande, r: &dyn Reseau, s: &Suivi) -> Result<Lieu, String> {
                 (s / w) as f32
             };
             if dans(p) {
-                morceau.push([(origine() + p.0 * pas) as f32, (origine() + p.1 * pas) as f32, y]);
+                morceau.push([(ox + p.0 * pas) as f32, (oz + p.1 * pas) as f32, y]);
             } else if morceau.len() > 1 {
                 ponts.push(Route { genre: *genre, largeur: *largeur, points: std::mem::take(&mut morceau) });
             } else {
@@ -481,7 +440,7 @@ pub fn generer(d: &Demande, r: &dyn Reseau, s: &Suivi) -> Result<Lieu, String> {
         let mut morceau: Vec<[f32; 3]> = Vec::new();
         for (p, y) in pts.iter().zip(&lisse) {
             if dans(p) {
-                morceau.push([(origine() + p.0 * pas) as f32, (origine() + p.1 * pas) as f32, *y]);
+                morceau.push([(ox + p.0 * pas) as f32, (oz + p.1 * pas) as f32, *y]);
             } else if morceau.len() > 1 {
                 routes.push(Route { genre, largeur, points: std::mem::take(&mut morceau) });
             } else {
@@ -521,13 +480,13 @@ pub fn generer(d: &Demande, r: &dyn Reseau, s: &Suivi) -> Result<Lieu, String> {
                     c.pop();
                 }
                 c.dedup();
-                if c.len() < 3 || !c.iter().all(|p| p.0 > ea0 as f64 && p.1 > eb0 as f64 && p.0 < ea1 as f64 && p.1 < eb1 as f64) {
+                if c.len() < 3 || !c.iter().all(|p| p.0 > 0.0 && p.1 > 0.0 && p.0 < (nx - 1) as f64 && p.1 < (nz - 1) as f64) {
                     continue;
                 }
                 let sols: Vec<f32> = c.iter().map(|p| relief(p.0, p.1)).collect();
                 let (bas, haut) = (sols.iter().cloned().fold(f32::MAX, f32::min), sols.iter().cloned().fold(f32::MIN, f32::max));
                 let moyen = sols.iter().sum::<f32>() / sols.len() as f32;
-                let contour = c.iter().map(|p| [(origine() + p.0 * pas) as f32, (origine() + p.1 * pas) as f32]).collect();
+                let contour = c.iter().map(|p| [(ox + p.0 * pas) as f32, (oz + p.1 * pas) as f32]).collect();
                 batiments.push(par_defaut(genre, bas - 1.0, (moyen + hauteur).max(haut + 2.0), haut, contour));
                 sols_bati.push((moyen, haut));
             }
@@ -620,7 +579,7 @@ pub fn generer(d: &Demande, r: &dyn Reseau, s: &Suivi) -> Result<Lieu, String> {
                 // Plus bas que 1,5 m : le jardin ou la cour (le contour d'OSM est souvent
                 // décalé d'un ou deux mètres), pas le toit
                 if let Some(h) = mnh.lire(x + decalage.0, z + decalage.1).filter(|h| *h >= 1.5) {
-                    let sol = relief(((x as f64) - origine()) / pas, ((z as f64) - origine()) / pas);
+                    let sol = relief(((x as f64) - ox) / pas, ((z as f64) - oz) / pas);
                     m.push([x, z, sol + h - moyen]);
                 }
             }
@@ -639,7 +598,7 @@ pub fn generer(d: &Demande, r: &dyn Reseau, s: &Suivi) -> Result<Lieu, String> {
     }
     s.etape("occupation du sol", 0.93);
     // 6. L'occupation du sol, en neuf morceaux, tramée classe après classe
-    let m = crate::cote_sol(n);
+    let (mx, mz) = g.sol();
     let mut surfaces_sol: Vec<(u8, Vec<Vec<(f64, f64)>>)> = Vec::new();
     let mut vus = std::collections::HashSet::new();
     let filtre = "[\"natural\"~\"^(wood|scrub|grassland|heath)$\"]";
@@ -674,16 +633,11 @@ pub fn generer(d: &Demande, r: &dyn Reseau, s: &Suivi) -> Result<Lieu, String> {
     }
     // Les moins précises d'abord : les quartiers, puis les champs, les prés, les bois
     use crate::{BOIS, CHAMP, HABITE, PRE, ZONE};
-    let mut sol = vec![0u8; m * m];
+    let mut sol = vec![0u8; mx * mz];
     let mut compte = [0usize; 6];
     for classe in [HABITE, ZONE, CHAMP, PRE, BOIS] {
         for (_, a) in surfaces_sol.iter().filter(|(c, _)| *c == classe) {
-            remplir_avec(a, m, |i| sol[i] = classe);
-        }
-    }
-    for (i, c) in sol.iter_mut().enumerate() {
-        if hors((2 * (i % m)).min(n - 1), (2 * (i / m)).min(n - 1)) {
-            *c = 0;
+            remplir_avec(a, mx, mz, |i| sol[i] = classe);
         }
     }
     for c in &sol {
@@ -692,7 +646,7 @@ pub fn generer(d: &Demande, r: &dyn Reseau, s: &Suivi) -> Result<Lieu, String> {
     let km2 = |k: usize| compte[k] as f64 * (pas * 2.0).powi(2) / 1e6;
     s.noter(&format!("{} surfaces d'occupation : bois {:.0} km², prés {:.0}, champs {:.0}, habité {:.0}, zones {:.0}", surfaces_sol.len(), km2(1), km2(2), km2(3), km2(4), km2(5)));
     s.etape("écriture", 0.98);
-    let lieu = Lieu::new(nom, lat, lon, x0, y0, pas, niveau, &h, &eau, routes, batiments, ponts).avec_sol(sol);
+    let lieu = Lieu::sur(nom, lat, lon, x0, y0, pas, g, niveau, &h, &eau, routes, batiments, ponts).avec_sol(sol);
     lieu.ecrire(&d.sortie).map_err(|e| format!("{} : {e}", d.sortie.display()))?;
     s.noter(&format!("{} : {} Mo", d.sortie.display(), std::fs::metadata(&d.sortie).map_or(0, |m| m.len()) / 1_000_000));
     s.etape("fini", 1.0);
@@ -1019,12 +973,13 @@ fn anneaux(mut morceaux: Vec<Vec<(f64, f64)>>) -> Vec<Vec<(f64, f64)>> {
 
 /// Remplit, pair-impair, les points de grille dans les anneaux d'une surface (ses trous
 /// restent vides).
-fn remplir(anneaux: &[Vec<(f64, f64)>], n: usize, eau: &mut [bool]) {
-    remplir_avec(anneaux, n, |i| eau[i] = true);
+fn remplir(anneaux: &[Vec<(f64, f64)>], nx: usize, nz: usize, eau: &mut [bool]) {
+    remplir_avec(anneaux, nx, nz, |i| eau[i] = true);
 }
 
-/// Pareil, en appelant `f` pour chaque point dedans (son indice dans la grille de `n`).
-fn remplir_avec(anneaux: &[Vec<(f64, f64)>], n: usize, mut f: impl FnMut(usize)) {
+/// Pareil, en appelant `f` pour chaque point dedans (son indice dans la grille de
+/// `nx` × `nz`).
+fn remplir_avec(anneaux: &[Vec<(f64, f64)>], nx: usize, nz: usize, mut f: impl FnMut(usize)) {
     let (mut b0, mut b1) = (f64::MAX, f64::MIN);
     for r in anneaux {
         for p in r {
@@ -1032,7 +987,7 @@ fn remplir_avec(anneaux: &[Vec<(f64, f64)>], n: usize, mut f: impl FnMut(usize))
             b1 = b1.max(p.1);
         }
     }
-    let (b0, b1) = (b0.ceil().max(0.0) as usize, (b1.floor().min(n as f64 - 1.0)).max(-1.0) as i64);
+    let (b0, b1) = (b0.ceil().max(0.0) as usize, (b1.floor().min(nz as f64 - 1.0)).max(-1.0) as i64);
     for b in b0 as i64..=b1 {
         let y = b as f64;
         let mut x: Vec<f64> = Vec::new();
@@ -1049,46 +1004,46 @@ fn remplir_avec(anneaux: &[Vec<(f64, f64)>], n: usize, mut f: impl FnMut(usize))
             if p.len() < 2 {
                 continue;
             }
-            let (a0, a1) = (p[0].ceil().max(0.0) as i64, p[1].floor().min(n as f64 - 1.0) as i64);
+            let (a0, a1) = (p[0].ceil().max(0.0) as i64, p[1].floor().min(nx as f64 - 1.0) as i64);
             for a in a0..=a1 {
-                f(b as usize * n + a as usize);
+                f(b as usize * nx + a as usize);
             }
         }
     }
 }
 
 /// Pour chaque point d'eau, sa distance à la berge, en points (chanfrein 3-4).
-fn distance_berge(eau: &[bool], n: usize) -> Vec<f32> {
+fn distance_berge(eau: &[bool], nx: usize, nz: usize) -> Vec<f32> {
     let mut d: Vec<f32> = eau.iter().map(|e| if *e { f32::MAX } else { 0.0 }).collect();
     let (dr, dg) = (1.0, std::f32::consts::SQRT_2);
-    for b in 0..n {
-        for a in 0..n {
-            let i = b * n + a;
+    for b in 0..nz {
+        for a in 0..nx {
+            let i = b * nx + a;
             if d[i] == 0.0 {
                 continue;
             }
             let mut m = d[i];
             if a > 0 { m = m.min(d[i - 1] + dr); }
             if b > 0 {
-                m = m.min(d[i - n] + dr);
-                if a > 0 { m = m.min(d[i - n - 1] + dg); }
-                if a + 1 < n { m = m.min(d[i - n + 1] + dg); }
+                m = m.min(d[i - nx] + dr);
+                if a > 0 { m = m.min(d[i - nx - 1] + dg); }
+                if a + 1 < nx { m = m.min(d[i - nx + 1] + dg); }
             }
             d[i] = m;
         }
     }
-    for b in (0..n).rev() {
-        for a in (0..n).rev() {
-            let i = b * n + a;
+    for b in (0..nz).rev() {
+        for a in (0..nx).rev() {
+            let i = b * nx + a;
             if d[i] == 0.0 {
                 continue;
             }
             let mut m = d[i];
-            if a + 1 < n { m = m.min(d[i + 1] + dr); }
-            if b + 1 < n {
-                m = m.min(d[i + n] + dr);
-                if a + 1 < n { m = m.min(d[i + n + 1] + dg); }
-                if a > 0 { m = m.min(d[i + n - 1] + dg); }
+            if a + 1 < nx { m = m.min(d[i + 1] + dr); }
+            if b + 1 < nz {
+                m = m.min(d[i + nx] + dr);
+                if a + 1 < nx { m = m.min(d[i + nx + 1] + dg); }
+                if a > 0 { m = m.min(d[i + nx - 1] + dg); }
             }
             d[i] = m;
         }
@@ -1100,16 +1055,46 @@ fn distance_berge(eau: &[bool], n: usize) -> Vec<f32> {
 mod tests {
     use super::*;
 
+    /// Un réseau sans réseau : le relief à 50 m partout, OSM vide.
+    struct Faux(Mutex<Vec<String>>);
+
+    impl Reseau for Faux {
+        fn telecharger(&self, url: &str, _post: Option<&str>, sortie: &Path) -> Result<(), String> {
+            self.0.lock().unwrap().push(url.to_string());
+            let o = if url.contains("wms") {
+                let lire = |k: &str| url.split(&format!("&{k}=")).nth(1).and_then(|v| v.split('&').next()).and_then(|v| v.parse::<usize>().ok()).unwrap();
+                50f32.to_le_bytes().repeat(lire("WIDTH") * lire("HEIGHT"))
+            } else {
+                b"{\"elements\": []}".to_vec()
+            };
+            std::fs::write(sortie, o).map_err(|e| e.to_string())
+        }
+    }
+
     #[test]
-    fn l_emprise_se_centre_sur_le_depart_et_se_borne_a_la_carte() {
-        let n = cote(4.0);
-        assert_eq!(emprise(4.0, 0.0, 0.0), [0, n - 1, 0, n - 1]);
-        assert_eq!(emprise(4.0, 50_000.0, 50_000.0), [0, n - 1, 0, n - 1]);
-        let [a0, a1, b0, b1] = emprise(4.0, 2000.0, 1000.0);
-        // Le départ (en points) est au milieu de l'emprise
-        let c = (DEPART[0] as f64 - origine()) / 4.0;
-        assert!((((a0 + a1) as f64 / 2.0) - c).abs() <= 1.0);
-        assert!(((a1 - a0) as f64 * 4.0 - 2000.0).abs() <= 8.0);
-        assert!(((b1 - b0) as f64 * 4.0 - 1000.0).abs() <= 8.0);
+    fn une_emprise_ne_produit_que_son_rectangle() {
+        let dossier = std::env::temp_dir().join(format!("sage-reel-gen-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dossier);
+        let sortie = dossier.join("essai.reel");
+        let d = Demande { nom: "Essai".into(), lat: 49.36, lon: 1.36, pas: 2.0, sortie: sortie.clone(), toits: false, largeur: 1000.0, longueur: 600.0 };
+        let r = Faux(Mutex::new(Vec::new()));
+        let l = generer(&d, &r, &Suivi::default()).unwrap();
+        // Le lieu ne couvre que l'emprise : environ 501 × 301 points, pas la carte entière
+        let g = l.grille;
+        assert!(g.nx.abs_diff(501) <= 3 && g.nz.abs_diff(301) <= 3, "{g:?}");
+        assert_eq!(g, Grille::emprise(2.0, 1000.0, 600.0));
+        // Et le fichier aussi : ~2 octets par point, loin des 200 Mo de la carte entière
+        let taille = std::fs::metadata(&sortie).unwrap().len();
+        assert!(taille < 400_000, "{taille} octets");
+        assert_eq!(Lieu::lire(&sortie).unwrap().grille, g);
+        assert!((l.relief(0.0, 0.0) - 50.0).abs() < 0.01);
+        // Le relief demandé à l'IGN ne déborde pas de l'emprise
+        let urls = r.0.lock().unwrap();
+        let points: usize = urls.iter().filter(|u| u.contains("wms")).map(|u| {
+            let lire = |k: &str| u.split(&format!("&{k}=")).nth(1).and_then(|v| v.split('&').next()).and_then(|v| v.parse::<usize>().ok()).unwrap();
+            lire("WIDTH") * lire("HEIGHT")
+        }).sum();
+        assert_eq!(points, g.points());
+        let _ = std::fs::remove_dir_all(&dossier);
     }
 }
