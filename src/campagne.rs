@@ -56,10 +56,10 @@ pub trait Sol {
 
 impl Sol for Reel {
     fn occupation(&self, x: f64, z: f64) -> [(u8, f64); 4] {
-        Reel::occupation(self, x, z)
+        self.lieu.occupation(x, z)
     }
     fn eau(&self, x: f64, z: f64) -> f64 {
-        Reel::eau(self, x, z)
+        self.lieu.eau(x, z)
     }
     fn niveau(&self) -> f32 {
         self.niveau

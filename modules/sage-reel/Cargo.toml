@@ -1,0 +1,10 @@
+[package]
+name = "sage-reel"
+version = "0.1.0"
+edition = "2021"
+license = "PolyForm-Noncommercial-1.0.0"
+description = "Les lieux réels de S.A.G.E. : le format .reel, ses toits, et sa génération (IGN, OpenStreetMap)"
+
+# Aucune dépendance : partagé par S.A.G.E. (le jeu, l'outil lieu_reel) et Flow (le
+# contexte Lieux). Le réseau est fourni par qui génère (curl, Java…).
+[dependencies]

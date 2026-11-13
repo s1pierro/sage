@@ -1317,3 +1317,25 @@ tuile.
 coordonnées nulles, dans une partie sans texture de l'entité `revetement/i/j`.
 `rues::monter` ne prend plus de sommets colorés. Dans l'onglet Voirie, `App::voirie_seule`
 ne garde de la scène que les maillages `tuile/` et `revetement/`.
+
+## 50. Les lieux réels en crate partagée (`modules/sage-reel`)
+
+- **La crate** `sage-reel` (sans dépendance) porte le format `.reel` (`Lieu` : lecture,
+  écriture, retouches du relief, de l'eau et du sol), les constantes (genres, classes,
+  couleurs, mesures de la carte), `lambert93` et son inverse, les toits (`toits`), un
+  JSON minimal et la génération (`generer` : IGN, LiDAR HD, Overpass). Le réseau est
+  fourni par l'appelant (`generer::Reseau` : `Curl` ici, Java dans Flow) ; l'avancement,
+  le journal et l'arrêt passent par `generer::Suivi`.
+- **Le jeu** : `reel::Reel` enveloppe un `Lieu` (`Deref`) et garde à part ce qu'il en
+  calcule (routes terrassées, index, talus, abords, rangement par tuile) ; les routes et
+  les ponts du fichier restent dans `lieu`, et s'écrivent tels quels. `sage::toits`
+  réexporte ceux de la crate ; une assertion vérifie que `TAILLE` et `DEMI_CARTE` sont
+  ceux du moteur.
+- **L'outil** `examples/lieu_reel.rs` n'est plus qu'un appel de `generer` avec curl.
+- **Flow** (le contexte Lieux) dépend de la même crate : il génère depuis le téléphone,
+  explore et édite les lieux.
+- **L'emprise** (`Demande.largeur`, `longueur`, en m ; `generer::emprise`) : un
+  rectangle centré sur le départ, dans la carte de 20 km. Seul lui se télécharge (relief
+  par morceaux, cadre d'Overpass resserré à l'emprise + 1 km, réponses gardées sous un
+  nom suffixé `_<largeur>x<longueur>`). Le format ne change pas : hors de l'emprise, le
+  relief prolonge les bords, sans eau, sol, routes ni bâtiments. 0 vaut la carte entière.

@@ -1,187 +1,24 @@
-//! Un lieu réel : le relief de l'IGN et les surfaces d'eau d'OpenStreetMap, préparés
-//! pour toute la carte de 20 km par `examples/lieu_reel.rs`, et relus par le jeu
-//! (`monde/lieu.reel`).
+//! Un lieu réel dans le jeu : le `Lieu` de la crate partagée `sage-reel` (le format
+//! `.reel`, préparé par `examples/lieu_reel.rs` et relu dans `monde/lieu.reel`), avec ce
+//! que le jeu en calcule : les routes terrassées et indexées, les talus, les abords des
+//! bâtiments, les bâtiments et les ponts rangés par tuile, montés en volumes
+//! (`Reel::bati`).
 //!
-//! - La carte se cale en Lambert-93 (EPSG:2154, en mètres) : le point (x, z) du jeu est
-//!   en X = `x0 + x`, Y = `y0 - z` (x vers l'est, z vers le sud).
-//! - Le relief est une grille de `pas` mètres qui couvre la carte, comme celle de
-//!   l'érosion, les hauteurs sur 16 bits (`base + v × echelle`) ; il se lit en douceur
-//!   (Catmull-Rom).
-//! - L'eau est un masque d'un bit par point ; sa surface est à `niveau`, et son fond déjà
-//!   creusé dans le relief, plus profond loin des berges.
-//! - Les routes sont des lignes (x, z du jeu, et la hauteur de la chaussée, lissée le long
-//!   de la route) avec un genre et une largeur. Sur leur largeur, le sol prend la hauteur
-//!   de la chaussée et sa couleur ; sur les bas-côtés (`EPAULE`), il rejoint le relief.
-//!   Les ponts et les tunnels n'y sont pas.
-//! - Les bâtiments : un contour (x, z du jeu), un pied et un toit (hauteurs absolues) et
-//!   un genre. Chaque tuile monte en volumes, toits plats, ceux dont le centre est chez
-//!   elle (`Reel::bati`).
-//! - Les ponts : des lignes comme les routes (la hauteur du tablier), montées en tabliers
-//!   avec leurs parapets, par morceaux, dans la tuile du milieu de chaque morceau.
-//! - L'occupation du sol (bois, prés et parcs, champs, quartiers habités, zones
-//!   industrielles) : une classe par point d'une grille deux fois plus lâche que le
-//!   relief, qui teinte le sol (`Reel::occupation`).
-//!
-//! Sources : relief © IGN (RGE ALTI, Licence Ouverte 2.0) ; eau © les contributeurs
-//! OpenStreetMap (ODbL). Un fichier préparé est une base de données dérivée d'OSM : il
-//! reste sous ODbL, et ne va pas dans le dépôt.
+//! Le format, les constantes (genres, classes, couleurs), `lambert93` et les toits sont
+//! dans `sage-reel` (`modules/sage-reel`), partagés avec Flow (le contexte Lieux, qui
+//! explore, édite et génère les lieux). Un fichier préparé est dérivé d'OSM : il reste
+//! sous ODbL, et ne va pas dans le dépôt.
 
-use crate::moteur::tuiles::DEMI_CARTE;
 use crate::moteur::TAILLE;
+pub use sage_reel::{
+    aire, cote, cote_sol, epaule, lambert93, lambert93_inverse, origine, teinte, teintes_bati, trianguler, Batiment, Lieu, Route, ANNEXE, BOIS, CHAMP, CHEMIN, CLASSES, EDIFICE, GRANDE, HABITE, IMMEUBLE, INDUSTRIEL, MAISON, PIETONNE, PRE, ROUTE, SENTIER, SERVICE, SOURCES, ZONE,
+};
 
-const MAGIQUE: &[u8; 8] = b"SAGEREEL";
-const FORMAT: u32 = 6;
-
-/// Le texte à citer.
-pub const SOURCES: &str = "Relief et hauteurs © IGN (RGE ALTI, LiDAR HD) · eau, routes, bâtiments et occupation du sol © les contributeurs OpenStreetMap";
-
-/// Les classes d'occupation du sol (0 : rien de dit, de l'herbe).
-pub const BOIS: u8 = 1;
-pub const PRE: u8 = 2;
-pub const CHAMP: u8 = 3;
-pub const HABITE: u8 = 4;
-pub const ZONE: u8 = 5;
-pub const CLASSES: u8 = 6;
-
-/// Les genres de routes : chacun sa couleur.
-pub const GRANDE: u8 = 0;
-pub const ROUTE: u8 = 1;
-pub const SERVICE: u8 = 2;
-pub const PIETONNE: u8 = 3;
-pub const CHEMIN: u8 = 4;
-pub const SENTIER: u8 = 5;
-
-/// La couleur d'une route de ce genre.
-pub fn teinte(genre: u8) -> [f32; 3] {
-    match genre {
-        GRANDE => [0.27, 0.27, 0.29],
-        ROUTE => [0.32, 0.32, 0.34],
-        SERVICE => [0.38, 0.38, 0.39],
-        PIETONNE => [0.60, 0.58, 0.54],
-        CHEMIN => [0.56, 0.48, 0.37],
-        _ => [0.52, 0.45, 0.34],
-    }
-}
-
-/// La largeur des bas-côtés, où le sol rejoint le relief, selon le genre.
-pub fn epaule(genre: u8) -> f32 {
-    if genre <= SERVICE { 3.0 } else { 1.5 }
-}
-
-/// Les genres de bâtiments.
-pub const MAISON: u8 = 0;
-pub const IMMEUBLE: u8 = 1;
-pub const INDUSTRIEL: u8 = 2;
-pub const EDIFICE: u8 = 3;
-pub const ANNEXE: u8 = 4;
-
-/// Les couleurs d'un bâtiment de ce genre : ses murs, son toit.
-pub fn teintes_bati(genre: u8) -> ([f32; 3], [f32; 3]) {
-    match genre {
-        MAISON => ([0.84, 0.80, 0.72], [0.34, 0.35, 0.40]),
-        IMMEUBLE => ([0.78, 0.76, 0.72], [0.40, 0.40, 0.42]),
-        INDUSTRIEL => ([0.64, 0.66, 0.68], [0.50, 0.52, 0.54]),
-        EDIFICE => ([0.76, 0.72, 0.64], [0.36, 0.38, 0.40]),
-        _ => ([0.70, 0.66, 0.60], [0.45, 0.40, 0.36]),
-    }
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct Batiment {
-    pub genre: u8,
-    /// Le pied des murs (un peu sous le sol), le haut du toit (le faîtage) et l'égout, en
-    /// hauteurs absolues.
-    pub pied: f32,
-    pub toit: f32,
-    pub egout: f32,
-    /// La forme du toit (`toits::PLAT`…) et son axe (radians, dans le plan x, z).
-    pub forme: u8,
-    pub axe: f32,
-    /// Le contour, x, z du jeu, sans répéter le premier point.
-    pub contour: Vec<[f32; 2]>,
-}
-
-impl Batiment {
-    /// Un bâtiment à toit plat.
-    pub fn plat(genre: u8, pied: f32, toit: f32, contour: Vec<[f32; 2]>) -> Batiment {
-        Batiment { genre, pied, toit, egout: toit, forme: crate::toits::PLAT, axe: 0.0, contour }
-    }
-
-    /// Le centre du contour (la moyenne de ses points).
-    pub fn centre(&self) -> [f32; 2] {
-        let n = self.contour.len().max(1) as f32;
-        let s = self.contour.iter().fold([0.0, 0.0], |a, p| [a[0] + p[0], a[1] + p[1]]);
-        [s[0] / n, s[1] / n]
-    }
-}
-
-/// L'aire signée d'un contour (positive : sens inverse des aiguilles d'une montre, x vers
-/// la droite et z vers le bas, vu d'en haut).
-pub fn aire(c: &[[f32; 2]]) -> f32 {
-    let mut s = 0.0;
-    for i in 0..c.len() {
-        let (a, b) = (c[i], c[(i + 1) % c.len()]);
-        s += a[0] * b[1] - b[0] * a[1];
-    }
-    s / 2.0
-}
-
-/// Les triangles d'un polygone simple (oreilles), en indices, dans le sens de `c`.
-pub fn trianguler(c: &[[f32; 2]]) -> Vec<[usize; 3]> {
-    let n = c.len();
-    if n < 3 {
-        return Vec::new();
-    }
-    let sens = aire(c).signum();
-    let mut reste: Vec<usize> = (0..n).collect();
-    let mut t = Vec::with_capacity(n - 2);
-    let croix = |a: [f32; 2], b: [f32; 2], p: [f32; 2]| (b[0] - a[0]) * (p[1] - a[1]) - (b[1] - a[1]) * (p[0] - a[0]);
-    let mut garde = 0;
-    while reste.len() > 3 && garde < reste.len() {
-        let m = reste.len();
-        let mut coupe = false;
-        for k in 0..m {
-            let (i0, i1, i2) = (reste[(k + m - 1) % m], reste[k], reste[(k + 1) % m]);
-            let (a, b, d) = (c[i0], c[i1], c[i2]);
-            if croix(a, b, d) * sens <= 0.0 {
-                continue;
-            }
-            let dedans = reste.iter().any(|&j| {
-                if j == i0 || j == i1 || j == i2 {
-                    return false;
-                }
-                let p = c[j];
-                croix(a, b, p) * sens > 0.0 && croix(b, d, p) * sens > 0.0 && croix(d, a, p) * sens > 0.0
-            });
-            if !dedans {
-                t.push([i0, i1, i2]);
-                reste.remove(k);
-                coupe = true;
-                break;
-            }
-        }
-        garde = if coupe { 0 } else { garde + 1 };
-        if !coupe {
-            // Un contour croisé : le reste en éventail
-            break;
-        }
-    }
-    for k in 1..reste.len().saturating_sub(1) {
-        t.push([reste[0], reste[k], reste[k + 1]]);
-    }
-    t
-}
+// Les mesures de la carte de la crate sont celles du moteur
+const _: () = assert!(sage_reel::TAILLE == TAILLE && sage_reel::DEMI_CARTE == crate::moteur::tuiles::DEMI_CARTE);
 
 /// Côté des cases de l'index des routes, en mètres.
 pub const CASE: f32 = 32.0;
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct Route {
-    pub genre: u8,
-    pub largeur: f32,
-    /// x, z du jeu, et la hauteur de la chaussée.
-    pub points: Vec<[f32; 3]>,
-}
 
 /// Le point de route le plus proche : son genre, sa largeur, la distance à l'axe et la
 /// hauteur de la chaussée.
@@ -200,29 +37,15 @@ impl Proche {
     }
 }
 
+/// Un lieu réel tel que le jeu s'en sert. Ses données (`lieu`) se lisent directement
+/// (`Deref`) ; `routes` et `ponts` sont ceux du jeu (terrassés, avec les travées), ceux
+/// du fichier restent dans `lieu`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Reel {
-    pub nom: String,
-    /// Le centre demandé, en degrés.
-    pub lat: f64,
-    pub lon: f64,
-    /// Lambert-93 du point (0, 0) du jeu.
-    pub x0: f64,
-    pub y0: f64,
-    pub pas: f64,
-    pub cote: usize,
-    /// La surface de l'eau, en mètres.
-    pub niveau: f32,
-    pub base: f32,
-    pub echelle: f32,
-    pub h: Vec<u16>,
-    /// Un bit par point : de l'eau.
-    pub eau: Vec<u8>,
+    pub lieu: Lieu,
     /// Les routes terrassées (`terrassement::profiler`) : leur chaussée d'accord aux
     /// carrefours.
     pub routes: Vec<Route>,
-    /// Les routes telles que lues, qui s'écrivent.
-    routes_lues: Vec<Route>,
     /// Les routes profilées, sans les retouches de la voirie : celles qui vont aux
     /// régions.
     pub routes_profilees: Vec<Route>,
@@ -232,25 +55,21 @@ pub struct Reel {
     index_talus: Index,
     /// Les abords des bâtiments proches des rues, terrassés à leur hauteur.
     abords: crate::terrassement::Abords,
-    pub batiments: Vec<Batiment>,
     /// Pour chaque tuile, les bâtiments dont le centre est chez elle.
     par_tuile: std::collections::HashMap<(i32, i32), Vec<u32>>,
     /// Les ponts : une ligne par pont, la hauteur du tablier ; puis les travées des
     /// croisements sans carrefour (`terrassement::travees`).
     pub ponts: Vec<Route>,
-    /// Les ponts tels que lus, qui s'écrivent.
-    ponts_lus: Vec<Route>,
     /// Pour chaque tuile, les morceaux de pont (pont, premier point) dont le milieu est
     /// chez elle.
     ponts_par_tuile: std::collections::HashMap<(i32, i32), Vec<(u32, u32)>>,
-    /// L'occupation du sol, une classe par point de la grille de `2 × pas` (`cote_sol`
-    /// points de côté) ; vide : rien de dit.
-    pub sol: Vec<u8>,
 }
 
-/// Le côté de la grille de l'occupation du sol pour un relief de `n` points de côté.
-pub fn cote_sol(n: usize) -> usize {
-    (n - 1) / 2 + 1
+impl std::ops::Deref for Reel {
+    type Target = Lieu;
+    fn deref(&self) -> &Lieu {
+        &self.lieu
+    }
 }
 
 /// L'épaisseur du tablier, la hauteur et l'épaisseur des parapets (m).
@@ -319,45 +138,6 @@ pub fn monter_pont(v: &mut Vec<f32>, t: &mut Vec<[[f32; 3]; 3]>, a: [f32; 3], b:
     }
 }
 
-/// Le coin de la grille (au repère du jeu) : le coin de la première tuile de la carte.
-pub fn origine() -> f64 {
-    -(DEMI_CARTE as f64) * TAILLE as f64
-}
-
-/// Points de la grille par côté, pour un pas de `pas` mètres.
-pub fn cote(pas: f64) -> usize {
-    ((2 * DEMI_CARTE + 1) as f64 * TAILLE as f64 / pas).round() as usize + 1
-}
-
-/// Lambert-93 (X, Y) d'un point en degrés, sur l'ellipsoïde GRS 80 (formules de l'IGN).
-pub fn lambert93(lat: f64, lon: f64) -> (f64, f64) {
-    const E: f64 = 0.081_819_191_042_815_8;
-    const N: f64 = 0.725_607_765_053_267;
-    const C: f64 = 11_754_255.426_096;
-    const XS: f64 = 700_000.0;
-    const YS: f64 = 12_655_612.049_876;
-    let p = lat.to_radians();
-    let s = p.sin();
-    let l = ((std::f64::consts::FRAC_PI_4 + p / 2.0).tan() * ((1.0 - E * s) / (1.0 + E * s)).powf(E / 2.0)).ln();
-    let r = C * (-N * l).exp();
-    let g = N * (lon - 3.0).to_radians();
-    (XS + r * g.sin(), YS - r * g.cos())
-}
-
-fn ecrire_routes(o: &mut Vec<u8>, routes: &[Route]) {
-    o.extend_from_slice(&(routes.len() as u32).to_le_bytes());
-    for r in routes {
-        o.push(r.genre);
-        o.extend_from_slice(&r.largeur.to_le_bytes());
-        o.extend_from_slice(&(r.points.len() as u32).to_le_bytes());
-        for p in &r.points {
-            for v in p {
-                o.extend_from_slice(&v.to_le_bytes());
-            }
-        }
-    }
-}
-
 /// Les segments (route, premier point) qui approchent chaque case de `CASE` mètres.
 pub type Index = std::collections::HashMap<(i32, i32), Vec<(u32, u32)>>;
 
@@ -405,57 +185,29 @@ pub fn proche(routes: &[Route], index: &Index, x: f64, z: f64) -> Option<Proche>
     mieux
 }
 
-fn cr(a: f64, b: f64, c: f64, d: f64, t: f64) -> f64 {
-    b + 0.5 * t * (c - a + t * (2.0 * a - 5.0 * b + 4.0 * c - d + t * (3.0 * (b - c) + d - a)))
-}
-
 impl Reel {
     /// Les hauteurs `h` (en mètres) et l'eau, d'une grille de `cote(pas)` points ; les
     /// hauteurs s'encodent sur 16 bits.
     #[allow(clippy::too_many_arguments)]
     pub fn new(nom: &str, lat: f64, lon: f64, x0: f64, y0: f64, pas: f64, niveau: f32, h: &[f32], eau: &[bool], routes: Vec<Route>, batiments: Vec<Batiment>, ponts: Vec<Route>) -> Reel {
-        let n = cote(pas);
-        assert!(h.len() == n * n && eau.len() == n * n);
-        let lo = h.iter().cloned().fold(f32::MAX, f32::min);
-        let hi = h.iter().cloned().fold(f32::MIN, f32::max);
-        let echelle = ((hi - lo) / 65535.0).max(0.01);
-        let hv = h.iter().map(|v| ((v - lo) / echelle).round().clamp(0.0, 65535.0) as u16).collect();
-        let mut bits = vec![0u8; (n * n).div_ceil(8)];
-        for (i, _) in eau.iter().enumerate().filter(|(_, e)| **e) {
-            bits[i / 8] |= 1 << (i % 8);
-        }
-        Reel { nom: nom.into(), lat, lon, x0, y0, pas, cote: n, niveau, base: lo, echelle, h: hv, eau: bits, routes, routes_lues: Vec::new(), routes_profilees: Vec::new(), index: Default::default(), index_talus: Default::default(), abords: Default::default(), batiments, par_tuile: Default::default(), ponts, ponts_lus: Vec::new(), ponts_par_tuile: Default::default(), sol: Vec::new() }.indexe()
+        Reel::depuis(Lieu::new(nom, lat, lon, x0, y0, pas, niveau, h, eau, routes, batiments, ponts))
+    }
+
+    /// Le lieu, prêt pour le jeu (terrassé, indexé).
+    pub fn depuis(lieu: Lieu) -> Reel {
+        let (routes, ponts) = (lieu.routes.clone(), lieu.ponts.clone());
+        Reel { lieu, routes, routes_profilees: Vec::new(), index: Default::default(), index_talus: Default::default(), abords: Default::default(), par_tuile: Default::default(), ponts, ponts_par_tuile: Default::default() }.indexe()
     }
 
     /// Avec son occupation du sol (`cote_sol(cote)²` classes).
     pub fn avec_sol(mut self, sol: Vec<u8>) -> Reel {
-        let m = cote_sol(self.cote);
-        assert_eq!(sol.len(), m * m);
-        self.sol = sol;
+        self.lieu = self.lieu.avec_sol(sol);
         self
-    }
-
-    /// L'occupation du sol en (x, z) : les classes des quatre points autour et leurs
-    /// poids.
-    pub fn occupation(&self, x: f64, z: f64) -> [(u8, f64); 4] {
-        if self.sol.is_empty() {
-            return [(0, 1.0), (0, 0.0), (0, 0.0), (0, 0.0)];
-        }
-        let m = cote_sol(self.cote) as i64;
-        let p = self.pas * 2.0;
-        let (gx, gz) = ((x - origine()) / p, (z - origine()) / p);
-        let (a, b) = (gx.floor(), gz.floor());
-        let (u, v) = (gx - a, gz - b);
-        let (a, b) = (a as i64, b as i64);
-        let c = |a: i64, b: i64| self.sol[(b.clamp(0, m - 1) * m + a.clamp(0, m - 1)) as usize];
-        [(c(a, b), (1.0 - u) * (1.0 - v)), (c(a + 1, b), u * (1.0 - v)), (c(a, b + 1), (1.0 - u) * v), (c(a + 1, b + 1), u * v)]
     }
 
     /// Range chaque segment de route dans les cases qu'il approche.
     fn indexe(mut self) -> Reel {
-        // Le terrassement : les routes lues se gardent telles quelles pour l'écriture
-        self.routes_lues = self.routes.clone();
-        self.ponts_lus = self.ponts.clone();
+        // Le terrassement (les routes lues se gardent telles quelles dans `lieu`)
         crate::terrassement::profiler(&mut self.routes, &self.ponts);
         self.routes_profilees = self.routes.clone();
         crate::voirie::appliquer(&mut self.routes);
@@ -542,31 +294,6 @@ impl Reel {
         proche(&self.routes, &self.index, x, z)
     }
 
-    /// La part (de 0 à 1) des points d'occupation de la `classe` dans le carré de demi-côté
-    /// `r` mètres autour de (x, z).
-    pub fn part_sol(&self, classe: u8, x: f64, z: f64, r: f64) -> f64 {
-        if self.sol.is_empty() {
-            return 0.0;
-        }
-        let m = cote_sol(self.cote) as i64;
-        let p = self.pas * 2.0;
-        let (a0, a1) = (((x - r - origine()) / p).ceil() as i64, ((x + r - origine()) / p).floor() as i64);
-        let (b0, b1) = (((z - r - origine()) / p).ceil() as i64, ((z + r - origine()) / p).floor() as i64);
-        let (mut oui, mut tous) = (0, 0);
-        for b in b0.max(0)..=b1.min(m - 1) {
-            for a in a0.max(0)..=a1.min(m - 1) {
-                tous += 1;
-                oui += (self.sol[(b * m + a) as usize] == classe) as i32;
-            }
-        }
-        // Un carré plus petit que la grille : le point le plus proche
-        if tous == 0 {
-            let (a, b) = (((x - origine()) / p).round() as i64, ((z - origine()) / p).round() as i64);
-            return (self.sol[(b.clamp(0, m - 1) * m + a.clamp(0, m - 1)) as usize] == classe) as i32 as f64;
-        }
-        oui as f64 / tous as f64
-    }
-
     /// Le point (x, z) est-il libre, à `marge` mètres près : ni eau, ni chaussée, ni
     /// bâtiment, ni pont ? (Un arbre y pousse.)
     pub fn libre(&self, x: f64, z: f64, marge: f32) -> bool {
@@ -612,31 +339,7 @@ impl Reel {
         true
     }
 
-    /// La hauteur du relief seul, sans les routes.
-    pub fn relief(&self, x: f64, z: f64) -> f64 {
-        let (gx, gz) = ((x - origine()) / self.pas, (z - origine()) / self.pas);
-        let (a, b) = (gx.floor(), gz.floor());
-        let (u, v) = (gx - a, gz - b);
-        let (a, b) = (a as i64, b as i64);
-        let l = |j: i64| cr(self.point(a - 1, j), self.point(a, j), self.point(a + 1, j), self.point(a + 2, j), u);
-        cr(l(b - 1), l(b), l(b + 1), l(b + 2), v)
-    }
-
-    fn point(&self, a: i64, b: i64) -> f64 {
-        let n = self.cote as i64;
-        let i = (b.clamp(0, n - 1) * n + a.clamp(0, n - 1)) as usize;
-        (self.base + self.h[i] as f32 * self.echelle) as f64
-    }
-
-    /// Le point (a, b) de la grille est-il dans l'eau ?
-    pub fn est_eau(&self, a: i64, b: i64) -> bool {
-        let n = self.cote as i64;
-        if a < 0 || b < 0 || a >= n || b >= n {
-            return false;
-        }
-        let i = (b * n + a) as usize;
-        self.eau[i / 8] & (1 << (i % 8)) != 0
-    }
+    /// La hauteur du relief seul, sans les routes : `Lieu::relief`.
 
     /// La hauteur du sol en (x, z) du jeu : le relief, terrassé sous les routes
     /// (`terrassement::sol`).
@@ -681,144 +384,14 @@ impl Reel {
         b
     }
 
-    /// La part d'eau en (x, z), de 0 à 1 : 1 au milieu de la Seine, entre deux sur la
-    /// berge.
-    pub fn eau(&self, x: f64, z: f64) -> f64 {
-        let (gx, gz) = ((x - origine()) / self.pas, (z - origine()) / self.pas);
-        let (a, b) = (gx.floor(), gz.floor());
-        let (u, v) = (gx - a, gz - b);
-        let (a, b) = (a as i64, b as i64);
-        let e = |a: i64, b: i64| if self.est_eau(a, b) { 1.0 } else { 0.0 };
-        (e(a, b) * (1.0 - u) + e(a + 1, b) * u) * (1.0 - v) + (e(a, b + 1) * (1.0 - u) + e(a + 1, b + 1) * u) * v
-    }
-
+    /// Le fichier, en octets (les routes et les ponts tels que lus).
     pub fn octets(&self) -> Vec<u8> {
-        let mut o = Vec::with_capacity(96 + self.h.len() * 2 + self.eau.len());
-        o.extend_from_slice(MAGIQUE);
-        o.extend_from_slice(&FORMAT.to_le_bytes());
-        let nom = self.nom.as_bytes();
-        o.extend_from_slice(&(nom.len() as u32).to_le_bytes());
-        o.extend_from_slice(nom);
-        for v in [self.lat, self.lon, self.x0, self.y0, self.pas] {
-            o.extend_from_slice(&v.to_le_bytes());
-        }
-        o.extend_from_slice(&(self.cote as u32).to_le_bytes());
-        for v in [self.niveau, self.base, self.echelle] {
-            o.extend_from_slice(&v.to_le_bytes());
-        }
-        for v in &self.h {
-            o.extend_from_slice(&v.to_le_bytes());
-        }
-        o.extend_from_slice(&self.eau);
-        ecrire_routes(&mut o, &self.routes_lues);
-        o.extend_from_slice(&(self.batiments.len() as u32).to_le_bytes());
-        for b in &self.batiments {
-            o.push(b.genre);
-            o.extend_from_slice(&b.pied.to_le_bytes());
-            o.extend_from_slice(&b.toit.to_le_bytes());
-            o.push(b.forme);
-            o.extend_from_slice(&b.egout.to_le_bytes());
-            o.extend_from_slice(&b.axe.to_le_bytes());
-            o.extend_from_slice(&(b.contour.len() as u32).to_le_bytes());
-            for p in &b.contour {
-                o.extend_from_slice(&p[0].to_le_bytes());
-                o.extend_from_slice(&p[1].to_le_bytes());
-            }
-        }
-        ecrire_routes(&mut o, &self.ponts_lus);
-        // L'occupation du sol, par plages (classe, longueur de 1 à 255)
-        let mut plages = Vec::new();
-        let mut it = self.sol.iter().peekable();
-        while let Some(&c) = it.next() {
-            let mut l = 1u8;
-            while l < 255 && it.peek() == Some(&&c) {
-                it.next();
-                l += 1;
-            }
-            plages.push(c);
-            plages.push(l);
-        }
-        o.extend_from_slice(&(plages.len() as u32 / 2).to_le_bytes());
-        o.extend_from_slice(&plages);
-        o
+        self.lieu.octets()
     }
 
     /// Relu ; rien si ce n'est pas un lieu réel de ce format, ou pour une autre carte.
     pub fn depuis_octets(o: &[u8]) -> Option<Reel> {
-        if o.get(..8)? != MAGIQUE {
-            return None;
-        }
-        let mut k = 8;
-        let mut prendre = |n: usize| -> Option<&[u8]> {
-            let s = o.get(k..k + n)?;
-            k += n;
-            Some(s)
-        };
-        let u32_ = |s: &[u8]| u32::from_le_bytes(s.try_into().unwrap());
-        let format = u32_(prendre(4)?);
-        if !(1..=FORMAT).contains(&format) {
-            return None;
-        }
-        let l = u32_(prendre(4)?) as usize;
-        let nom = String::from_utf8(prendre(l)?.to_vec()).ok()?;
-        let mut f = [0f64; 5];
-        for v in &mut f {
-            *v = f64::from_le_bytes(prendre(8)?.try_into().ok()?);
-        }
-        let [lat, lon, x0, y0, pas] = f;
-        let n = u32_(prendre(4)?) as usize;
-        if !(pas > 0.0) || n != cote(pas) {
-            return None;
-        }
-        let mut g = [0f32; 3];
-        for v in &mut g {
-            *v = f32::from_le_bytes(prendre(4)?.try_into().ok()?);
-        }
-        let [niveau, base, echelle] = g;
-        let h = prendre(n * n * 2)?.chunks(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
-        let eau = prendre((n * n).div_ceil(8))?.to_vec();
-        let f32_ = |s: &[u8]| f32::from_le_bytes(s.try_into().unwrap());
-        macro_rules! lire_routes { () => {{
-            let mut routes = Vec::new();
-            for _ in 0..u32_(prendre(4)?) {
-                let genre = prendre(1)?[0];
-                let largeur = f32_(prendre(4)?);
-                let m = u32_(prendre(4)?) as usize;
-                let o = prendre(m * 12)?;
-                let points = o.chunks(12).map(|c| [f32_(&c[0..4]), f32_(&c[4..8]), f32_(&c[8..12])]).collect();
-                routes.push(Route { genre, largeur, points });
-            }
-            routes
-        }}}
-        let routes = if format >= 2 { lire_routes!() } else { Vec::new() };
-        let mut batiments = Vec::new();
-        if format >= 3 {
-            for _ in 0..u32_(prendre(4)?) {
-                let genre = prendre(1)?[0];
-                let pied = f32_(prendre(4)?);
-                let toit = f32_(prendre(4)?);
-                let (forme, egout, axe) = if format >= 6 { (prendre(1)?[0], f32_(prendre(4)?), f32_(prendre(4)?)) } else { (crate::toits::PLAT, toit, 0.0) };
-                let m = u32_(prendre(4)?) as usize;
-                let contour = prendre(m * 8)?.chunks(8).map(|c| [f32_(&c[0..4]), f32_(&c[4..8])]).collect();
-                batiments.push(Batiment { genre, pied, toit, egout, forme, axe, contour });
-            }
-        }
-        let ponts = if format >= 4 { lire_routes!() } else { Vec::new() };
-        let mut sol = Vec::new();
-        if format >= 5 {
-            let l = u32_(prendre(4)?) as usize;
-            for c in prendre(l * 2)?.chunks(2) {
-                sol.extend(std::iter::repeat_n(c[0], c[1] as usize));
-            }
-            let m = cote_sol(n);
-            if !sol.is_empty() && sol.len() != m * m {
-                return None;
-            }
-        }
-        if k != o.len() {
-            return None;
-        }
-        Some(Reel { nom, lat, lon, x0, y0, pas, cote: n, niveau, base, echelle, h, eau, routes, routes_lues: Vec::new(), routes_profilees: Vec::new(), index: Default::default(), index_talus: Default::default(), abords: Default::default(), batiments, par_tuile: Default::default(), ponts, ponts_lus: Vec::new(), ponts_par_tuile: Default::default(), sol }.indexe())
+        Lieu::depuis_octets(o).map(Reel::depuis)
     }
 }
 

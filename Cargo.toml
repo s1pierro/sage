@@ -12,6 +12,8 @@ license = "PolyForm-Noncommercial-1.0.0"
 [dependencies]
 fontdue = "0.9"
 gda = { path = "../gda" }
+# Le format des lieux réels, leurs toits et leur génération, partagés avec Flow
+sage-reel = { path = "modules/sage-reel" }
 jpeg-decoder = { version = "0.3", default-features = false }
 png = "0.17"
 
