@@ -24,6 +24,7 @@
 
 pub mod generer;
 pub mod json;
+pub mod tabliers;
 pub mod toits;
 
 /// Le côté d'une tuile du jeu (m) et le nombre de tuiles de part et d'autre du centre :
