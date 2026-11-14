@@ -23,7 +23,7 @@
 //!   plus proche), comme sur une plateforme, et un talus le rejoint au-delà. Le trottoir
 //!   va donc à plat jusqu'à la façade.
 
-use crate::reel::{Index, Route, SERVICE};
+use crate::reel::{carrossable, Index, Route};
 use std::collections::{HashMap, HashSet};
 
 /// La pente des talus d'origine (`Procedures::pente`) : 2 de haut pour 3 de long.
@@ -48,7 +48,7 @@ pub fn plateforme(genre: u8) -> f32 {
 }
 
 fn plateforme_de(p: &crate::procedures::Procedures, genre: u8) -> f32 {
-    if genre <= SERVICE {
+    if carrossable(genre) {
         p.plateforme
     } else {
         0.5
@@ -92,7 +92,7 @@ pub fn profiler_avec(routes: &mut [Route], ponts: &[Route], lissage: f32) {
             });
             h[k] += p[2];
             compte[k] += 1.0;
-            lourd[k] |= r.genre <= SERVICE;
+            lourd[k] |= carrossable(r.genre);
             l.push(k);
         }
         noeuds.push(l);
@@ -120,7 +120,7 @@ pub fn profiler_avec(routes: &mut [Route], ponts: &[Route], lissage: f32) {
             if k[0] == k[1] || d < 1e-3 {
                 continue;
             }
-            let (p, rue) = (1.0 / d.max(0.5), r.genre <= SERVICE);
+            let (p, rue) = (1.0 / d.max(0.5), carrossable(r.genre));
             voisins[k[0]].push((k[1], p, rue));
             voisins[k[1]].push((k[0], p, rue));
             somme += d as f64;
@@ -190,7 +190,7 @@ pub fn sol(routes: &[Route], index: &Index, abords: &Abords, x: f64, z: f64, rel
         let d = (x - a[0] - dx * t).hypot(z - a[1] - dz * t);
         let e = d - r.largeur / 2.0 - plateforme_de(&pr, r.genre);
         let y = a[2] + (b[2] - a[2]) * t;
-        let lourd = r.genre <= SERVICE;
+        let lourd = carrossable(r.genre);
         match proches.iter_mut().find(|p| p.0 == k) {
             Some(p) if e < p.1 => *p = (k, e, y, lourd),
             Some(_) => {}
@@ -338,7 +338,7 @@ pub fn abords(routes: &[Route], batiments: &[&[[f32; 2]]], distance: f32, talus:
         for p in c.iter() {
             for &(k, i) in index.get(&((p[0] / CASE).floor() as i32, (p[1] / CASE).floor() as i32)).map_or(&[][..], |l| l.as_slice()) {
                 let r = &routes[k as usize];
-                if r.genre > SERVICE {
+                if !carrossable(r.genre) {
                     continue;
                 }
                 if let Some((d, _, _)) = sur_route(r, &[i], p[0], p[1]) {
@@ -415,7 +415,7 @@ pub fn travees(routes: &[Route], index: &Index) -> Vec<Route> {
                 let (r1, r2) = (&routes[k1 as usize], &routes[k2 as usize]);
                 // Entre voies où l'on roule seulement : un chemin piéton dont le profil
                 // s'écarte au croisement ne creuse pas la rue
-                if r1.genre > SERVICE || r2.genre > SERVICE {
+                if !carrossable(r1.genre) || !carrossable(r2.genre) {
                     continue;
                 }
                 let (a, b) = (r1.points[i1 as usize], r1.points[i1 as usize + 1]);

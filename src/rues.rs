@@ -27,7 +27,7 @@
 //! impasse), la chaussée se coupe net.
 
 use crate::moteur::{REVETEMENTS, TAILLE};
-use crate::reel::{teinte, Index, Route, CASE, SERVICE};
+use crate::reel::{carrossable, teinte, Index, Route, CASE};
 use crate::revetements::{BITUME, METRES_BITUME, PAVES, PAVES_PAR_IMAGE, UNI};
 use std::collections::{HashMap, HashSet};
 
@@ -136,7 +136,7 @@ impl<'a> Champ<'a> {
             for cx in c0..=c1 {
                 for &(k, i) in l.index.get(&(cx, cz)).map_or(&[][..], |v| v.as_slice()) {
                     let r = &l.routes[k as usize];
-                    if r.genre <= SERVICE && r.points.len() >= 2 {
+                    if carrossable(r.genre) && r.points.len() >= 2 {
                         vus.insert((k, i));
                     }
                 }

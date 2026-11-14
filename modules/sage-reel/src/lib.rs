@@ -54,6 +54,19 @@ pub const SERVICE: u8 = 2;
 pub const PIETONNE: u8 = 3;
 pub const CHEMIN: u8 = 4;
 pub const SENTIER: u8 = 5;
+/// Les voies réservées aux bus (sites propres) : une chaussée, à part des autres.
+pub const BUS: u8 = 6;
+/// Le nombre de genres de routes.
+pub const GENRES: u8 = 7;
+
+/// Le nom de chaque genre de route, dans l'ordre des valeurs.
+pub const NOMS_GENRES: [&str; GENRES as usize] = ["Grande route", "Route", "Service", "Piétonne", "Chemin", "Sentier", "Bus"];
+
+/// Une chaussée (grande route, route, service, bus), par opposition aux voies
+/// piétonnes, chemins et sentiers.
+pub fn carrossable(genre: u8) -> bool {
+    genre <= SERVICE || genre == BUS
+}
 
 /// La couleur d'une route de ce genre.
 pub fn teinte(genre: u8) -> [f32; 3] {
@@ -63,13 +76,14 @@ pub fn teinte(genre: u8) -> [f32; 3] {
         SERVICE => [0.38, 0.38, 0.39],
         PIETONNE => [0.60, 0.58, 0.54],
         CHEMIN => [0.56, 0.48, 0.37],
+        BUS => [0.44, 0.27, 0.25],
         _ => [0.52, 0.45, 0.34],
     }
 }
 
 /// La largeur des bas-côtés, où le sol rejoint le relief, selon le genre.
 pub fn epaule(genre: u8) -> f32 {
-    if genre <= SERVICE { 3.0 } else { 1.5 }
+    if carrossable(genre) { 3.0 } else { 1.5 }
 }
 
 /// Les genres de bâtiments.

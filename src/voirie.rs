@@ -152,7 +152,7 @@ impl Voirie {
                 let (Some(a), Some(b)) = (paire("a"), paire("b")) else { continue };
                 let num = |k: &str| t.get(k).and_then(J::num).map(|v| v as f32);
                 let origine = (num("genre_origine").unwrap_or(1.0) as u8, num("largeur_origine").unwrap_or(6.0));
-                let x = Troncon { a, b, origine, genre: num("genre").map(|g| (g as u8).min(crate::reel::SENTIER)), largeur: num("largeur").map(|l| l.clamp(1.0, 30.0)), trottoir: num("trottoir").map(|w| w.clamp(0.0, 8.0)) };
+                let x = Troncon { a, b, origine, genre: num("genre").map(|g| (g as u8).min(crate::reel::GENRES - 1)), largeur: num("largeur").map(|l| l.clamp(1.0, 30.0)), trottoir: num("trottoir").map(|w| w.clamp(0.0, 8.0)) };
                 if !x.vide() {
                     troncons.push(x);
                 }

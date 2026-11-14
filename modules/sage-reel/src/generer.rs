@@ -12,7 +12,7 @@
 //! toucher au relief dessous.
 //!
 //! Les routes : `highway=*` hors ponts et tunnels, un genre (grande route, route, voie de
-//! service, voie piétonne, chemin, sentier) et une largeur (`width`, `lanes` ou selon le
+//! service, voie piétonne, chemin, sentier, voie de bus : `busway`, `bus_guideway`) et une largeur (`width`, `lanes` ou selon le
 //! genre) ; un point tous les 8 m, la hauteur de la chaussée prise au relief et lissée.
 //!
 //! Les bâtiments : `building=*` (chemins et relations, leurs contours extérieurs), un
@@ -707,7 +707,7 @@ fn densifier(l: &[(f64, f64)], pas: f64, m: f64) -> Vec<(f64, f64)> {
 /// Le genre et la largeur (m) d'une route d'après ses étiquettes OSM, et si c'est un pont ;
 /// rien pour ce qui n'est pas une voie (tunnels, escaliers, projets, surfaces…).
 fn genre_route(tags: Option<&J>) -> Option<(u8, f32, bool)> {
-    use crate::{CHEMIN, GRANDE, PIETONNE, ROUTE, SENTIER, SERVICE};
+    use crate::{BUS, CHEMIN, GRANDE, PIETONNE, ROUTE, SENTIER, SERVICE};
     let tag = |k: &str| tags.and_then(|t| t.get(k)).and_then(J::txt);
     let pont = tag("bridge").is_some_and(|v| v != "no");
     if tag("tunnel").is_some_and(|v| v != "no") || tag("area") == Some("yes") || tag("indoor").is_some_and(|v| v != "no") {
@@ -723,6 +723,9 @@ fn genre_route(tags: Option<&J>) -> Option<(u8, f32, bool)> {
         "residential" | "road" => (ROUTE, 6.0),
         "unclassified" => (ROUTE, 5.5),
         "living_street" => (ROUTE, 5.0),
+        // Les sites propres des bus ; une voie de service qui leur est réservée aussi
+        "busway" | "bus_guideway" => (BUS, 3.5),
+        "service" if ["bus", "psv"].iter().any(|k| tag(k) == Some("designated")) => (BUS, 3.5),
         "service" => (SERVICE, 4.0),
         "pedestrian" => (PIETONNE, 6.0),
         "cycleway" => (PIETONNE, 2.5),
@@ -1096,5 +1099,15 @@ mod tests {
         }).sum();
         assert_eq!(points, g.points());
         let _ = std::fs::remove_dir_all(&dossier);
+    }
+
+    #[test]
+    fn les_voies_de_bus_sont_un_genre_a_part() {
+        let g = |t: &str| genre_route(json::lire(t).as_ref()).map(|(g, l, _)| (g, l));
+        assert_eq!(g(r#"{"highway":"busway"}"#), Some((crate::BUS, 3.5)));
+        assert_eq!(g(r#"{"highway":"bus_guideway","lanes":"2"}"#), Some((crate::BUS, 7.5)));
+        assert_eq!(g(r#"{"highway":"service","psv":"designated"}"#), Some((crate::BUS, 3.5)));
+        assert_eq!(g(r#"{"highway":"service"}"#), Some((crate::SERVICE, 4.0)));
+        assert!(crate::carrossable(crate::BUS) && !crate::carrossable(crate::SENTIER));
     }
 }

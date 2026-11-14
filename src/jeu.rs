@@ -1383,17 +1383,17 @@ impl App {
         let (x, z) = (c[0] + o[0] as f32 * TAILLE, c[2] + o[1] as f32 * TAILLE);
         let routes = self.routes_voirie();
         // Les routes dont un point est à portée, et leur longueur dans le cercle
-        let mut par_genre = [(0usize, 0.0f32); 6];
+        let mut par_genre = [(0usize, 0.0f32); crate::reel::GENRES as usize];
         for r in routes {
             let dans = |p: &[f32; 3]| (p[0] - x).hypot(p[1] - z) <= RAYON_VOIRIE;
             if !r.points.iter().any(dans) {
                 continue;
             }
-            let g = (r.genre as usize).min(5);
+            let g = (r.genre as usize).min(crate::reel::GENRES as usize - 1);
             par_genre[g].0 += 1;
             par_genre[g].1 += r.points.windows(2).filter(|s| dans(&s[0]) && dans(&s[1])).map(|s| (s[1][0] - s[0][0]).hypot(s[1][1] - s[0][1])).sum::<f32>();
         }
-        let noms = ["Grandes routes", "Routes", "Voies de service", "Voies piétonnes", "Chemins", "Sentiers"];
+        let noms = ["Grandes routes", "Routes", "Voies de service", "Voies piétonnes", "Chemins", "Sentiers", "Voies de bus"];
         let mut aucune = true;
         for (k, (n, l)) in par_genre.iter().enumerate().filter(|(_, (n, _))| *n > 0) {
             aucune = false;
@@ -1402,21 +1402,21 @@ impl App {
         if aucune {
             cx.paragraph(b, "Aucune route autour du point visé.");
         }
-        cx.paragraph(b, &format!("Un fil suit l'axe de chaque route à moins de {} m du point visé, de la couleur de son genre : orange les grandes routes, jaune les routes, blanc les voies de service, bleu les voies piétonnes, brun les chemins, vert les sentiers. Touchez un fil pour choisir un tronçon (d'un carrefour à l'autre).", RAYON_VOIRIE as i32));
+        cx.paragraph(b, &format!("Un fil suit l'axe de chaque route à moins de {} m du point visé, de la couleur de son genre : orange les grandes routes, jaune les routes, blanc les voies de service, bleu les voies piétonnes, brun les chemins, vert les sentiers, rouge les voies de bus. Touchez un fil pour choisir un tronçon (d'un carrefour à l'autre).", RAYON_VOIRIE as i32));
     }
 
     /// Les réglages du tronçon choisi.
     fn panneau_troncon(&mut self, cx: &mut Cx, b: &mut widgets::Body, t: crate::voirie::Troncon, r: &crate::reel::Route, ia: usize, ib: usize) {
         use crate::voirie::Troncon;
-        const NOMS: [&str; 6] = ["Grande route", "Route", "Service", "Piétonne", "Chemin", "Sentier"];
+        const NOMS: [&str; crate::reel::GENRES as usize] = crate::reel::NOMS_GENRES;
         let (g0, l0) = t.origine;
         let mut genre = t.genre.unwrap_or(g0);
         let mut largeur = t.largeur.unwrap_or(l0);
         cx.section(b, "TRONÇON");
         cx.mesure(b, "Longueur", &format!("{} m", dec(crate::voirie::longueur(r, ia, ib), 0)));
-        cx.mesure(b, "D'origine", &format!("{} · {} m", NOMS[(g0 as usize).min(5)], dec(l0, 1)));
+        cx.mesure(b, "D'origine", &format!("{} · {} m", NOMS[(g0 as usize).min(NOMS.len() - 1)], dec(l0, 1)));
         cx.section(b, "PRIORITÉ");
-        if let Some(k) = cx.liens(b, id("troncon-genre"), &NOMS, Some((genre as usize).min(5))) {
+        if let Some(k) = cx.liens(b, id("troncon-genre"), &NOMS, Some((genre as usize).min(NOMS.len() - 1))) {
             genre = k as u8;
         }
         cx.section(b, "CHAUSSÉE");
@@ -1949,6 +1949,7 @@ fn couleur_voirie(genre: u8) -> Color {
         crate::reel::SERVICE => [0xF4, 0xF4, 0xF4, 230],
         crate::reel::PIETONNE => [0x80, 0xC8, 0xF0, 230],
         crate::reel::CHEMIN => [0xC0, 0x98, 0x70, 230],
+        crate::reel::BUS => [0xE8, 0x50, 0x50, 230],
         _ => [0x98, 0xC8, 0x88, 230],
     }
 }
