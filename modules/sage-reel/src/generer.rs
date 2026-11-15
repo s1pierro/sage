@@ -11,6 +11,13 @@
 //! l'autre entre les hauteurs du sol à ses bouts (pondérées par la distance), sans
 //! toucher au relief dessous.
 //!
+//! Les tunnels : les `highway=*` en `tunnel=*` (hors passages sous un bâtiment, gardés au
+//! sol), mis bout à bout comme les ponts ; la chaussée rejoint le sol à ses entrées et
+//! descend dessous. Les voies ferrées (`railway=rail|subway|light_rail|tram|…`) se font
+//! comme les routes, leurs ponts et leurs tunnels comme ceux des routes. Les arrêts : les
+//! quais des bus, les arrêts de tram, les gares et stations ; les lignes : les relations
+//! `route=bus|tram|subway|light_rail|train|…`, leurs quais dans l'ordre et leur tracé.
+//!
 //! Les routes : `highway=*` hors ponts et tunnels, un genre (grande route, route, voie de
 //! service, voie piétonne, chemin, sentier, voie de bus : `busway`, `bus_guideway`) et une largeur (`width`, `lanes` ou selon le
 //! genre) ; un point tous les 8 m, la hauteur de la chaussée prise au relief et lissée.
@@ -33,9 +40,10 @@
 //! où elles se recouvrent, la plus précise l'emporte. En neuf morceaux.
 //!
 //! L'eau : les surfaces d'eau (`natural=water`, `waterway=riverbank`), leur surface au
-//! niveau médian du relief sous elles, leur fond creusé, plus profond loin des berges
-//! (jusqu'à 8 m). Un plan d'eau à un autre niveau n'est pas gardé : il n'y a qu'un
-//! niveau d'eau.
+//! niveau médian du relief sous elles. Le relief s'arrête à la surface (le LiDAR ne
+//! voit pas le fond) : sous l'eau, il est posé à plat au niveau, sans lit inventé ; le
+//! lit se défonce plus tard, d'après les tracés des cours d'eau (`cours_eau`). Un plan
+//! d'eau à un autre niveau n'est pas gardé : il n'y a qu'un niveau d'eau.
 
 use crate::json::{self, J};
 use crate::{cote_carte, lambert93, toits, Batiment, Grille, Lieu, Route, DEPART};
@@ -250,7 +258,11 @@ pub fn generer(d: &Demande, r: &dyn Reseau, s: &Suivi) -> Result<Lieu, String> {
     };
     let ligne = |g: &J| -> Vec<(f64, f64)> { g.liste().map(|l| l.iter().filter_map(vers_grille).collect()).unwrap_or_default() };
     let mut surfaces: Vec<Vec<Vec<(f64, f64)>>> = Vec::new();
+    let mut natures: Vec<u8> = Vec::new();
     for e in j.get("elements").and_then(J::liste).unwrap_or(&[]) {
+        let tag = |k: &str| e.get("tags").and_then(|t| t.get(k)).and_then(J::txt);
+        let nature = crate::cours_eau::nature(tag("waterway"), tag("water"));
+        let avant = surfaces.len();
         match e.get("type").and_then(J::txt) {
             Some("way") => {
                 let l = ligne(e.get("geometry").unwrap_or(&J::Nul));
@@ -264,6 +276,7 @@ pub fn generer(d: &Demande, r: &dyn Reseau, s: &Suivi) -> Result<Lieu, String> {
             }
             _ => {}
         }
+        natures.resize(natures.len() + surfaces.len() - avant, nature);
     }
     let mut eau = vec![false; nx * nz];
     for s in &surfaces {
@@ -272,7 +285,7 @@ pub fn generer(d: &Demande, r: &dyn Reseau, s: &Suivi) -> Result<Lieu, String> {
     let dans_eau: Vec<f32> = (0..nx * nz).filter(|&i| eau[i]).map(|i| h[i]).collect();
     s.noter(&format!("{} surfaces d'eau, {:.2} km²", surfaces.len(), dans_eau.len() as f64 * pas * pas / 1e6));
 
-    // 3. Le niveau de l'eau, le fond creusé
+    // 3. Le niveau de l'eau ; sous elle, le relief à plat à ce niveau
     let niveau = if dans_eau.is_empty() {
         h.iter().cloned().fold(f32::MAX, f32::min) - 10.0
     } else {
@@ -317,11 +330,29 @@ pub fn generer(d: &Demande, r: &dyn Reseau, s: &Suivi) -> Result<Lieu, String> {
         }
     }
     s.noter(&format!("{ecartes} plans d'eau hors du niveau, laissés à sec"));
-    let berge = distance_berge(&eau, nx, nz);
+    // Les surfaces gardées (au moins un point d'eau après le tri), en vecteurs : x, z du
+    // jeu, coupées au bord de la carte (20 m de marge, comme les lignes)
+    let bord_eau = [(ox - 20.0) as f32, (oz - 20.0) as f32, (ox + (nx - 1) as f64 * pas + 20.0) as f32, (oz + (nz - 1) as f64 * pas + 20.0) as f32];
+    let mut surfaces_eau = Vec::new();
+    for (a, &nature) in surfaces.iter().zip(&natures) {
+        let mut garde = false;
+        remplir_avec(a, nx, nz, |i| garde |= eau[i]);
+        if !garde {
+            continue;
+        }
+        let anneaux: Vec<Vec<[f32; 2]>> = a.iter().map(|r| {
+            let mut v: Vec<[f32; 2]> = r.iter().map(|p| [(ox + p.0 * pas) as f32, (oz + p.1 * pas) as f32]).collect();
+            if v.len() > 1 && v.first() == v.last() {
+                v.pop();
+            }
+            v
+        }).collect();
+        surfaces_eau.extend(crate::cours_eau::couper_surfaces(&[crate::cours_eau::SurfaceEau { nature, anneaux }], bord_eau));
+    }
+    s.noter(&format!("{} surfaces d'eau gardées en vecteurs", surfaces_eau.len()));
     for i in 0..nx * nz {
         if eau[i] {
-            let fond = niveau - (0.8 + berge[i] * pas as f32 * 0.08).min(8.0);
-            h[i] = h[i].min(fond);
+            h[i] = niveau;
         }
     }
     s.noter(&format!("eau à {niveau:.2} m ; relief de {:.1} à {:.1} m", h.iter().cloned().fold(f32::MAX, f32::min), h.iter().cloned().fold(f32::MIN, f32::max)));
@@ -336,122 +367,251 @@ pub fn generer(d: &Demande, r: &dyn Reseau, s: &Suivi) -> Result<Lieu, String> {
         let p = |a: usize, b: usize| h[b * nx + a];
         (p(a0, b0) * (1.0 - u) + p(a0 + 1, b0) * u) * (1.0 - v) + (p(a0, b0 + 1) * (1.0 - u) + p(a0 + 1, b0 + 1) * u) * v
     };
-    let mut routes = Vec::new();
-    let mut ponts = Vec::new();
-    let mut longueur = 0.0;
-    // Les ponts d'abord : (genre, largeur, ligne) ; leurs bouts comptés, un bout partagé
-    // entre deux ponts n'est pas un vrai bout (le pont continue)
-    let cle = |p: (f64, f64)| ((p.0 * 100.0).round() as i64, (p.1 * 100.0).round() as i64);
-    let mut lignes_ponts = Vec::new();
-    let mut bouts: std::collections::HashMap<(i64, i64), u32> = Default::default();
-    for e in jr.get("elements").and_then(J::liste).unwrap_or(&[]) {
-        let Some((genre, largeur, true)) = genre_route(e.get("tags")) else { continue };
-        let l = ligne(e.get("geometry").unwrap_or(&J::Nul));
-        if l.len() < 2 {
-            continue;
-        }
-        *bouts.entry(cle(l[0])).or_default() += 1;
-        *bouts.entry(cle(l[l.len() - 1])).or_default() += 1;
-        lignes_ponts.push((genre, largeur, l));
-    }
-    // Les ponts mis bout à bout : chaque groupe et ses vrais bouts
-    let mut groupe: Vec<usize> = (0..lignes_ponts.len()).collect();
-    fn racine(g: &mut [usize], mut i: usize) -> usize {
-        while g[i] != i {
-            g[i] = g[g[i]];
-            i = g[i];
-        }
-        i
-    }
-    let mut par_bout: std::collections::HashMap<(i64, i64), usize> = Default::default();
-    for (k, (_, _, l)) in lignes_ponts.iter().enumerate() {
-        for b in [l[0], l[l.len() - 1]] {
-            if let Some(&autre) = par_bout.get(&cle(b)) {
-                let (a, c) = (racine(&mut groupe, autre), racine(&mut groupe, k));
-                groupe[a] = c;
-            } else {
-                par_bout.insert(cle(b), k);
-            }
-        }
-    }
-    let mut culees: std::collections::HashMap<usize, Vec<(f64, f64, f32)>> = Default::default();
-    for (k, (_, _, l)) in lignes_ponts.iter().enumerate() {
-        let g = racine(&mut groupe, k);
-        for b in [l[0], l[l.len() - 1]] {
-            if bouts[&cle(b)] == 1 {
-                culees.entry(g).or_default().push((b.0, b.1, relief(b.0, b.1).max(niveau + 0.5)));
-            }
-        }
-    }
     let marge = 20.0 / pas;
     let dans = |p: &(f64, f64)| p.0 > -marge && p.1 > -marge && p.0 < (nx - 1) as f64 + marge && p.1 < (nz - 1) as f64 + marge;
-    for (k, (genre, largeur, l)) in lignes_ponts.iter().enumerate() {
-        let g = racine(&mut groupe, k);
-        let c = culees.get(&g).cloned().unwrap_or_default();
-        let pts = densifier(l, pas, 8.0);
-        let mut morceau: Vec<[f32; 3]> = Vec::new();
-        for p in &pts {
-            // Le tablier : la moyenne des hauteurs des bouts, pondérée par l'inverse du carré
-            // de la distance (sans bouts, le plus haut du sol sous le pont)
-            let y = if c.is_empty() {
-                l.iter().map(|q| relief(q.0, q.1)).fold(niveau + 0.5, f32::max)
-            } else {
-                let (mut s, mut w) = (0.0f64, 0.0f64);
-                for &(bx, bz, bh) in &c {
-                    let d2 = (bx - p.0).powi(2) + (bz - p.1).powi(2);
-                    if d2 < 1e-9 {
-                        (s, w) = (bh as f64, 1.0);
-                        break;
-                    }
-                    s += bh as f64 / d2;
-                    w += 1.0 / d2;
-                }
-                (s / w) as f32
-            };
+    // Hors de la carte, rien : une ligne se coupe à son bord (avec 20 m de marge)
+    let decouper = |pts: &[(f64, f64)], ys: &[f32]| -> Vec<Vec<[f32; 3]>> {
+        let mut v = Vec::new();
+        let mut m: Vec<[f32; 3]> = Vec::new();
+        for (p, y) in pts.iter().zip(ys) {
             if dans(p) {
-                morceau.push([(ox + p.0 * pas) as f32, (oz + p.1 * pas) as f32, y]);
-            } else if morceau.len() > 1 {
-                ponts.push(Route { genre: *genre, largeur: *largeur, points: std::mem::take(&mut morceau) });
+                m.push([(ox + p.0 * pas) as f32, (oz + p.1 * pas) as f32, *y]);
+            } else if m.len() > 1 {
+                v.push(std::mem::take(&mut m));
             } else {
-                morceau.clear();
+                m.clear();
             }
         }
-        if morceau.len() > 1 {
-            ponts.push(Route { genre: *genre, largeur: *largeur, points: morceau });
+        if m.len() > 1 {
+            v.push(m);
         }
-    }
-    s.noter(&format!("{} ponts OSM, {} tabliers", lignes_ponts.len(), ponts.len()));
-    for e in jr.get("elements").and_then(J::liste).unwrap_or(&[]) {
-        let Some((genre, largeur, false)) = genre_route(e.get("tags")) else { continue };
-        let l = ligne(e.get("geometry").unwrap_or(&J::Nul));
-        if l.len() < 2 {
-            continue;
-        }
-        // Un point tous les 8 m au plus, la hauteur prise au relief
-        let pts = densifier(&l, pas, 8.0);
-        longueur += l.windows(2).map(|s| (s[1].0 - s[0].0).hypot(s[1].1 - s[0].1) * pas).sum::<f64>();
+        v
+    };
+    // Au sol : un point tous les 8 m au plus, la hauteur prise au relief, lissée par une
+    // moyenne glissante sur cinq points (une chaussée sans bosses)
+    let au_sol = |l: &[(f64, f64)]| -> (Vec<(f64, f64)>, Vec<f32>) {
+        let pts = densifier(l, pas, 8.0);
         let hs: Vec<f32> = pts.iter().map(|p| relief(p.0, p.1)).collect();
-        // Moyenne glissante sur cinq points : une chaussée sans bosses
-        let lisse: Vec<f32> = (0..hs.len()).map(|i| {
+        let lisse = (0..hs.len()).map(|i| {
             let (a, b) = (i.saturating_sub(2), (i + 3).min(hs.len()));
             hs[a..b].iter().sum::<f32>() / (b - a) as f32
         }).collect();
-        // Hors de la carte, rien : la route se coupe à son bord (avec 20 m de marge)
-        let mut morceau: Vec<[f32; 3]> = Vec::new();
-        for (p, y) in pts.iter().zip(&lisse) {
-            if dans(p) {
-                morceau.push([(ox + p.0 * pas) as f32, (oz + p.1 * pas) as f32, *y]);
-            } else if morceau.len() > 1 {
-                routes.push(Route { genre, largeur, points: std::mem::take(&mut morceau) });
-            } else {
-                morceau.clear();
+        (pts, lisse)
+    };
+    use crate::transports::{self as tr, Arret, Ligne, Rail, Transports};
+    let mut routes = Vec::new();
+    let mut ponts = Vec::new();
+    let mut tunnels = Vec::new();
+    let mut longueur = 0.0;
+    // Les ponts et les tunnels à part : mis bout à bout, ils vont d'un bout à l'autre
+    let (mut lignes_ponts, mut lignes_tunnels) = (Vec::new(), Vec::new());
+    for e in jr.get("elements").and_then(J::liste).unwrap_or(&[]) {
+        let Some((genre, largeur, ou)) = genre_route(e.get("tags")) else { continue };
+        let l = ligne(e.get("geometry").unwrap_or(&J::Nul));
+        if l.len() < 2 {
+            continue;
+        }
+        match ou {
+            tr::PONT => lignes_ponts.push((genre, largeur, l, 0)),
+            tr::TUNNEL => lignes_tunnels.push((genre, largeur, l, niveau_osm(e.get("tags"), true))),
+            _ => {
+                longueur += l.windows(2).map(|s| (s[1].0 - s[0].0).hypot(s[1].1 - s[0].1) * pas).sum::<f64>();
+                let (pts, ys) = au_sol(&l);
+                routes.extend(decouper(&pts, &ys).into_iter().map(|points| Route { genre, largeur, points }));
             }
         }
-        if morceau.len() > 1 {
-            routes.push(Route { genre, largeur, points: morceau });
+    }
+    for (liste, tunnel, sortie) in [(&lignes_ponts, false, &mut ponts), (&lignes_tunnels, true, &mut tunnels)] {
+        let l: Vec<_> = liste.iter().map(|(_, _, l, _)| l.clone()).collect();
+        let prof: Vec<f32> = liste.iter().map(|e| tr::profondeur(e.3)).collect();
+        for ((genre, largeur, _, _), (pts, ys)) in liste.iter().zip(ouvrages(&l, pas, &relief, niveau, tunnel, &prof)) {
+            sortie.extend(decouper(&pts, &ys).into_iter().map(|points| Route { genre: *genre, largeur: *largeur, points }));
         }
     }
+    s.noter(&format!("{} ponts OSM, {} tabliers ; {} tunnels OSM, {} morceaux", lignes_ponts.len(), ponts.len(), lignes_tunnels.len(), tunnels.len()));
     s.noter(&format!("{} routes, {:.0} km", routes.len(), longueur / 1000.0));
+
+    // Les cours d'eau : leurs tracés (axes), coupés au bord de la carte
+    let jc = overpass(r, s, &cache.join(format!("osm_cours_eau{suffixe}.json")), "cours d'eau", &format!("way[\"waterway\"~\"^(river|canal|stream|ditch|drain)$\"]({bb});out tags geom;"))?;
+    let mut cours_eau = Vec::new();
+    for e in jc.get("elements").and_then(J::liste).unwrap_or(&[]) {
+        let tags = e.get("tags");
+        let tag = |k: &str| tags.and_then(|t| t.get(k)).and_then(J::txt);
+        let Some(genre) = tag("waterway").and_then(crate::cours_eau::genre) else { continue };
+        let l = ligne(e.get("geometry").unwrap_or(&J::Nul));
+        if l.len() < 2 {
+            continue;
+        }
+        let souterrain = matches!(tag("tunnel"), Some("culvert" | "yes")) || tag("layer").and_then(|x| x.parse::<i32>().ok()).is_some_and(|n| n < 0);
+        let (nom, largeur) = (tag("name").unwrap_or("").to_string(), tag("width").map_or(0.0, crate::cours_eau::largeur_osm));
+        for pts in decouper(&l, &vec![0.0; l.len()]) {
+            cours_eau.push(crate::cours_eau::CoursEau { genre, nom: nom.clone(), largeur, souterrain, points: pts.iter().map(|p| [p[0], p[1]]).collect() });
+        }
+    }
+    let km = |g: u8| cours_eau.iter().filter(|c| c.genre == g).map(|c| c.points.windows(2).map(|w| (w[1][0] - w[0][0]).hypot(w[1][1] - w[0][1])).sum::<f32>()).sum::<f32>() / 1000.0 + 0.0;
+    s.noter(&format!("{} cours d'eau : rivières {:.1} km, canaux {:.1}, ruisseaux {:.1}, fossés {:.1}", cours_eau.len(), km(0), km(1), km(2), km(3)));
+
+    // Les voies ferrées : au sol comme les routes, sur les ponts et en tunnel comme eux
+    s.suivre()?;
+    s.etape("voies ferrées, arrêts et lignes", 0.26);
+    let jf = overpass(r, s, &cache.join(format!("osm_rails{suffixe}.json")), "voies ferrées", &format!("way[\"railway\"~\"^(rail|narrow_gauge|subway|light_rail|tram|monorail|funicular)$\"]({bb});out tags geom;"))?;
+    let mut rails = Vec::new();
+    let mut ouvrages_rails: [Vec<(u8, i8, Vec<(f64, f64)>)>; 2] = Default::default();
+    for e in jf.get("elements").and_then(J::liste).unwrap_or(&[]) {
+        let Some((mode, ou)) = genre_rail(e.get("tags")) else { continue };
+        let nv = niveau_osm(e.get("tags"), ou == tr::TUNNEL);
+        let l = ligne(e.get("geometry").unwrap_or(&J::Nul));
+        if l.len() < 2 {
+            continue;
+        }
+        if ou == tr::SOL {
+            let (pts, ys) = au_sol(&l);
+            rails.extend(decouper(&pts, &ys).into_iter().map(|points| Rail { mode, ou, niveau: nv, points }));
+        } else {
+            ouvrages_rails[(ou == tr::TUNNEL) as usize].push((mode, nv, l));
+        }
+    }
+    for (k, liste) in ouvrages_rails.iter().enumerate() {
+        let l: Vec<_> = liste.iter().map(|(_, _, l)| l.clone()).collect();
+        let prof: Vec<f32> = liste.iter().map(|e| tr::profondeur(e.1)).collect();
+        let ou = if k == 1 { tr::TUNNEL } else { tr::PONT };
+        for ((mode, nv, _), (pts, ys)) in liste.iter().zip(ouvrages(&l, pas, &relief, niveau, k == 1, &prof)) {
+            rails.extend(decouper(&pts, &ys).into_iter().map(|points| Rail { mode: *mode, ou, niveau: *nv, points }));
+        }
+    }
+    let jeu = |p: (f64, f64)| [(ox + p.0 * pas) as f32, (oz + p.1 * pas) as f32];
+    // Les arrêts : les quais des bus, les arrêts de tram, les gares et stations
+    let ja = overpass(r, s, &cache.join(format!("osm_arrets{suffixe}.json")), "arrêts", &format!("(node[\"highway\"=\"bus_stop\"]({bb});node[\"public_transport\"=\"platform\"]({bb});node[\"railway\"~\"^(station|halt|tram_stop)$\"]({bb}););out;"))?;
+    let mut arrets: Vec<Arret> = Vec::new();
+    let mut par_id: std::collections::HashMap<i64, usize> = Default::default();
+    // Les arrêts dont le niveau est dit (sinon, celui des voies voisines)
+    let mut niveau_dit: Vec<bool> = Vec::new();
+    for e in ja.get("elements").and_then(J::liste).unwrap_or(&[]) {
+        let Some(p) = vers_grille(e).filter(|p| dans(p)) else { continue };
+        let Some(modes) = modes_arret(e.get("tags")) else { continue };
+        let tag = |k: &str| e.get("tags").and_then(|t| t.get(k)).and_then(J::txt);
+        let [x, z] = jeu(p);
+        par_id.insert(e.get("id").and_then(J::num).unwrap_or(-1.0) as i64, arrets.len());
+        let (nv, dit) = niveau_arret(e.get("tags"));
+        niveau_dit.push(dit);
+        arrets.push(Arret { modes, x, z, nom: tag("name").unwrap_or("").to_string(), abri: tag("shelter") == Some("yes"), niveau: nv });
+    }
+    // Les lignes : leurs quais (ou leurs arrêts) dans l'ordre, et leur tracé
+    let jl = overpass(r, s, &cache.join(format!("osm_lignes{suffixe}.json")), "lignes", &format!("relation[\"type\"=\"route\"][\"route\"~\"^(bus|trolleybus|tram|subway|light_rail|train|monorail|funicular)$\"]({bb});out geom({bb});"))?;
+    let mut lignes = Vec::new();
+    // Les voies où se recalent les tracés : les voies ferrées, et pour les bus les ponts
+    // et les tunnels des routes
+    let grille_rails = Segments::new(rails.iter().map(|r| (r.ou, &r.points[..])));
+    let grille_routes = Segments::new(ponts.iter().map(|r| (tr::PONT, &r.points[..])).chain(tunnels.iter().map(|r| (tr::TUNNEL, &r.points[..]))));
+    for e in jl.get("elements").and_then(J::liste).unwrap_or(&[]) {
+        let tag = |k: &str| e.get("tags").and_then(|t| t.get(k)).and_then(J::txt);
+        let mode = match tag("route") {
+            Some("bus" | "trolleybus") => tr::BUS,
+            // Un tram qui se dit métro (Rouen) : un métro léger
+            Some("tram") if tag("name").is_some_and(|n| n.to_lowercase().starts_with("métro")) => tr::METRO,
+            Some("tram") => tr::TRAM,
+            Some("subway" | "light_rail") => tr::METRO,
+            Some("train") => tr::TRAIN,
+            Some(_) => tr::AUTRE,
+            None => continue,
+        };
+        // Les quais et les points d'arrêt, dans l'ordre ; un quai et son point d'arrêt
+        // voisin ne font qu'un arrêt
+        let rayon: f32 = if mode == tr::BUS { 30.0 } else { 150.0 };
+        let mut la: Vec<usize> = Vec::new();
+        let mut trace: Vec<Vec<[f32; 2]>> = Vec::new();
+        for m in e.get("members").and_then(J::liste).unwrap_or(&[]) {
+            let role = m.get("role").and_then(J::txt).unwrap_or("");
+            match m.get("type").and_then(J::txt) {
+                Some(t @ ("node" | "way")) if role.starts_with("platform") || (t == "node" && role.starts_with("stop")) => {
+                    let id = if t == "node" { m.get("ref").and_then(J::num).unwrap_or(-1.0) as i64 } else { i64::MIN };
+                    let k = match par_id.get(&id) {
+                        Some(&k) => k,
+                        None => {
+                            // Un nœud, ou le milieu d'un quai tracé
+                            let p = if t == "node" {
+                                vers_grille(m)
+                            } else {
+                                let l = ligne(m.get("geometry").unwrap_or(&J::Nul));
+                                (!l.is_empty()).then(|| (l.iter().map(|p| p.0).sum::<f64>() / l.len() as f64, l.iter().map(|p| p.1).sum::<f64>() / l.len() as f64))
+                            };
+                            let Some(p) = p.filter(|p| dans(p)) else { continue };
+                            let [x, z] = jeu(p);
+                            // Le point d'arrêt d'un quai déjà connu (une gare est grande)
+                            let proche = arrets.iter().enumerate().map(|(k, a)| (k, (a.x - x).hypot(a.z - z))).filter(|(_, d)| *d < rayon).min_by(|a, b| a.1.total_cmp(&b.1)).map(|(k, _)| k);
+                            let k = proche.unwrap_or_else(|| {
+                                arrets.push(Arret { modes: 0, x, z, nom: String::new(), abri: false, niveau: 0 });
+                                niveau_dit.push(false);
+                                arrets.len() - 1
+                            });
+                            if t == "node" {
+                                par_id.insert(id, k);
+                            }
+                            k
+                        }
+                    };
+                    let voisin = la.last().is_some_and(|&d| d == k || (arrets[d].x - arrets[k].x).hypot(arrets[d].z - arrets[k].z) < rayon);
+                    if !voisin {
+                        la.push(k);
+                    } else if arrets[*la.last().unwrap()].nom.is_empty() && !arrets[k].nom.is_empty() {
+                        // Le quai nommé plutôt que le point d'arrêt anonyme
+                        *la.last_mut().unwrap() = k;
+                    }
+                }
+                Some("way") if !role.starts_with("platform") => {
+                    let l = ligne(m.get("geometry").unwrap_or(&J::Nul));
+                    let mut morceau: Vec<[f32; 2]> = Vec::new();
+                    let fermer = |m: &mut Vec<[f32; 2]>, trace: &mut Vec<Vec<[f32; 2]>>| {
+                        if m.len() > 1 {
+                            // Bout à bout avec le précédent : un seul morceau
+                            match trace.last_mut() {
+                                Some(t) if t.last() == m.first() => t.extend_from_slice(&m[1..]),
+                                _ => trace.push(m.clone()),
+                            }
+                        }
+                        m.clear();
+                    };
+                    for p in l {
+                        if dans(&p) {
+                            morceau.push(jeu(p));
+                        } else {
+                            fermer(&mut morceau, &mut trace);
+                        }
+                    }
+                    fermer(&mut morceau, &mut trace);
+                }
+                _ => {}
+            }
+        }
+        for &k in &la {
+            arrets[k].modes |= 1 << mode;
+        }
+        if la.is_empty() && trace.is_empty() {
+            continue;
+        }
+        lignes.push(Ligne {
+            mode,
+            numero: tag("ref").unwrap_or("").to_string(),
+            nom: tag("name").unwrap_or("").to_string(),
+            couleur: tag("colour").and_then(tr::couleur),
+            arrets: la.into_iter().map(|k| k as u32).collect(),
+            trace: if mode == tr::BUS { recaler(trace, &grille_routes) } else { recaler(trace, &grille_rails) },
+        });
+    }
+    for a in arrets.iter_mut().filter(|a| a.modes == 0) {
+        a.modes = 1 << tr::BUS;
+    }
+    // Une station sans niveau dit prend celui de la voie ferrée la plus proche, si elle
+    // est en tunnel
+    for (a, _) in arrets.iter_mut().zip(&niveau_dit).filter(|(a, dit)| !**dit && a.modes & !(1 << tr::BUS) != 0) {
+        let q = [a.x, a.z];
+        let proche = rails.iter().flat_map(|r| r.points.windows(2).map(move |w| (r, distance_segment(q, [w[0][0], w[0][1]], [w[1][0], w[1][1]])))).filter(|(_, d)| *d < 25.0).min_by(|x, y| x.1.total_cmp(&y.1));
+        if let Some((r, _)) = proche.filter(|(r, _)| r.ou == tr::TUNNEL) {
+            a.niveau = r.niveau.min(-1);
+        }
+    }
+    s.noter(&format!("{} voies ferrées, {} arrêts, {} lignes", rails.len(), arrets.len(), lignes.len()));
+    let transports = Transports { tunnels, rails, arrets, lignes };
     s.etape("bâtiments", 0.3);
     // 5. Les bâtiments, en neuf morceaux (une réponse entière serait trop lourde à lire)
     let mut batiments = Vec::new();
@@ -646,7 +806,10 @@ pub fn generer(d: &Demande, r: &dyn Reseau, s: &Suivi) -> Result<Lieu, String> {
     let km2 = |k: usize| compte[k] as f64 * (pas * 2.0).powi(2) / 1e6;
     s.noter(&format!("{} surfaces d'occupation : bois {:.0} km², prés {:.0}, champs {:.0}, habité {:.0}, zones {:.0}", surfaces_sol.len(), km2(1), km2(2), km2(3), km2(4), km2(5)));
     s.etape("écriture", 0.98);
-    let lieu = Lieu::sur(nom, lat, lon, x0, y0, pas, g, niveau, &h, &eau, routes, batiments, ponts).avec_sol(sol);
+    let mut lieu = Lieu::sur(nom, lat, lon, x0, y0, pas, g, niveau, &h, &eau, routes, batiments, ponts).avec_sol(sol);
+    lieu.transports = transports;
+    lieu.cours_eau = cours_eau;
+    lieu.surfaces_eau = surfaces_eau;
     lieu.ecrire(&d.sortie).map_err(|e| format!("{} : {e}", d.sortie.display()))?;
     s.noter(&format!("{} : {} Mo", d.sortie.display(), std::fs::metadata(&d.sortie).map_or(0, |m| m.len()) / 1_000_000));
     s.etape("fini", 1.0);
@@ -704,13 +867,244 @@ fn densifier(l: &[(f64, f64)], pas: f64, m: f64) -> Vec<(f64, f64)> {
     pts
 }
 
-/// Le genre et la largeur (m) d'une route d'après ses étiquettes OSM, et si c'est un pont ;
-/// rien pour ce qui n'est pas une voie (tunnels, escaliers, projets, surfaces…).
-fn genre_route(tags: Option<&J>) -> Option<(u8, f32, bool)> {
+/// Où passe une voie d'après ses étiquettes : sur un pont, en tunnel (un passage sous
+/// un bâtiment reste au sol), ou au sol.
+fn ou_passe(tags: Option<&J>) -> u8 {
+    use crate::transports::{PONT, SOL, TUNNEL};
+    let tag = |k: &str| tags.and_then(|t| t.get(k)).and_then(J::txt);
+    if tag("bridge").is_some_and(|v| v != "no") {
+        PONT
+    } else if tag("tunnel").is_some_and(|v| v != "no" && v != "building_passage") {
+        TUNNEL
+    } else {
+        SOL
+    }
+}
+
+/// Le mode et le passage (sol, pont, tunnel) d'une voie ferrée ; rien pour une voie
+/// abandonnée, en projet, ou de service hors des lignes (dépôts, garages).
+fn genre_rail(tags: Option<&J>) -> Option<(u8, u8)> {
+    use crate::transports::{AUTRE, METRO, TRAIN, TRAM};
+    let tag = |k: &str| tags.and_then(|t| t.get(k)).and_then(J::txt);
+    let mode = match tag("railway")? {
+        "rail" | "narrow_gauge" => TRAIN,
+        "subway" | "light_rail" => METRO,
+        "tram" => TRAM,
+        "monorail" | "funicular" => AUTRE,
+        _ => return None,
+    };
+    if tag("service").is_some_and(|v| v == "yard") {
+        return None;
+    }
+    Some((mode, ou_passe(tags)))
+}
+
+/// Les modes (un bit chacun) d'un arrêt d'après ses étiquettes ; rien si ce n'en est pas un.
+fn modes_arret(tags: Option<&J>) -> Option<u8> {
+    use crate::transports::{AUTRE, BUS, METRO, TRAIN, TRAM};
+    let tag = |k: &str| tags.and_then(|t| t.get(k)).and_then(J::txt);
+    let oui = |k: &str| tag(k) == Some("yes");
+    let mut m = 0u8;
+    if tag("highway") == Some("bus_stop") || oui("bus") || oui("trolleybus") {
+        m |= 1 << BUS;
+    }
+    if tag("railway") == Some("tram_stop") || oui("tram") {
+        m |= 1 << TRAM;
+    }
+    if oui("subway") || oui("light_rail") {
+        m |= 1 << METRO;
+    }
+    if oui("train") {
+        m |= 1 << TRAIN;
+    }
+    if let Some("station" | "halt") = tag("railway") {
+        m |= 1 << match tag("station") {
+            Some("subway" | "light_rail") => METRO,
+            Some("tram") => TRAM,
+            Some("funicular" | "monorail") => AUTRE,
+            _ if m != 0 => return Some(m),
+            _ => TRAIN,
+        };
+    }
+    if m == 0 && tag("public_transport") == Some("platform") {
+        m = 1 << BUS;
+    }
+    (m != 0).then_some(m)
+}
+
+/// Les hauteurs le long d'ouvrages (ponts ou tunnels, en pas de grille) : mis bout à
+/// bout, chaque groupe va de ses vrais bouts (un bout partagé entre deux morceaux n'en
+/// est pas un), un point tous les 8 m. La hauteur est la moyenne de celles des bouts
+/// (le sol, au-dessus de l'eau pour un pont), pondérée par l'inverse du carré de la
+/// distance ; sans bouts, le plus haut du sol sous le pont. Un tunnel descend en plus
+/// sous le relief, de 12 cm par mètre loin de ses entrées, jusqu'à sa profondeur
+/// (`profondeurs`, une par ligne : `transports::profondeur` de son niveau).
+fn ouvrages(lignes: &[Vec<(f64, f64)>], pas: f64, relief: &dyn Fn(f64, f64) -> f32, niveau: f32, tunnel: bool, profondeurs: &[f32]) -> Vec<(Vec<(f64, f64)>, Vec<f32>)> {
+    let cle = |p: (f64, f64)| ((p.0 * 100.0).round() as i64, (p.1 * 100.0).round() as i64);
+    let mut bouts: std::collections::HashMap<(i64, i64), u32> = Default::default();
+    for l in lignes {
+        *bouts.entry(cle(l[0])).or_default() += 1;
+        *bouts.entry(cle(l[l.len() - 1])).or_default() += 1;
+    }
+    let mut groupe: Vec<usize> = (0..lignes.len()).collect();
+    fn racine(g: &mut [usize], mut i: usize) -> usize {
+        while g[i] != i {
+            g[i] = g[g[i]];
+            i = g[i];
+        }
+        i
+    }
+    let mut par_bout: std::collections::HashMap<(i64, i64), usize> = Default::default();
+    for (k, l) in lignes.iter().enumerate() {
+        for b in [l[0], l[l.len() - 1]] {
+            if let Some(&autre) = par_bout.get(&cle(b)) {
+                let (a, c) = (racine(&mut groupe, autre), racine(&mut groupe, k));
+                groupe[a] = c;
+            } else {
+                par_bout.insert(cle(b), k);
+            }
+        }
+    }
+    let haut_bout = |x: f64, z: f64| if tunnel { relief(x, z) } else { relief(x, z).max(niveau + 0.5) };
+    let mut culees: std::collections::HashMap<usize, Vec<(f64, f64, f32)>> = Default::default();
+    for (k, l) in lignes.iter().enumerate() {
+        let g = racine(&mut groupe, k);
+        for b in [l[0], l[l.len() - 1]] {
+            if bouts[&cle(b)] == 1 {
+                culees.entry(g).or_default().push((b.0, b.1, haut_bout(b.0, b.1)));
+            }
+        }
+    }
+    let mut v = Vec::new();
+    for (k, l) in lignes.iter().enumerate() {
+        let g = racine(&mut groupe, k);
+        let c = culees.get(&g).cloned().unwrap_or_default();
+        let pts = densifier(l, pas, 8.0);
+        let ys = pts.iter().map(|p| {
+            let y = if c.is_empty() {
+                if tunnel { relief(p.0, p.1) } else { l.iter().map(|q| relief(q.0, q.1)).fold(niveau + 0.5, f32::max) }
+            } else {
+                let (mut s, mut w) = (0.0f64, 0.0f64);
+                for &(bx, bz, bh) in &c {
+                    let d2 = (bx - p.0).powi(2) + (bz - p.1).powi(2);
+                    if d2 < 1e-9 {
+                        (s, w) = (bh as f64, 1.0);
+                        break;
+                    }
+                    s += bh as f64 / d2;
+                    w += 1.0 / d2;
+                }
+                (s / w) as f32
+            };
+            if tunnel {
+                let d = c.iter().map(|&(bx, bz, _)| (bx - p.0).hypot(bz - p.1) * pas).fold(f64::MAX, f64::min);
+                y.min(relief(p.0, p.1) - (d as f32 * 0.12).min(profondeurs.get(k).copied().unwrap_or(6.0)))
+            } else {
+                y
+            }
+        }).collect();
+        v.push((pts, ys));
+    }
+    v
+}
+
+/// Le niveau d'une voie (`layer` d'OSM) ; un tunnel est au moins au niveau −1.
+fn niveau_osm(tags: Option<&J>, tunnel: bool) -> i8 {
+    let n = tags.and_then(|t| t.get("layer")).and_then(J::txt).and_then(|v| v.trim().parse::<i8>().ok()).unwrap_or(0);
+    if tunnel { n.min(-1) } else { n }
+}
+
+/// Le niveau d'un arrêt (`level`, le plus bas s'il y en a plusieurs ; −1 pour
+/// `location=underground`), et s'il est dit.
+fn niveau_arret(tags: Option<&J>) -> (i8, bool) {
+    let tag = |k: &str| tags.and_then(|t| t.get(k)).and_then(J::txt);
+    let dit = tag("level").and_then(|v| v.split(';').filter_map(|x| x.trim().replace(',', ".").parse::<f32>().ok()).map(|x| x.floor() as i8).min());
+    match (dit, tag("location")) {
+        (Some(n), _) => (n, true),
+        (None, Some("underground")) => (-1, true),
+        _ => (0, false),
+    }
+}
+
+/// La distance du point `p` au segment `a`–`b`.
+fn distance_segment(p: [f32; 2], a: [f32; 2], b: [f32; 2]) -> f32 {
+    let (dx, dz) = (b[0] - a[0], b[1] - a[1]);
+    let l2 = dx * dx + dz * dz;
+    let t = if l2 > 0.0 { (((p[0] - a[0]) * dx + (p[1] - a[1]) * dz) / l2).clamp(0.0, 1.0) } else { 0.0 };
+    (p[0] - a[0] - dx * t).hypot(p[1] - a[1] - dz * t)
+}
+
+/// Des segments de voies (x, z du jeu) rangés par cases de 16 m, avec où ils passent.
+struct Segments(std::collections::HashMap<(i32, i32), Vec<([f32; 2], [f32; 2], u8)>>);
+
+impl Segments {
+    const CASE: f32 = 16.0;
+
+    fn new<'a>(voies: impl Iterator<Item = (u8, &'a [[f32; 3]])>) -> Segments {
+        let mut m: std::collections::HashMap<(i32, i32), Vec<([f32; 2], [f32; 2], u8)>> = Default::default();
+        for (ou, pts) in voies {
+            for w in pts.windows(2) {
+                let (a, b) = ([w[0][0], w[0][1]], [w[1][0], w[1][1]]);
+                let c = |v: f32| (v / Segments::CASE).floor() as i32;
+                for i in c(a[0].min(b[0]) - 4.0)..=c(a[0].max(b[0]) + 4.0) {
+                    for j in c(a[1].min(b[1]) - 4.0)..=c(a[1].max(b[1]) + 4.0) {
+                        m.entry((i, j)).or_default().push((a, b, ou));
+                    }
+                }
+            }
+        }
+        Segments(m)
+    }
+
+    /// Où passe la voie la plus proche du segment `a`–`b` (à 3 m de son milieu, à peu
+    /// près parallèle) ; au sol s'il n'y en a pas.
+    fn ou(&self, a: [f32; 2], b: [f32; 2]) -> u8 {
+        let m = [(a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0];
+        let c = ((m[0] / Segments::CASE).floor() as i32, (m[1] / Segments::CASE).floor() as i32);
+        let l = (b[0] - a[0]).hypot(b[1] - a[1]).max(1e-6);
+        let mut mieux = (3.0f32, crate::transports::SOL);
+        for &(p, q, ou) in self.0.get(&c).map_or(&[][..], |v| v.as_slice()) {
+            let lq = (q[0] - p[0]).hypot(q[1] - p[1]).max(1e-6);
+            let cos = ((b[0] - a[0]) * (q[0] - p[0]) + (b[1] - a[1]) * (q[1] - p[1])).abs() / (l * lq);
+            let d = distance_segment(m, p, q);
+            if cos > 0.7 && d < mieux.0 {
+                mieux = (d, ou);
+            }
+        }
+        mieux.1
+    }
+}
+
+/// Le tracé d'une ligne coupé en morceaux au sol, sur un pont ou en tunnel, d'après les
+/// voies où il passe.
+fn recaler(trace: Vec<Vec<[f32; 2]>>, voies: &Segments) -> Vec<crate::transports::Morceau> {
+    use crate::transports::Morceau;
+    let mut v: Vec<Morceau> = Vec::new();
+    for t in trace {
+        let mut courant: Option<Morceau> = None;
+        for w in t.windows(2) {
+            let ou = voies.ou(w[0], w[1]);
+            match &mut courant {
+                Some(m) if m.ou == ou => m.points.push(w[1]),
+                _ => {
+                    v.extend(courant.take());
+                    courant = Some(Morceau { ou, points: vec![w[0], w[1]] });
+                }
+            }
+        }
+        v.extend(courant);
+    }
+    v
+}
+
+/// Le genre et la largeur (m) d'une route d'après ses étiquettes OSM, et où elle passe
+/// (`transports::SOL`, `PONT`, `TUNNEL`) ; rien pour ce qui n'est pas une voie
+/// (escaliers, projets, surfaces, voies intérieures…).
+fn genre_route(tags: Option<&J>) -> Option<(u8, f32, u8)> {
     use crate::{BUS, CHEMIN, GRANDE, PIETONNE, ROUTE, SENTIER, SERVICE};
     let tag = |k: &str| tags.and_then(|t| t.get(k)).and_then(J::txt);
-    let pont = tag("bridge").is_some_and(|v| v != "no");
-    if tag("tunnel").is_some_and(|v| v != "no") || tag("area") == Some("yes") || tag("indoor").is_some_and(|v| v != "no") {
+    let pont = ou_passe(tags);
+    if tag("area") == Some("yes") || tag("indoor").is_some_and(|v| v != "no") {
         return None;
     }
     let (genre, largeur) = match tag("highway")? {
@@ -1015,45 +1409,6 @@ fn remplir_avec(anneaux: &[Vec<(f64, f64)>], nx: usize, nz: usize, mut f: impl F
     }
 }
 
-/// Pour chaque point d'eau, sa distance à la berge, en points (chanfrein 3-4).
-fn distance_berge(eau: &[bool], nx: usize, nz: usize) -> Vec<f32> {
-    let mut d: Vec<f32> = eau.iter().map(|e| if *e { f32::MAX } else { 0.0 }).collect();
-    let (dr, dg) = (1.0, std::f32::consts::SQRT_2);
-    for b in 0..nz {
-        for a in 0..nx {
-            let i = b * nx + a;
-            if d[i] == 0.0 {
-                continue;
-            }
-            let mut m = d[i];
-            if a > 0 { m = m.min(d[i - 1] + dr); }
-            if b > 0 {
-                m = m.min(d[i - nx] + dr);
-                if a > 0 { m = m.min(d[i - nx - 1] + dg); }
-                if a + 1 < nx { m = m.min(d[i - nx + 1] + dg); }
-            }
-            d[i] = m;
-        }
-    }
-    for b in (0..nz).rev() {
-        for a in (0..nx).rev() {
-            let i = b * nx + a;
-            if d[i] == 0.0 {
-                continue;
-            }
-            let mut m = d[i];
-            if a + 1 < nx { m = m.min(d[i + 1] + dr); }
-            if b + 1 < nz {
-                m = m.min(d[i + nx] + dr);
-                if a + 1 < nx { m = m.min(d[i + nx + 1] + dg); }
-                if a > 0 { m = m.min(d[i + nx - 1] + dg); }
-            }
-            d[i] = m;
-        }
-    }
-    d.iter().map(|v| v.min(1e4)).collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1099,6 +1454,51 @@ mod tests {
         }).sum();
         assert_eq!(points, g.points());
         let _ = std::fs::remove_dir_all(&dossier);
+    }
+
+    #[test]
+    fn tunnels_rails_et_arrets_se_reconnaissent() {
+        use crate::transports::*;
+        let j = |t: &str| json::lire(t);
+        assert_eq!(genre_route(j(r#"{"highway":"primary","tunnel":"yes"}"#).as_ref()).map(|g| g.2), Some(TUNNEL));
+        assert_eq!(genre_route(j(r#"{"highway":"service","tunnel":"building_passage"}"#).as_ref()).map(|g| g.2), Some(SOL));
+        assert_eq!(genre_rail(j(r#"{"railway":"light_rail","tunnel":"yes"}"#).as_ref()), Some((METRO, TUNNEL)));
+        assert_eq!(genre_rail(j(r#"{"railway":"rail","bridge":"viaduct"}"#).as_ref()), Some((TRAIN, PONT)));
+        assert_eq!(genre_rail(j(r#"{"railway":"abandoned"}"#).as_ref()), None);
+        assert_eq!(modes_arret(j(r#"{"highway":"bus_stop","public_transport":"platform"}"#).as_ref()), Some(1 << BUS));
+        assert_eq!(modes_arret(j(r#"{"railway":"station","station":"subway"}"#).as_ref()), Some(1 << METRO));
+        assert_eq!(modes_arret(j(r#"{"railway":"station"}"#).as_ref()), Some(1 << TRAIN));
+        assert_eq!(modes_arret(j(r#"{"railway":"tram_stop","bus":"yes"}"#).as_ref()), Some(1 << BUS | 1 << TRAM));
+        assert_eq!(modes_arret(j(r#"{"amenity":"bench"}"#).as_ref()), None);
+    }
+
+    #[test]
+    fn un_tunnel_descend_sous_le_relief() {
+        // Deux morceaux bout à bout sous une colline à 50 m : les entrées au sol, le
+        // milieu 6 m dessous
+        let l = vec![vec![(0.0, 0.0), (50.0, 0.0)], vec![(50.0, 0.0), (100.0, 0.0)]];
+        let v = ouvrages(&l, 2.0, &|_, _| 50.0, 0.0, true, &[6.0, 6.0]);
+        assert!((v[0].1[0] - 50.0).abs() < 1e-3);
+        assert!((v[1].1.last().unwrap() - 50.0).abs() < 1e-3);
+        assert!((v[0].1.last().unwrap() - 44.0).abs() < 1e-3, "{:?}", v[0].1.last());
+        // Au niveau −2, 200 m dedans : 14 m sous le sol
+        let v = ouvrages(&l, 4.0, &|_, _| 50.0, 0.0, true, &[crate::transports::profondeur(-2); 2]);
+        assert!((v[0].1.last().unwrap() - 36.0).abs() < 1e-3, "{:?}", v[0].1.last());
+    }
+
+    #[test]
+    fn un_trace_se_coupe_ou_il_passe_sous_terre() {
+        use crate::transports::*;
+        let voies = Segments::new([(SOL, &[[0.0, 0.0, 0.0], [100.0, 0.0, 0.0]][..]), (TUNNEL, &[[100.0, 0.0, 0.0], [300.0, 0.0, 0.0]][..]), (SOL, &[[200.0, -50.0, 0.0], [200.0, 50.0, 0.0]][..])].into_iter());
+        // Le long des voies, à 1 m à côté ; la voie en travers ne compte pas
+        let t = recaler(vec![vec![[0.0, 1.0], [50.0, 1.0], [100.0, 1.0], [150.0, 1.0], [190.0, 1.0], [210.0, 1.0], [400.0, 1.0]]], &voies);
+        let ous: Vec<(u8, usize)> = t.iter().map(|m| (m.ou, m.points.len())).collect();
+        assert_eq!(ous, vec![(SOL, 3), (TUNNEL, 4), (SOL, 2)]);
+        assert_eq!(niveau_arret(json::lire(r#"{"level":"-1;-2"}"#).as_ref()), (-2, true));
+        assert_eq!(niveau_arret(json::lire(r#"{"location":"underground"}"#).as_ref()), (-1, true));
+        assert_eq!(niveau_arret(json::lire(r#"{"name":"Europe"}"#).as_ref()), (0, false));
+        assert_eq!(niveau_osm(json::lire(r#"{"layer":"-2"}"#).as_ref(), true), -2);
+        assert_eq!(niveau_osm(None, true), -1);
     }
 
     #[test]

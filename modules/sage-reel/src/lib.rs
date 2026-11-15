@@ -9,12 +9,18 @@
 //!   en X = `x0 + x`, Y = `y0 - z` (x vers l'est, z vers le sud).
 //! - Le relief est une grille de `pas` mètres qui couvre la carte, les hauteurs sur 16
 //!   bits (`base + v × echelle`) ; il se lit en douceur (Catmull-Rom).
-//! - L'eau est un masque d'un bit par point ; sa surface est à `niveau`, et son fond déjà
-//!   creusé dans le relief, plus profond loin des berges.
+//! - L'eau est un masque d'un bit par point ; sa surface est à `niveau`, et le relief,
+//!   sous elle, à plat à ce niveau (aucun fond n'est mesuré ; le lit se défonce d'après
+//!   les tracés des `cours_eau`).
 //! - Les routes sont des lignes (x, z du jeu, et la hauteur de la chaussée) avec un
 //!   genre et une largeur ; les ponts, des lignes à la hauteur du tablier.
 //! - Les bâtiments : un contour (x, z du jeu), un pied, un égout et un faîtage (hauteurs
 //!   absolues), la forme du toit et son axe (`toits`), un genre.
+//! - Les transports (`transports`) : les tunnels des routes, les voies ferrées, les
+//!   arrêts et les lignes de bus, de tram, de métro et de train.
+//! - Les cours d'eau (`cours_eau`) : le tracé de chaque rivière, canal, ruisseau ou
+//!   fossé, son nom, sa largeur quand OSM la donne (depuis le format 9) ; les surfaces
+//!   d'eau d'OSM en vecteurs, leurs côtés étant les berges (depuis le format 10).
 //! - L'occupation du sol (bois, prés et parcs, champs, quartiers habités, zones
 //!   d'activité) : une classe par point d'une grille deux fois plus lâche que le relief.
 //!
@@ -24,8 +30,10 @@
 
 pub mod generer;
 pub mod json;
+pub mod cours_eau;
 pub mod tabliers;
 pub mod toits;
+pub mod transports;
 
 /// Le côté d'une tuile du jeu (m) et le nombre de tuiles de part et d'autre du centre :
 /// la carte fait `2 × DEMI_CARTE + 1` tuiles de côté (20 km). Ceux du moteur de S.A.G.E.
@@ -35,7 +43,7 @@ pub const DEMI_CARTE: i32 = 156;
 pub const DEPART: [f32; 2] = [TAILLE / 2.0, TAILLE / 2.0];
 
 pub const MAGIQUE: &[u8; 8] = b"SAGEREEL";
-pub const FORMAT: u32 = 7;
+pub const FORMAT: u32 = 10;
 
 /// Le texte à citer.
 pub const SOURCES: &str = "Relief et hauteurs © IGN (RGE ALTI, LiDAR HD) · eau, routes, bâtiments et occupation du sol © les contributeurs OpenStreetMap";
@@ -324,7 +332,7 @@ pub fn lambert93(lat: f64, lon: f64) -> (f64, f64) {
     (XS + r * g.sin(), YS - r * g.cos())
 }
 
-fn ecrire_routes(o: &mut Vec<u8>, routes: &[Route]) {
+pub(crate) fn ecrire_routes(o: &mut Vec<u8>, routes: &[Route]) {
     o.extend_from_slice(&(routes.len() as u32).to_le_bytes());
     for r in routes {
         o.push(r.genre);
@@ -395,6 +403,12 @@ pub struct Lieu {
     /// L'occupation du sol, une classe par point de la grille de `2 × pas`
     /// (`grille.sol()`) ; vide : rien de dit.
     pub sol: Vec<u8>,
+    /// Tunnels, voies ferrées, arrêts et lignes (depuis le format 8).
+    pub transports: transports::Transports,
+    /// Les cours d'eau, en vecteurs (depuis le format 9).
+    pub cours_eau: Vec<cours_eau::CoursEau>,
+    /// Les surfaces d'eau d'OSM, en vecteurs (depuis le format 10).
+    pub surfaces_eau: Vec<cours_eau::SurfaceEau>,
 }
 
 /// L'échelle et la base qui encodent sur 16 bits des hauteurs de `lo` à `hi`.
@@ -419,7 +433,7 @@ impl Lieu {
         for (i, _) in eau.iter().enumerate().filter(|(_, e)| **e) {
             bits[i / 8] |= 1 << (i % 8);
         }
-        let mut l = Lieu { nom: nom.into(), lat, lon, x0, y0, pas, grille, niveau, base: 0.0, echelle: 1.0, h: Vec::new(), eau: bits, routes, batiments, ponts, sol: Vec::new() };
+        let mut l = Lieu { nom: nom.into(), lat, lon, x0, y0, pas, grille, niveau, base: 0.0, echelle: 1.0, h: Vec::new(), eau: bits, routes, batiments, ponts, sol: Vec::new(), transports: Default::default(), cours_eau: Vec::new(), surfaces_eau: Vec::new() };
         l.fixer_hauteurs(h);
         l
     }
@@ -479,6 +493,10 @@ impl Lieu {
             let (mx, mz) = g.sol();
             l.sol = (0..mx * mz).map(|i| self.sol[self.grille.borner_sol((g.a0 / 2 + i % mx) as i64, (g.b0 / 2 + i / mx) as i64)]).collect();
         }
+        l.transports = self.transports.couper(&|x, z| dans(&[x, z]));
+        l.cours_eau = cours_eau::couper(&self.cours_eau, &|x, z| dans(&[x, z]));
+        let e = g.etendue(self.pas);
+        l.surfaces_eau = cours_eau::couper_surfaces(&self.surfaces_eau, [e[0] as f32, e[1] as f32, e[2] as f32, e[3] as f32]);
         l
     }
 
@@ -706,6 +724,9 @@ impl Lieu {
         }
         o.extend_from_slice(&(plages.len() as u32 / 2).to_le_bytes());
         o.extend_from_slice(&plages);
+        self.transports.ecrire(&mut o);
+        cours_eau::ecrire(&mut o, &self.cours_eau);
+        cours_eau::ecrire_surfaces(&mut o, &self.surfaces_eau);
         o
     }
 
@@ -722,7 +743,7 @@ impl Lieu {
     /// Lit un fichier ; une erreur dite en clair.
     pub fn lire(f: &std::path::Path) -> Result<Lieu, String> {
         let o = std::fs::read(f).map_err(|e| e.to_string())?;
-        Lieu::depuis_octets(&o).ok_or_else(|| "ce n'est pas un lieu réel lisible (format SAGEREEL 1 à 7)".to_string())
+        Lieu::depuis_octets(&o).ok_or_else(|| "ce n'est pas un lieu réel lisible (format SAGEREEL 1 à 8)".to_string())
     }
 
     /// Relu ; rien si ce n'est pas un lieu réel de ce format, ou pour une autre carte.
@@ -816,10 +837,28 @@ impl Lieu {
                 return None;
             }
         }
+        let transports = if format >= 8 {
+            let mut p = |n: usize| prendre(n).map(|s| s.to_vec());
+            transports::Transports::lire(&mut p)?
+        } else {
+            Default::default()
+        };
+        let cours_eau = if format >= 9 {
+            let mut p = |n: usize| prendre(n).map(|s| s.to_vec());
+            cours_eau::lire(&mut p)?
+        } else {
+            Vec::new()
+        };
+        let surfaces_eau = if format >= 10 {
+            let mut p = |n: usize| prendre(n).map(|s| s.to_vec());
+            cours_eau::lire_surfaces(&mut p)?
+        } else {
+            Vec::new()
+        };
         if k != o.len() {
             return None;
         }
-        Some(Lieu { nom, lat, lon, x0, y0, pas, grille, niveau, base, echelle, h, eau, routes, batiments, ponts, sol })
+        Some(Lieu { nom, lat, lon, x0, y0, pas, grille, niveau, base, echelle, h, eau, routes, batiments, ponts, sol, transports, cours_eau, surfaces_eau })
     }
 }
 
@@ -847,7 +886,18 @@ mod tests {
         let m = cote_sol(n);
         let b = Batiment::plat(MAISON, -1.0, 7.0, vec![[10.0, 10.0], [30.0, 10.0], [30.0, 20.0]]);
         let r = Route { genre: ROUTE, largeur: 6.0, points: vec![[0.0, -200.0, 5.0], [0.0, 200.0, 5.0]] };
-        let l = Lieu::new("Essai", 49.0, 1.0, 1000.0, 2000.0, pas, 3.0, &h, &eau, vec![r.clone()], vec![b], vec![r]).avec_sol(vec![BOIS; m * m]);
+        let mut l = Lieu::new("Essai", 49.0, 1.0, 1000.0, 2000.0, pas, 3.0, &h, &eau, vec![r.clone()], vec![b], vec![r.clone()]).avec_sol(vec![BOIS; m * m]);
+        {
+            use transports::*;
+            l.transports = Transports {
+                tunnels: vec![r],
+                rails: vec![Rail { mode: METRO, ou: TUNNEL, niveau: -2, points: vec![[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]] }],
+                arrets: vec![Arret { modes: 1 << BUS | 1 << TRAM, x: 3.0, z: 4.0, nom: "Théâtre des Arts".into(), abri: true, niveau: -1 }],
+                lignes: vec![Ligne { mode: BUS, numero: "F1".into(), nom: "Ligne F1".into(), couleur: Some([1, 2, 3]), arrets: vec![0], trace: vec![Morceau { ou: SOL, points: vec![[0.0, 0.0], [1.0, 1.0]] }, Morceau { ou: TUNNEL, points: vec![[1.0, 1.0], [2.0, 1.0]] }] }],
+            };
+        }
+        l.cours_eau = vec![cours_eau::CoursEau { genre: cours_eau::RIVIERE, nom: "Robec".into(), largeur: 4.5, souterrain: true, points: vec![[1.0, 2.0], [3.0, 4.0]] }];
+        l.surfaces_eau = vec![cours_eau::SurfaceEau { nature: cours_eau::SURFACE_RIVIERE, anneaux: vec![vec![[0.0, 0.0], [5.0, 0.0], [5.0, 5.0]], vec![[1.0, 1.0], [2.0, 1.0], [2.0, 2.0]]] }];
         let o = l.octets();
         assert_eq!(Lieu::depuis_octets(&o), Some(l.clone()));
         assert!(Lieu::depuis_octets(&o[..o.len() - 1]).is_none());
