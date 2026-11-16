@@ -13,10 +13,16 @@ pub enum Genre {
     Bois,
     Brique,
     Pierre,
+    /// Le limon d'un lit : taches, rides du courant ou craquelures, gravillons.
+    Vase,
+    /// Les pavés d'un quai ou d'une rue : bombés, coins arrondis, joints de sable.
+    Paves,
+    /// La pierre de taille appareillée : assises régulières, joints fins, ciselure.
+    Taille,
 }
 
 impl Genre {
-    pub const TOUS: [Genre; 3] = [Genre::Bois, Genre::Brique, Genre::Pierre];
+    pub const TOUS: [Genre; 6] = [Genre::Bois, Genre::Brique, Genre::Pierre, Genre::Vase, Genre::Paves, Genre::Taille];
 
     /// L'identifiant, tel qu'il s'écrit dans les fichiers.
     pub fn id(self) -> &'static str {
@@ -24,6 +30,9 @@ impl Genre {
             Genre::Bois => "bois",
             Genre::Brique => "brique",
             Genre::Pierre => "pierre",
+            Genre::Vase => "vase",
+            Genre::Paves => "paves",
+            Genre::Taille => "taille",
         }
     }
 
@@ -32,6 +41,9 @@ impl Genre {
             Genre::Bois => "Bois",
             Genre::Brique => "Brique",
             Genre::Pierre => "Pierre",
+            Genre::Vase => "Vase",
+            Genre::Paves => "Pavés",
+            Genre::Taille => "Pierre de taille",
         }
     }
 
@@ -49,6 +61,9 @@ impl Genre {
             Genre::Bois => &["Aléatoire", "½", "⅓", "Aligné"],
             Genre::Brique => &["½", "⅓", "¼", "Aligné"],
             Genre::Pierre => &["Moellons", "Assises"],
+            Genre::Vase => &["Lisse", "Ridée", "Craquelée"],
+            Genre::Paves => &["½", "Aléatoire", "Aligné"],
+            Genre::Taille => &["Réglé", "Libre"],
         }
     }
 }
@@ -191,6 +206,63 @@ impl Reglages {
                 cernes: 10.0,
                 noeuds: 0.0,
             },
+            Genre::Vase => Reglages {
+                genre,
+                cote: 2.0,
+                resolution: 512,
+                graine: 1,
+                longueur: 40.0,
+                hauteur: 8.0,
+                appareil: 1,
+                irregularite: 0.5,
+                couleur: Tsl::new(36.0, 0.22, 0.34),
+                couleur2: Tsl::new(28.0, 0.20, 0.22),
+                variation: 0.6,
+                grain: 0.6,
+                joint: 4.0,
+                couleur_joint: Tsl::new(25.0, 0.25, 0.12),
+                relief: 0.5,
+                cernes: 10.0,
+                noeuds: 30.0,
+            },
+            Genre::Paves => Reglages {
+                genre,
+                cote: 1.0,
+                resolution: 512,
+                graine: 1,
+                longueur: 20.0,
+                hauteur: 14.0,
+                appareil: 0,
+                irregularite: 0.5,
+                couleur: Tsl::new(30.0, 0.06, 0.50),
+                couleur2: Tsl::new(25.0, 0.08, 0.34),
+                variation: 0.6,
+                grain: 0.7,
+                joint: 12.0,
+                couleur_joint: Tsl::new(40.0, 0.25, 0.55),
+                relief: 0.7,
+                cernes: 10.0,
+                noeuds: 0.0,
+            },
+            Genre::Taille => Reglages {
+                genre,
+                cote: 2.0,
+                resolution: 512,
+                graine: 1,
+                longueur: 80.0,
+                hauteur: 40.0,
+                appareil: 0,
+                irregularite: 0.2,
+                couleur: Tsl::new(42.0, 0.22, 0.72),
+                couleur2: Tsl::new(38.0, 0.18, 0.58),
+                variation: 0.4,
+                grain: 0.4,
+                joint: 5.0,
+                couleur_joint: Tsl::new(40.0, 0.10, 0.80),
+                relief: 0.5,
+                cernes: 10.0,
+                noeuds: 0.0,
+            },
             Genre::Pierre => Reglages {
                 genre,
                 cote: 2.0,
@@ -234,6 +306,9 @@ impl Reglages {
         l("relief", arrondi(self.relief, 3).to_string());
         if self.genre == Genre::Bois {
             l("cernes", arrondi(self.cernes, 2).to_string());
+        }
+        // Bois : les nœuds par m² ; vase : les gravillons par m²
+        if matches!(self.genre, Genre::Bois | Genre::Vase) {
             l("noeuds", arrondi(self.noeuds, 2).to_string());
         }
         s
@@ -286,7 +361,7 @@ impl Reglages {
         self.joint = self.joint.clamp(0.0, 60.0);
         self.relief = self.relief.clamp(0.0, 1.0);
         self.cernes = self.cernes.clamp(1.0, 40.0);
-        self.noeuds = self.noeuds.clamp(0.0, 20.0);
+        self.noeuds = self.noeuds.clamp(0.0, 200.0);
     }
 
     /// Le décalage d'un rang au suivant, en fraction d'élément : `None` pour un
@@ -297,6 +372,8 @@ impl Reglages {
             (Genre::Bois, 1) | (Genre::Brique, 0) => Some(2),
             (Genre::Bois, 2) | (Genre::Brique, 1) => Some(3),
             (Genre::Brique, 2) => Some(4),
+            (Genre::Paves, 0) | (Genre::Taille, 0) => Some(2),
+            (Genre::Paves, 1) => None,
             _ => Some(1),
         }
     }
@@ -308,7 +385,7 @@ impl Reglages {
         let j = self.joint / 10.0;
         let c = self.cote * 100.0;
         let n = |module: f32| ((c / module.max(0.5)).round() as i32).max(1);
-        if self.genre == Genre::Pierre && self.appareil == 0 {
+        if (self.genre == Genre::Pierre && self.appareil == 0) || self.genre == Genre::Vase {
             let k = n(self.longueur + j).max(2);
             return (k, k);
         }
@@ -328,6 +405,9 @@ impl Reglages {
             (Genre::Brique, _) => format!("{c} × {r} briques"),
             (Genre::Pierre, 0) => format!("≈ {} pierres", c * r),
             (Genre::Pierre, _) => format!("{r} assises"),
+            (Genre::Vase, _) => format!("{} · ≈ {c} taches", Genre::Vase.appareils()[self.appareil as usize % 3].to_lowercase()),
+            (Genre::Paves, _) => format!("{c} × {r} pavés"),
+            (Genre::Taille, _) => format!("{r} assises"),
         };
         format!("{} px · {} m · {elements}", self.resolution, nombre_court(self.cote))
     }
@@ -530,9 +610,16 @@ fn pierre_couleur(c: &Contexte, a: u32, b: u32, dist: f32, s: f32, t: f32, x: u3
 }
 
 fn moellons(c: &Contexte, s: f32, t: f32, x: u32, y: u32) -> [f32; 3] {
-    let n = c.grille.0;
+    let (dist, h) = cellules(c, s, t, c.grille.0, c.r.irregularite, 30);
+    pierre_couleur(c, h.0, h.1, dist, s, t, x, y)
+}
+
+/// Les cellules d'un pavage de Voronoï périodique, `n` × `n` sur la tuile, aux bords
+/// ondulés selon `irr` : la distance (mètres) au bord de la cellule du point, et
+/// l'identifiant de la cellule.
+fn cellules(c: &Contexte, s: f32, t: f32, n: i32, irr: f32, g: u32) -> (f32, (u32, u32)) {
+    let n = n.max(2);
     let nf = n as f32;
-    let irr = c.r.irregularite;
     // Les bords ondulent : on déforme l'espace avant d'y chercher les pierres
     let fw = n.max(2);
     let w = irr * 0.3 / nf;
@@ -547,7 +634,7 @@ fn moellons(c: &Contexte, s: f32, t: f32, x: u32, y: u32) -> [f32; 3] {
         for dj in -2..=2 {
             let (i, j) = (ci + di, cj + dj);
             let h = (i.rem_euclid(n) as u32, j.rem_euclid(n) as u32);
-            let p = [i as f32 + 0.5 + (alea(h.0, h.1, c.g.wrapping_add(30)) - 0.5) * ecart, j as f32 + 0.5 + (alea(h.0, h.1, c.g.wrapping_add(31)) - 0.5) * ecart];
+            let p = [i as f32 + 0.5 + (alea(h.0, h.1, c.g.wrapping_add(g)) - 0.5) * ecart, j as f32 + 0.5 + (alea(h.0, h.1, c.g.wrapping_add(g + 1)) - 0.5) * ecart];
             let d2 = (gx - p[0]).powi(2) + (gy - p[1]).powi(2);
             points[k] = (p, d2, h);
             k += 1;
@@ -563,8 +650,134 @@ fn moellons(c: &Contexte, s: f32, t: f32, x: u32, y: u32) -> [f32; 3] {
             bord = bord.min((d2 - d0) / (2.0 * l));
         }
     }
-    let dist = bord * c.r.cote / nf;
-    pierre_couleur(c, h.0, h.1, dist, s, t, x, y)
+    (bord * c.r.cote / nf, h)
+}
+
+/// La vase : de grandes taches entre les deux couleurs, un grain fin ; ridée, les
+/// rides du courant (pente douce face au courant, raide derrière) ; craquelée, des
+/// plaques séchées et leurs fentes ; et des gravillons (`noeuds` par m²).
+fn vase(c: &Contexte, s: f32, t: f32, x: u32, y: u32) -> [f32; 3] {
+    let r = c.r;
+    let k = c.grille.0;
+    let taches = fbm(s, t, k, k, 4, c.g.wrapping_add(70)) * 0.5 + 0.5;
+    let mut v = melange(c.c1, c.c2, smoothstep(0.3, 0.7, taches) * r.variation);
+    v = grain(c, v, s, t, x, y, 90.0, 0.22);
+    match r.appareil {
+        1 => {
+            // Un nombre entier de rides sur la tuile ; elles ondulent (bruit périodique)
+            let nr = ((r.cote * 100.0 / r.hauteur.max(1.0)).round() as i32).max(1);
+            let onde = fbm(s, t, 2, 3, 3, c.g.wrapping_add(71));
+            let f = (t * nr as f32 + r.irregularite * 1.2 * onde).rem_euclid(1.0);
+            let pente = if f < 0.75 { f / 0.75 } else { (1.0 - f) / 0.25 };
+            v = fois(v, 1.0 + r.relief * 0.3 * (pente - 0.5));
+        }
+        2 => {
+            let (dist, _) = cellules(c, s, t, k, r.irregularite, 72);
+            // Les bords des plaques se relèvent (plus clairs), la fente est sombre
+            let leve = 1.0 - smoothstep(c.demi_joint, c.demi_joint + 0.03, dist);
+            v = fois(v, 1.0 + r.relief * 0.18 * leve);
+            v = melange(v, c.cj, mortier(c, dist));
+        }
+        _ => {}
+    }
+    // Les gravillons : au plus un par case de 5 cm, de 4 à 10 mm
+    let m = ((r.cote * 20.0).round() as i32).max(1);
+    let p = (r.noeuds * 0.0025).min(1.0);
+    let (gx, gy) = (s * m as f32, t * m as f32);
+    let (ci, cj) = (gx.floor() as i32, gy.floor() as i32);
+    let case = r.cote / m as f32;
+    for di in -1..=1 {
+        for dj in -1..=1 {
+            let (i, j) = ((ci + di).rem_euclid(m) as u32, (cj + dj).rem_euclid(m) as u32);
+            let g = c.g.wrapping_add(80);
+            if alea(i, j, g) >= p {
+                continue;
+            }
+            let (px, py) = ((ci + di) as f32 + alea(i, j, g + 1), (cj + dj) as f32 + alea(i, j, g + 2));
+            let rayon = (0.004 + alea(i, j, g + 3) * 0.006) / case;
+            let d = ((gx - px).powi(2) + (gy - py).powi(2)).sqrt();
+            if d < rayon {
+                let teinte = 0.45 + alea(i, j, g + 4) * 0.5;
+                let cailloux = fois([0.62, 0.60, 0.56], teinte);
+                let bombe = 1.0 - (d / rayon).powi(2);
+                let ombre = 1.0 + r.relief * 0.35 * (((px - gx) + (py - gy)) / rayon) * 0.5;
+                v = melange(v, fois(cailloux, ombre * (0.8 + 0.2 * bombe)), 1.0 - smoothstep(rayon * 0.8, rayon, d));
+            }
+        }
+    }
+    v
+}
+
+/// Les pavés : des rangs (décalés d'un demi, au hasard, ou alignés), chaque pavé un
+/// rectangle aux coins arrondis selon l'irrégularité, bombé et éclairé d'en haut à
+/// gauche ; le sable des joints.
+fn paves(c: &Contexte, s: f32, t: f32, x: u32, y: u32) -> [f32; 3] {
+    let r = c.r;
+    let (colonnes, rangs) = c.grille;
+    let tf = t * rangs as f32;
+    let rang = tf.floor() as i32;
+    let rg = rang.rem_euclid(rangs) as u32;
+    let decalage = match r.diviseur() {
+        None => alea(rg, 0, c.g.wrapping_add(90)),
+        Some(d) => rang.rem_euclid(d) as f32 / d as f32,
+    };
+    let uf = s * colonnes as f32 - decalage;
+    let col = uf.floor() as i32;
+    let (mw, mh) = (r.cote / colonnes as f32, r.cote / rangs as f32);
+    let (lx, ly) = ((uf - col as f32) * mw, (tf - rang as f32) * mh);
+    let (a, b) = (col.rem_euclid(colonnes) as u32, rg);
+    // Chaque pavé un peu de travers et de taille inégale
+    let jeu = r.irregularite * 0.12;
+    let (hx, hy) = ((mw / 2.0 - c.demi_joint) * (1.0 - jeu * alea(a, b, c.g.wrapping_add(91))), (mh / 2.0 - c.demi_joint) * (1.0 - jeu * alea(a, b, c.g.wrapping_add(92))));
+    let (qx, qy) = ((lx - mw / 2.0).abs(), (ly - mh / 2.0).abs());
+    let rc = (r.irregularite * 0.45 * hx.min(hy)).max(0.002);
+    let (ex, ey) = (qx - (hx - rc), qy - (hy - rc));
+    let dehors = (ex.max(0.0).powi(2) + ey.max(0.0).powi(2)).sqrt() + ex.max(ey).min(0.0) - rc;
+    let dedans = -dehors + tremble(c, s, t, 0.008);
+    let v = grain(c, teinte(c, a, b), s, t, x, y, 70.0, 0.25);
+    // Le bombé : plus sombre vers les bords, éclairé d'en haut à gauche
+    let k = (dedans / hx.min(hy).max(1e-4)).clamp(0.0, 1.0);
+    let lumiere = ((mw / 2.0 - lx) / mw - (ly - mh / 2.0) / mh) * (1.0 - k);
+    let v = fois(v, 1.0 + r.relief * (0.18 * k.sqrt() - 0.18 + 0.25 * lumiere));
+    let sable = couleur_mortier(c, s, t);
+    melange(v, sable, 1.0 - smoothstep(-c.pixel * 0.5, c.pixel * 0.5, dedans))
+}
+
+/// La pierre de taille : des assises de hauteur égale ; réglé, des blocs égaux
+/// décalés d'un demi ; libre, des longueurs inégales. Faces dressées : un grain fin,
+/// les traces de l'outil (layage), une ciselure le long des arêtes ; joints fins.
+fn taille(c: &Contexte, s: f32, t: f32, x: u32, y: u32) -> [f32; 3] {
+    let r = c.r;
+    let (colonnes, rangs) = c.grille;
+    let tf = t * rangs as f32;
+    let rang = tf.floor() as i32;
+    let rg = rang.rem_euclid(rangs);
+    let mh = r.cote / rangs as f32;
+    let ly = (tf - rang as f32) * mh;
+    let (lx, longueur, i) = if r.appareil == 0 {
+        let dec = if rg % 2 == 1 { 0.5 } else { 0.0 };
+        let uf = s * colonnes as f32 - dec;
+        let col = uf.floor() as i32;
+        let mw = r.cote / colonnes as f32;
+        ((uf - col as f32) * mw, mw, col.rem_euclid(colonnes))
+    } else {
+        assise(c, s, rg)
+    };
+    let p = tremble(c, s, t, 0.003);
+    let bords = [lx + p, longueur - lx + p, ly + p, mh - ly + p];
+    let dist = bords.iter().copied().fold(f32::MAX, f32::min);
+    let (a, b) = (i as u32, rg as u32 + 2000);
+    let mut v = teinte(c, a, b);
+    // Le layage : des stries fines, de biais, propres à chaque bloc
+    let angle = 0.6 + alea(a, b, c.g.wrapping_add(95)) * 0.8;
+    let phase = (lx * angle.cos() + ly * angle.sin()) / 0.012;
+    v = fois(v, 1.0 + r.grain * 0.05 * (phase * std::f32::consts::TAU).sin());
+    v = grain(c, v, s, t, x, y, 50.0, 0.14);
+    // La ciselure : une bande lisse et plus claire le long des arêtes
+    let bande = 1.0 - smoothstep(c.demi_joint + 0.02, c.demi_joint + 0.03, dist);
+    v = melange(v, fois(v, 1.07), bande * r.relief);
+    let v = arete(c, v, bords);
+    melange(v, couleur_mortier(c, s, t), mortier(c, dist))
 }
 
 fn assises(c: &Contexte, s: f32, t: f32, x: u32, y: u32) -> [f32; 3] {
@@ -656,6 +869,9 @@ fn couleur(c: &Contexte, s: f32, t: f32, x: u32, y: u32) -> [f32; 3] {
         (Genre::Brique, _) => brique(c, s, t, x, y),
         (Genre::Pierre, 0) => moellons(c, s, t, x, y),
         (Genre::Pierre, _) => assises(c, s, t, x, y),
+        (Genre::Vase, _) => vase(c, s, t, x, y),
+        (Genre::Paves, _) => paves(c, s, t, x, y),
+        (Genre::Taille, _) => taille(c, s, t, x, y),
     }
 }
 
