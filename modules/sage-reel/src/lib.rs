@@ -31,6 +31,7 @@
 pub mod generer;
 pub mod json;
 pub mod cours_eau;
+pub mod reseau;
 pub mod tabliers;
 pub mod toits;
 pub mod transports;
