@@ -1,0 +1,10 @@
+[package]
+name = "sage-matieres"
+version = "0.1.0"
+edition = "2021"
+license = "PolyForm-Noncommercial-1.0.0"
+description = "Les matières de S.A.G.E. : textures répétables sans couture (bois, brique, pierre…), générées par le calcul"
+
+# Aucune dépendance : partagé par S.A.G.E. et Flow (le contexte Matières, la maquette
+# des lieux). Issu du générateur de Texturine.
+[dependencies]
