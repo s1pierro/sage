@@ -19,10 +19,13 @@ pub enum Genre {
     Paves,
     /// La pierre de taille appareillée : assises régulières, joints fins, ciselure.
     Taille,
+    /// La chaussée : un enrobé sur toute la largeur d'une route ou d'une piste, ses
+    /// voies et leur marquage. Elle ne se répète que dans sa longueur.
+    Chaussee,
 }
 
 impl Genre {
-    pub const TOUS: [Genre; 6] = [Genre::Bois, Genre::Brique, Genre::Pierre, Genre::Vase, Genre::Paves, Genre::Taille];
+    pub const TOUS: [Genre; 7] = [Genre::Bois, Genre::Brique, Genre::Pierre, Genre::Vase, Genre::Paves, Genre::Taille, Genre::Chaussee];
 
     /// L'identifiant, tel qu'il s'écrit dans les fichiers.
     pub fn id(self) -> &'static str {
@@ -33,6 +36,7 @@ impl Genre {
             Genre::Vase => "vase",
             Genre::Paves => "paves",
             Genre::Taille => "taille",
+            Genre::Chaussee => "chaussee",
         }
     }
 
@@ -44,6 +48,7 @@ impl Genre {
             Genre::Vase => "Vase",
             Genre::Paves => "Pavés",
             Genre::Taille => "Pierre de taille",
+            Genre::Chaussee => "Chaussée",
         }
     }
 
@@ -64,6 +69,8 @@ impl Genre {
             Genre::Vase => &["Lisse", "Ridée", "Craquelée"],
             Genre::Paves => &["½", "Aléatoire", "Aligné"],
             Genre::Taille => &["Réglé", "Libre"],
+            // Le sens de circulation : l'axe ne se marque qu'à double sens
+            Genre::Chaussee => &["Double sens", "Sens unique"],
         }
     }
 }
@@ -123,8 +130,71 @@ fn arrondi(v: f32, chiffres: i32) -> f32 {
     (v * k).round() / k
 }
 
+/// Un trait de marquage écrit en toutes lettres (ou son rang).
+fn trait_lu(v: &str) -> Option<u32> {
+    let v = v.trim().to_lowercase();
+    TRAITS.iter().position(|t| t.to_lowercase() == v).map(|i| i as u32).or_else(|| v.parse().ok())
+}
+
 fn nombre(v: &str) -> Option<f32> {
     v.trim().replace(',', ".").parse().ok().filter(|x: &f32| x.is_finite())
+}
+
+/// Les traits d'un marquage, par rang (`Chaussee::rive`, `axe`, `separation`).
+pub const TRAITS: [&str; 5] = ["Aucun", "Continu", "Discontinu", "Double", "Mixte"];
+
+/// Ce qui ne sert qu'à la chaussée : ses voies, leur marquage et leur usure. Les
+/// longueurs sont en mètres, sauf la ligne (cm) et le granulat (mm).
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Chaussee {
+    pub voies: u32,
+    pub largeur_voie: f32,
+    /// L'enrobé au-delà des lignes de rive, de chaque côté.
+    pub accotement: f32,
+    /// Le trait (rang dans `TRAITS`) des rives, de l'axe (le milieu d'une chaussée à
+    /// double sens et nombre pair de voies), et entre deux voies de même sens.
+    pub rive: u32,
+    pub axe: u32,
+    pub separation: u32,
+    /// Un tiret et l'espace qui le suit : la texture en tient un nombre entier.
+    pub tiret: f32,
+    pub espace: f32,
+    /// La largeur d'une ligne (cm).
+    pub ligne: f32,
+    /// De 0 à 1 : les lignes effacées, écaillées, plus encore sous les roues.
+    pub usure_marquage: f32,
+    /// De 0 à 1 : les traces des roues (plus sombres, lustrées), l'huile au milieu des
+    /// voies, les reprises, les bords qui s'effritent.
+    pub usure: f32,
+    /// La taille des gravillons de l'enrobé (mm).
+    pub granulat: f32,
+}
+
+impl Chaussee {
+    pub const DEFAUT: Chaussee = Chaussee {
+        voies: 2,
+        largeur_voie: 3.5,
+        accotement: 0.5,
+        rive: 1,
+        axe: 2,
+        separation: 2,
+        tiret: 3.0,
+        espace: 10.0,
+        ligne: 15.0,
+        usure_marquage: 0.3,
+        usure: 0.4,
+        granulat: 10.0,
+    };
+
+    /// La largeur de toute la chaussée (m).
+    pub fn largeur(&self) -> f32 {
+        2.0 * self.accotement + self.voies as f32 * self.largeur_voie
+    }
+
+    /// Le pas des tirets (m).
+    pub fn cycle(&self) -> f32 {
+        self.tiret + self.espace
+    }
 }
 
 /// Les résolutions proposées, en pixels de côté.
@@ -163,6 +233,8 @@ pub struct Reglages {
     /// Bois : les cernes sur la largeur d'une lame, et les nœuds par mètre carré.
     pub cernes: f32,
     pub noeuds: f32,
+    /// La chaussée (genre `Chaussee`) ; ailleurs, ignoré.
+    pub chaussee: Chaussee,
 }
 
 impl Reglages {
@@ -186,6 +258,7 @@ impl Reglages {
                 relief: 0.3,
                 cernes: 10.0,
                 noeuds: 1.5,
+                chaussee: Chaussee::DEFAUT,
             },
             Genre::Brique => Reglages {
                 genre,
@@ -205,6 +278,7 @@ impl Reglages {
                 relief: 0.5,
                 cernes: 10.0,
                 noeuds: 0.0,
+                chaussee: Chaussee::DEFAUT,
             },
             Genre::Vase => Reglages {
                 genre,
@@ -224,6 +298,7 @@ impl Reglages {
                 relief: 0.5,
                 cernes: 10.0,
                 noeuds: 30.0,
+                chaussee: Chaussee::DEFAUT,
             },
             Genre::Paves => Reglages {
                 genre,
@@ -243,6 +318,7 @@ impl Reglages {
                 relief: 0.7,
                 cernes: 10.0,
                 noeuds: 0.0,
+                chaussee: Chaussee::DEFAUT,
             },
             Genre::Taille => Reglages {
                 genre,
@@ -262,6 +338,31 @@ impl Reglages {
                 relief: 0.5,
                 cernes: 10.0,
                 noeuds: 0.0,
+                chaussee: Chaussee::DEFAUT,
+            },
+            Genre::Chaussee => Reglages {
+                genre,
+                // La longueur répétée : un nombre entier de tirets
+                cote: 13.0,
+                resolution: 512,
+                graine: 1,
+                longueur: 2.0,
+                hauteur: 1.0,
+                appareil: 0,
+                // Les fissures
+                irregularite: 0.2,
+                // Le bitume, et la teinte de ses plaques
+                couleur: Tsl::new(220.0, 0.04, 0.27),
+                couleur2: Tsl::new(30.0, 0.05, 0.22),
+                variation: 0.4,
+                grain: 0.6,
+                joint: 0.0,
+                // Le marquage
+                couleur_joint: Tsl::new(50.0, 0.05, 0.9),
+                relief: 0.5,
+                cernes: 10.0,
+                noeuds: 0.0,
+                chaussee: Chaussee::DEFAUT,
             },
             Genre::Pierre => Reglages {
                 genre,
@@ -281,6 +382,7 @@ impl Reglages {
                 relief: 0.6,
                 cernes: 10.0,
                 noeuds: 0.0,
+                chaussee: Chaussee::DEFAUT,
             },
         }
     }
@@ -311,6 +413,21 @@ impl Reglages {
         if matches!(self.genre, Genre::Bois | Genre::Vase) {
             l("noeuds", arrondi(self.noeuds, 2).to_string());
         }
+        if self.genre == Genre::Chaussee {
+            let c = &self.chaussee;
+            l("voies", c.voies.to_string());
+            l("largeur_voie", arrondi(c.largeur_voie, 3).to_string());
+            l("accotement", arrondi(c.accotement, 3).to_string());
+            l("rive", TRAITS[c.rive as usize % TRAITS.len()].to_lowercase());
+            l("axe", TRAITS[c.axe as usize % TRAITS.len()].to_lowercase());
+            l("separation", TRAITS[c.separation as usize % TRAITS.len()].to_lowercase());
+            l("tiret", arrondi(c.tiret, 3).to_string());
+            l("espace", arrondi(c.espace, 3).to_string());
+            l("ligne", arrondi(c.ligne, 2).to_string());
+            l("usure_marquage", arrondi(c.usure_marquage, 3).to_string());
+            l("usure", arrondi(c.usure, 3).to_string());
+            l("granulat", arrondi(c.granulat, 2).to_string());
+        }
         s
     }
 
@@ -339,6 +456,18 @@ impl Reglages {
                 "relief" => r.relief = n.unwrap_or(r.relief),
                 "cernes" => r.cernes = n.unwrap_or(r.cernes),
                 "noeuds" => r.noeuds = n.unwrap_or(r.noeuds),
+                "voies" => r.chaussee.voies = n.map_or(r.chaussee.voies, |x| x as u32),
+                "largeur_voie" => r.chaussee.largeur_voie = n.unwrap_or(r.chaussee.largeur_voie),
+                "accotement" => r.chaussee.accotement = n.unwrap_or(r.chaussee.accotement),
+                "rive" => r.chaussee.rive = trait_lu(v).unwrap_or(r.chaussee.rive),
+                "axe" => r.chaussee.axe = trait_lu(v).unwrap_or(r.chaussee.axe),
+                "separation" => r.chaussee.separation = trait_lu(v).unwrap_or(r.chaussee.separation),
+                "tiret" => r.chaussee.tiret = n.unwrap_or(r.chaussee.tiret),
+                "espace" => r.chaussee.espace = n.unwrap_or(r.chaussee.espace),
+                "ligne" => r.chaussee.ligne = n.unwrap_or(r.chaussee.ligne),
+                "usure_marquage" => r.chaussee.usure_marquage = n.unwrap_or(r.chaussee.usure_marquage),
+                "usure" => r.chaussee.usure = n.unwrap_or(r.chaussee.usure),
+                "granulat" => r.chaussee.granulat = n.unwrap_or(r.chaussee.granulat),
                 _ => {}
             }
         }
@@ -348,7 +477,26 @@ impl Reglages {
 
     /// Ramène chaque valeur dans ce que le générateur sait faire.
     pub fn borner(&mut self) {
-        self.cote = self.cote.clamp(0.25, 8.0);
+        if self.genre == Genre::Chaussee {
+            let c = &mut self.chaussee;
+            c.voies = c.voies.clamp(1, 8);
+            c.largeur_voie = c.largeur_voie.clamp(2.0, 6.0);
+            c.accotement = c.accotement.clamp(0.0, 4.0);
+            for t in [&mut c.rive, &mut c.axe, &mut c.separation] {
+                *t = (*t).min(TRAITS.len() as u32 - 1);
+            }
+            c.tiret = c.tiret.clamp(0.5, 20.0);
+            c.espace = c.espace.clamp(0.5, 30.0);
+            c.ligne = c.ligne.clamp(5.0, 50.0);
+            c.usure_marquage = c.usure_marquage.clamp(0.0, 1.0);
+            c.usure = c.usure.clamp(0.0, 1.0);
+            c.granulat = c.granulat.clamp(2.0, 30.0);
+            // Un nombre entier de tirets dans la longueur répétée
+            let k = (self.cote.clamp(1.0, 80.0) / c.cycle()).round().max(1.0);
+            self.cote = k * c.cycle();
+        } else {
+            self.cote = self.cote.clamp(0.25, 8.0);
+        }
         if !RESOLUTIONS.contains(&self.resolution) {
             self.resolution = 512;
         }
@@ -385,6 +533,10 @@ impl Reglages {
         let j = self.joint / 10.0;
         let c = self.cote * 100.0;
         let n = |module: f32| ((c / module.max(0.5)).round() as i32).max(1);
+        if self.genre == Genre::Chaussee {
+            let c = &self.chaussee;
+            return (c.voies as i32, (self.cote / c.cycle()).round() as i32);
+        }
         if (self.genre == Genre::Pierre && self.appareil == 0) || self.genre == Genre::Vase {
             let k = n(self.longueur + j).max(2);
             return (k, k);
@@ -408,8 +560,23 @@ impl Reglages {
             (Genre::Vase, _) => format!("{} · ≈ {c} taches", Genre::Vase.appareils()[self.appareil as usize % 3].to_lowercase()),
             (Genre::Paves, _) => format!("{c} × {r} pavés"),
             (Genre::Taille, _) => format!("{r} assises"),
+            (Genre::Chaussee, _) => {
+                let (l, h) = self.taille();
+                return format!("{l} × {h} px · {} × {} m · {c} voie{} · {r} tiret{}", nombre_court(self.chaussee.largeur()), nombre_court(self.cote), if c > 1 { "s" } else { "" }, if r > 1 { "s" } else { "" });
+            }
         };
         format!("{} px · {} m · {elements}", self.resolution, nombre_court(self.cote))
+    }
+
+    /// Les pixels de l'image, en largeur et en hauteur : carrée, sauf la chaussée
+    /// (toute sa largeur sur `resolution` pixels, sa longueur à la même échelle).
+    pub fn taille(&self) -> (u32, u32) {
+        let n = self.resolution.max(1);
+        if self.genre != Genre::Chaussee {
+            return (n, n);
+        }
+        let h = (n as f32 * self.cote / self.chaussee.largeur().max(0.1)).round() as u32;
+        (n, h.clamp(1, 4096))
     }
 }
 
@@ -441,7 +608,7 @@ fn hache(a: u32, b: u32, c: u32) -> u32 {
 }
 
 /// Un nombre de [0, 1) tiré de trois entiers.
-fn alea(a: u32, b: u32, c: u32) -> f32 {
+pub(crate) fn alea(a: u32, b: u32, c: u32) -> f32 {
     (hache(a, b, c) >> 8) as f32 / (1u32 << 24) as f32
 }
 
@@ -449,24 +616,24 @@ fn lisse(x: f32) -> f32 {
     x * x * (3.0 - 2.0 * x)
 }
 
-fn smoothstep(a: f32, b: f32, x: f32) -> f32 {
+pub(crate) fn smoothstep(a: f32, b: f32, x: f32) -> f32 {
     if b <= a {
         return if x < a { 0.0 } else { 1.0 };
     }
     lisse(((x - a) / (b - a)).clamp(0.0, 1.0))
 }
 
-fn melange(a: [f32; 3], b: [f32; 3], k: f32) -> [f32; 3] {
+pub(crate) fn melange(a: [f32; 3], b: [f32; 3], k: f32) -> [f32; 3] {
     [a[0] + (b[0] - a[0]) * k, a[1] + (b[1] - a[1]) * k, a[2] + (b[2] - a[2]) * k]
 }
 
-fn fois(a: [f32; 3], k: f32) -> [f32; 3] {
+pub(crate) fn fois(a: [f32; 3], k: f32) -> [f32; 3] {
     [a[0] * k, a[1] * k, a[2] * k]
 }
 
 /// Bruit de valeur lissé, de [0, 1), périodique : (x, y) en mailles, période (px, py)
 /// en mailles.
-fn bruit(x: f32, y: f32, px: i32, py: i32, g: u32) -> f32 {
+pub(crate) fn bruit(x: f32, y: f32, px: i32, py: i32, g: u32) -> f32 {
     let (xi, yi) = (x.floor(), y.floor());
     let (ux, uy) = (lisse(x - xi), lisse(y - yi));
     let (i, j) = (xi as i32, yi as i32);
@@ -478,7 +645,7 @@ fn bruit(x: f32, y: f32, px: i32, py: i32, g: u32) -> f32 {
 
 /// Somme d'octaves, de [-1, 1] environ : (s, t) en tuiles, (fx, fy) les mailles de la
 /// première octave sur une tuile (des entiers : le bruit garde la période de la tuile).
-fn fbm(s: f32, t: f32, fx: i32, fy: i32, octaves: u32, g: u32) -> f32 {
+pub(crate) fn fbm(s: f32, t: f32, fx: i32, fy: i32, octaves: u32, g: u32) -> f32 {
     let (mut somme, mut amp, mut total) = (0.0, 1.0, 0.0);
     for k in 0..octaves {
         let (ax, ay) = (fx.max(1) << k, fy.max(1) << k);
@@ -492,16 +659,16 @@ fn fbm(s: f32, t: f32, fx: i32, fy: i32, octaves: u32, g: u32) -> f32 {
 // --- Génération ---------------------------------------------------------------
 
 /// Ce qui sert à chaque pixel, calculé une fois.
-struct Contexte<'a> {
-    r: &'a Reglages,
-    c1: [f32; 3],
-    c2: [f32; 3],
-    cj: [f32; 3],
+pub(crate) struct Contexte<'a> {
+    pub(crate) r: &'a Reglages,
+    pub(crate) c1: [f32; 3],
+    pub(crate) c2: [f32; 3],
+    pub(crate) cj: [f32; 3],
     /// Le demi-joint et la largeur d'un pixel, en mètres.
     demi_joint: f32,
-    pixel: f32,
+    pub(crate) pixel: f32,
     grille: (i32, i32),
-    g: u32,
+    pub(crate) g: u32,
 }
 
 /// La part de mortier à la distance `d` (mètres) du bord du module d'un élément,
@@ -855,7 +1022,7 @@ fn contexte(r: &Reglages) -> Contexte<'_> {
         c2: r.couleur2.rvb(),
         cj: r.couleur_joint.rvb(),
         demi_joint: r.joint / 2000.0,
-        pixel: r.cote / r.resolution.max(1) as f32,
+        pixel: if r.genre == Genre::Chaussee { r.chaussee.largeur() / r.resolution.max(1) as f32 } else { r.cote / r.resolution.max(1) as f32 },
         grille: r.grille(),
         g: r.graine.wrapping_mul(7919),
     }
@@ -872,16 +1039,17 @@ fn couleur(c: &Contexte, s: f32, t: f32, x: u32, y: u32) -> [f32; 3] {
         (Genre::Vase, _) => vase(c, s, t, x, y),
         (Genre::Paves, _) => paves(c, s, t, x, y),
         (Genre::Taille, _) => taille(c, s, t, x, y),
+        (Genre::Chaussee, _) => crate::chaussee::couleur(c, s, t, x, y),
     }
 }
 
 /// Génère la texture, sur tous les cœurs du processeur.
 pub fn generer(r: &Reglages) -> Image {
-    let n = r.resolution.max(1);
+    let (n, h) = r.taille();
     let c = contexte(r);
-    let mut rgba = vec![0u8; (n * n * 4) as usize];
+    let mut rgba = vec![0u8; (n * h * 4) as usize];
     let fils = std::thread::available_parallelism().map_or(4, |v| v.get()).clamp(1, 8);
-    let lignes = (n as usize).div_ceil(fils);
+    let lignes = (h as usize).div_ceil(fils);
     std::thread::scope(|portee| {
         for (k, bande) in rgba.chunks_mut(lignes * n as usize * 4).enumerate() {
             let c = &c;
@@ -889,14 +1057,14 @@ pub fn generer(r: &Reglages) -> Image {
                 for (i, px) in bande.chunks_exact_mut(4).enumerate() {
                     let i = i as u32;
                     let (x, y) = (i % n, (k * lignes) as u32 + i / n);
-                    let (s, t) = ((x as f32 + 0.5) / n as f32, (y as f32 + 0.5) / n as f32);
+                    let (s, t) = ((x as f32 + 0.5) / n as f32, (y as f32 + 0.5) / h as f32);
                     let [rr, gg, bb] = couleur(c, s, t, x, y);
                     px.copy_from_slice(&[octet(rr), octet(gg), octet(bb), 255]);
                 }
             });
         }
     });
-    Image { l: n, h: n, rgba }
+    Image { l: n, h, rgba }
 }
 
 #[cfg(test)]
@@ -923,7 +1091,9 @@ mod tests {
                 let c = contexte(&r);
                 for (s, t) in [(0.013, 0.31), (0.5, 0.0021), (0.77, 0.93)] {
                     let a = couleur(&c, s, t, 0, 0);
-                    for (ds, dt) in [(1.0, 0.0), (0.0, 1.0), (-1.0, 2.0)] {
+                    // La chaussée ne se répète que dans sa longueur
+                    let decalages: &[(f32, f32)] = if g == Genre::Chaussee { &[(0.0, 1.0), (0.0, -2.0)] } else { &[(1.0, 0.0), (0.0, 1.0), (-1.0, 2.0)] };
+                    for &(ds, dt) in decalages {
                         let b = couleur(&c, s + ds, t + dt, 0, 0);
                         for i in 0..3 {
                             assert!((a[i] - b[i]).abs() < 2e-3, "{g:?} {appareil} ({s}, {t}) + ({ds}, {dt}) : {a:?} ≠ {b:?}");

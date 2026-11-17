@@ -5,10 +5,11 @@
 //!
 //! Issu de Texturine (qui devient le contexte Matières de Flow).
 
+pub mod chaussee;
 pub mod generateur;
 pub mod png;
 
-pub use generateur::{generer, Genre, Image, Reglages, Tsl};
+pub use generateur::{generer, Chaussee, Genre, Image, Reglages, Tsl, TRAITS};
 
 /// Les paires `clé = valeur` d'un texte, sans les commentaires ni les lignes vides.
 pub fn cles(texte: &str) -> Vec<(String, String)> {
