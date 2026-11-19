@@ -735,9 +735,19 @@ pub fn niveler(r: &mut Reseau, v: &[Contrainte], iterations: usize) -> Bilan {
     let mut cible: Vec<f32> = vec![0.0; nn];
     let mut retenue: Vec<f32> = vec![0.0; nn];
     // Les nœuds : la moyenne des bouts au sol qui y arrivent (sinon de tous)
+    // Les routes passent d'abord : un nœud touché par une route ne prend la hauteur
+    // que des routes, et les piétonnes ne le tirent pas
+    let mut route = vec![false; nn];
+    for a in r.aretes.iter().filter(|a| a.genre != crate::PIETONNE) {
+        route[a.a] = true;
+        route[a.b] = true;
+    }
     let mut somme = vec![(0.0f32, 0usize, 0.0f32, 0usize); nn];
     for a in &r.aretes {
         for (n, p) in [(a.a, a.points[0]), (a.b, *a.points.last().unwrap())] {
+            if route[n] && a.genre == crate::PIETONNE {
+                continue;
+            }
             let s = &mut somme[n];
             if a.passage == Passage::Sol {
                 s.0 += p[2];
@@ -762,6 +772,7 @@ pub fn niveler(r: &mut Reseau, v: &[Contrainte], iterations: usize) -> Bilan {
             y.push(p[2]);
             cible.push(p[2]);
             retenue.push(if a.passage == Passage::Sol { RETENUE_SOL } else { RETENUE_OUVRAGE });
+            route.push(a.genre != crate::PIETONNE);
             v.push(y.len() - 1);
         }
         v.push(a.b);
@@ -781,8 +792,13 @@ pub fn niveler(r: &mut Reseau, v: &[Contrainte], iterations: usize) -> Bilan {
                 continue;
             }
             liens.push((x, z, d, g));
-            voisins[x].push(z);
-            voisins[z].push(x);
+            // Une route ne regarde que ses voisines routes
+            if route[x] == route[z] || !route[x] {
+                voisins[x].push(z);
+            }
+            if route[x] == route[z] || !route[z] {
+                voisins[z].push(x);
+            }
         }
     }
     // Les contraintes en variables : (haut : v0, v1, u ; bas ; plancher ; écart ; part
@@ -793,6 +809,9 @@ pub fn niveler(r: &mut Reseau, v: &[Contrainte], iterations: usize) -> Bilan {
         plancher: f32,
         ecart: f32,
         part: f32,
+        // Le haut, le bas sur une piétonne : ses bouts qui sont des routes ne bougent pas
+        pieton_h: bool,
+        pieton_b: bool,
     }
     let var = |(a, s, u): Ou| (ids[a][s], ids[a][s + 1], u);
     let cs: Vec<C> = v
@@ -800,13 +819,19 @@ pub fn niveler(r: &mut Reseau, v: &[Contrainte], iterations: usize) -> Bilan {
         .map(|c| {
             let ph = r.aretes[c.haut.0].passage;
             let pb = c.bas.map(|b| r.aretes[b.0].passage);
-            let part = match (ph, pb) {
+            // Entre une route et une piétonne, seule la piétonne bouge
+            let pieton = |k: usize| r.aretes[k].genre == crate::PIETONNE;
+            let part = match c.bas.map(|b| (pieton(c.haut.0), pieton(b.0))) {
+                Some((true, false)) => 1.0,
+                Some((false, true)) => 0.0,
+                _ => match (ph, pb) {
                 (_, None) => 1.0,
                 (Passage::Pont, Some(Passage::Sol)) => 0.85,
                 (Passage::Sol, Some(Passage::Tunnel)) => 0.15,
                 _ => 0.5,
+                },
             };
-            C { h: var(c.haut), b: c.bas.map(var), plancher: c.plancher, ecart: c.ecart, part }
+            C { h: var(c.haut), b: c.bas.map(var), plancher: c.plancher, ecart: c.ecart, part, pieton_h: pieton(c.haut.0), pieton_b: c.bas.is_some_and(|b| pieton(b.0)) }
         })
         .collect();
     let lire = |y: &[f32], (a, b, u): (usize, usize, f32)| y[a] * (1.0 - u) + y[b] * u;
@@ -852,9 +877,15 @@ pub fn niveler(r: &mut Reseau, v: &[Contrainte], iterations: usize) -> Bilan {
             let e = (y[a] - y[b]).abs() - PENTE_ANOMALIE * d;
             if e > 1e-3 {
                 reste = true;
-                let s = if y[a] > y[b] { 0.5 * e } else { -0.5 * e };
-                y[a] -= s;
-                y[b] += s;
+                // Entre une route et une piétonne, seule la piétonne bouge
+                let (ka, kb) = match (route[a], route[b]) {
+                    (true, false) => (0.0, 1.0),
+                    (false, true) => (1.0, 0.0),
+                    _ => (0.5, 0.5),
+                };
+                let s = if y[a] > y[b] { e } else { -e };
+                y[a] -= s * ka;
+                y[b] += s * kb;
             }
         }
         if !reste {
@@ -935,6 +966,10 @@ pub fn niveler(r: &mut Reseau, v: &[Contrainte], iterations: usize) -> Bilan {
                 continue;
             }
             for &(j, dh) in &adj[i] {
+                // Une rampe ne passe jamais d'une piétonne à une route
+                if route[j] && !route[i] {
+                    continue;
+                }
                 let voulu = h - dh;
                 if voulu > d[j] + 1e-4 && !fixes[j] {
                     d[j] = voulu;
@@ -960,13 +995,13 @@ pub fn niveler(r: &mut Reseau, v: &[Contrainte], iterations: usize) -> Bilan {
                 continue;
             }
             let dh = (m * c.part + 0.01).min(MONTEE_MAX);
-            for v in [c.h.0, c.h.1] {
+            for v in [c.h.0, c.h.1].into_iter().filter(|&v| c.part > 0.0 && !(c.pieton_h && route[v])) {
                 monte[v] = (monte[v] + dh).min(MONTEE_MAX);
                 hauts.push(v);
             }
-            if let Some(b) = c.b {
+            if let Some(b) = c.b.filter(|_| c.part < 1.0) {
                 let db = (m * (1.0 - c.part) + 0.01).min(MONTEE_MAX);
-                for v in [b.0, b.1] {
+                for v in [b.0, b.1].into_iter().filter(|&v| !(c.pieton_b && route[v])) {
                     descend[v] = (descend[v] + db).min(MONTEE_MAX);
                     bas_.push(v);
                 }
