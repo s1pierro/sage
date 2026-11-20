@@ -1,6 +1,6 @@
 [package]
 name = "sage-carte"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 license = "PolyForm-Noncommercial-1.0.0"
 description = "Les cartes matérialisées de S.A.G.E. : un dossier de tuiles GLB et son index, écrits par Flow, lus par WhiteRoom et S.A.G.E."

@@ -14,6 +14,9 @@
 //!   coin, normales, coordonnées de texture ; la matière `sol` porte l'image de la
 //!   tuile (PNG) vue d'en haut, les autres des coordonnées en mètres (répétées tous
 //!   les `cote` mètres de leur texture) ;
+//!   la matière [`EAU`] est la surface de l'eau, à plat au niveau : elle se montre
+//!   (semi-transparente, le lit au travers) mais n'a pas de volume ; elle ne compte
+//!   pas pour la physique ;
 //! - `matieres/` : les réglages et images des matières (bitume, béton clair…).
 //!
 //! Le repère est celui du lieu : x et z au sol, y vers le haut, en mètres.
@@ -31,6 +34,8 @@ pub const INDEX: &str = "carte.txt";
 pub const TUILES: &str = "tuiles";
 /// Le sous-dossier des matières.
 pub const MATIERES: &str = "matieres";
+/// La matière de la surface de l'eau (à montrer, pas un solide).
+pub const EAU: &str = "eau";
 
 /// Une tuile dans l'index : sa clé (niveau, i, j), sa boîte au sol (x0, z0, x1, z1), ses
 /// hauteurs basse et haute, son nombre de triangles.

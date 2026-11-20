@@ -30,6 +30,7 @@ fn couleur(m: &str) -> [f64; 3] {
         "lit" => [0.33, 0.30, 0.24],
         "berge" | "remblai" | "quai_mur" => [0.62, 0.57, 0.48],
         "quai" => [0.55, 0.52, 0.47],
+        crate::EAU => [0.26, 0.50, 0.72],
         _ => [0.8, 0.8, 0.8],
     }
 }
@@ -88,7 +89,14 @@ pub fn ecrire(tu: &Tuile) -> Vec<u8> {
             pbr[0] = ("baseColorFactor", Json::Liste(vec![n(1.0), n(1.0), n(1.0), n(1.0)]));
             pbr.push(("baseColorTexture", o(vec![("index", n(0.0))])));
         }
-        materiaux.push(o(vec![("name", t(&p.matiere)), ("pbrMetallicRoughness", o(pbr))]));
+        // L'eau, semi-transparente
+        let mut mat = vec![("name", t(&p.matiere))];
+        if p.matiere == crate::EAU {
+            pbr[0] = ("baseColorFactor", Json::Liste(vec![n(c[0]), n(c[1]), n(c[2]), n(0.55)]));
+            mat.push(("alphaMode", t("BLEND")));
+        }
+        mat.push(("pbrMetallicRoughness", o(pbr)));
+        materiaux.push(o(mat));
         prims.push(o(vec![("attributes", o(vec![("POSITION", n(ap as f64)), ("NORMAL", n(an as f64)), ("TEXCOORD_0", n(au as f64))])), ("indices", n(ai as f64)), ("material", n((materiaux.len() - 1) as f64)), ("mode", n(4.0))]));
     }
     while bin.len() % 4 != 0 {
