@@ -474,7 +474,7 @@ mod tests {
         let pas = 64.0;
         let n = cote(pas);
         // Un pont de 5 m sur deux tuiles, à 8 m de haut, au-dessus d'un sol à 0
-        let pont = Route { genre: ROUTE, largeur: 5.0, points: vec![[30.0, 20.0, 8.0], [60.0, 20.0, 8.0], [90.0, 20.0, 8.0]] };
+        let pont = Route { revetement: 0, genre: ROUTE, largeur: 5.0, points: vec![[30.0, 20.0, 8.0], [60.0, 20.0, 8.0], [90.0, 20.0, 8.0]] };
         let r = Reel::new("Essai", 49.0, 1.0, 0.0, 0.0, pas, -50.0, &vec![0.0; n * n], &vec![false; n * n], Vec::new(), Vec::new(), vec![pont]);
         let crate::moteur::Bati3d { sommets: v, triangles: t, .. } = r.bati(0, 0).expect("le premier morceau");
         assert!(r.bati(1, 0).is_some() && r.bati(2, 0).is_none());
@@ -501,7 +501,7 @@ mod tests {
         let n = cote(pas);
         // Un relief en pente vers l'est (10 cm par mètre), une route nord-sud à 5 m
         let h: Vec<f32> = (0..n * n).map(|i| (origine() + (i % n) as f64 * pas) as f32 * 0.1).collect();
-        let route = Route { genre: ROUTE, largeur: 6.0, points: vec![[0.0, -200.0, 5.0], [0.0, 200.0, 5.0]] };
+        let route = Route { revetement: 0, genre: ROUTE, largeur: 6.0, points: vec![[0.0, -200.0, 5.0], [0.0, 200.0, 5.0]] };
         let r = Reel::new("Essai", 49.0, 1.0, 0.0, 0.0, pas, -50.0, &h, &vec![false; n * n], vec![route], Vec::new(), Vec::new());
         // Sur la chaussée et ses accotements, sa hauteur ; puis un talus (en remblai : le
         // relief est plus bas) jusqu'à le rejoindre

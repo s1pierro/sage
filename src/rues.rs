@@ -838,7 +838,7 @@ mod tests {
     use crate::regions::{Bati, Forme};
 
     fn rue() -> Vec<Route> {
-        vec![Route { genre: ROUTE, largeur: 6.0, points: vec![[-100.0, 30.0, 10.0], [200.0, 30.0, 10.0]] }]
+        vec![Route { revetement: 0, genre: ROUTE, largeur: 6.0, points: vec![[-100.0, 30.0, 10.0], [200.0, 30.0, 10.0]] }]
     }
 
     /// L'aire des triangles colorés de cette couleur, à plat à cette hauteur.
@@ -898,7 +898,7 @@ mod tests {
 
     #[test]
     fn la_chaussee_se_coupe_au_bout_de_la_route() {
-        let routes = vec![Route { genre: ROUTE, largeur: 6.0, points: vec![[-100.0, 30.0, 3.0], [32.0, 30.0, 3.0]] }];
+        let routes = vec![Route { revetement: 0, genre: ROUTE, largeur: 6.0, points: vec![[-100.0, 30.0, 3.0], [32.0, 30.0, 3.0]] }];
         let (v, _, _) = monter_ici(&routes, vec![], false, 0, 0);
         let a = aire(&v, teinte(ROUTE), 3.0 + DESSUS);
         assert!((a - 6.0 * 32.0).abs() < 4.0, "{a}");
@@ -941,7 +941,7 @@ mod tests {
         // Le long de la rue (bords à z 27 et 33), une voie piétonne de 2 m à z 36, et une
         // façade à z 38
         let mut routes = rue();
-        routes.push(Route { genre: crate::reel::PIETONNE, largeur: 2.0, points: vec![[0.0, 36.0, 10.0], [64.0, 36.0, 10.0]] });
+        routes.push(Route { revetement: 0, genre: crate::reel::PIETONNE, largeur: 2.0, points: vec![[0.0, 36.0, 10.0], [64.0, 36.0, 10.0]] });
         let b = maison();
         let (_, _, r) = monter_ici(&routes, vec![b.b.contour.as_slice()], true, 0, 0);
         let dessus: Vec<[f32; 3]> = r.iter().flat_map(|r| r.chunks(11)).filter(|s| s[4] > 0.9 && s[1] > 10.1).map(|s| [s[0], s[1], s[2]]).collect();
@@ -953,9 +953,9 @@ mod tests {
         // Deux rues de 6 m qui se croisent en (32, 32) : bords à 29 et 35 ; l'angle nord-est
         // du trottoir s'arrondit de 4 m autour de (35, 35)
         let routes = vec![
-            Route { genre: ROUTE, largeur: 6.0, points: vec![[-100.0, 32.0, 10.0], [32.0, 32.0, 10.0]] },
-            Route { genre: ROUTE, largeur: 6.0, points: vec![[32.0, 32.0, 10.0], [200.0, 32.0, 10.0]] },
-            Route { genre: ROUTE, largeur: 6.0, points: vec![[32.0, -100.0, 10.0], [32.0, 32.0, 10.0], [32.0, 200.0, 10.0]] },
+            Route { revetement: 0, genre: ROUTE, largeur: 6.0, points: vec![[-100.0, 32.0, 10.0], [32.0, 32.0, 10.0]] },
+            Route { revetement: 0, genre: ROUTE, largeur: 6.0, points: vec![[32.0, 32.0, 10.0], [200.0, 32.0, 10.0]] },
+            Route { revetement: 0, genre: ROUTE, largeur: 6.0, points: vec![[32.0, -100.0, 10.0], [32.0, 32.0, 10.0], [32.0, 200.0, 10.0]] },
         ];
         let (v, _, r) = monter_ici(&routes, vec![], true, 0, 0);
         // Des triangles du dessus (chaussée et trottoir) qui contiennent un point
@@ -993,9 +993,9 @@ mod tests {
         // Le même carrefour, et un bâtiment dans l'angle nord-est, ses façades à 6 m des
         // bordures (x et z de 41 à 55) : le trottoir remplit l'angle jusqu'à lui
         let routes = vec![
-            Route { genre: ROUTE, largeur: 6.0, points: vec![[-100.0, 32.0, 10.0], [32.0, 32.0, 10.0]] },
-            Route { genre: ROUTE, largeur: 6.0, points: vec![[32.0, 32.0, 10.0], [200.0, 32.0, 10.0]] },
-            Route { genre: ROUTE, largeur: 6.0, points: vec![[32.0, -100.0, 10.0], [32.0, 32.0, 10.0], [32.0, 200.0, 10.0]] },
+            Route { revetement: 0, genre: ROUTE, largeur: 6.0, points: vec![[-100.0, 32.0, 10.0], [32.0, 32.0, 10.0]] },
+            Route { revetement: 0, genre: ROUTE, largeur: 6.0, points: vec![[32.0, 32.0, 10.0], [200.0, 32.0, 10.0]] },
+            Route { revetement: 0, genre: ROUTE, largeur: 6.0, points: vec![[32.0, -100.0, 10.0], [32.0, 32.0, 10.0], [32.0, 200.0, 10.0]] },
         ];
         let c: &[[f32; 2]] = &[[41.0, 41.0], [55.0, 41.0], [55.0, 55.0], [41.0, 55.0]];
         let (_, _, r) = monter_ici(&routes, vec![c], true, 0, 0);
@@ -1019,8 +1019,8 @@ mod tests {
         // Une rue en deux morceaux bout à bout, coudée de 10° : le bord ne bouge pas au
         // raccord, et la chaussée ne s'y ouvre pas
         let routes = vec![
-            Route { genre: ROUTE, largeur: 6.0, points: vec![[-100.0, 30.0, 10.0], [32.0, 30.0, 10.0]] },
-            Route { genre: ROUTE, largeur: 6.0, points: vec![[32.0, 30.0, 10.0], [232.0, 30.0 + 200.0 * 0.176, 10.0]] },
+            Route { revetement: 0, genre: ROUTE, largeur: 6.0, points: vec![[-100.0, 30.0, 10.0], [32.0, 30.0, 10.0]] },
+            Route { revetement: 0, genre: ROUTE, largeur: 6.0, points: vec![[32.0, 30.0, 10.0], [232.0, 30.0 + 200.0 * 0.176, 10.0]] },
         ];
         let index = indexer(&routes);
         let (u, sol, sec) = (|_: f32, _: f32| true, |_: f32, _: f32| 10.0f32, |_: f32, _: f32| false);

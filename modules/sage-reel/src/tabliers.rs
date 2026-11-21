@@ -284,7 +284,7 @@ fn chaines(ponts: &[Route]) -> Vec<Chaine> {
             }
             pts.reverse();
         }
-        v.push(Chaine { membres, ligne: Route { genre: ponts[graine].genre, largeur, points: pts }, carrossable: sorte });
+        v.push(Chaine { membres, ligne: Route { revetement: ponts[graine].revetement, genre: ponts[graine].genre, largeur, points: pts }, carrossable: sorte });
     }
     v
 }
@@ -571,7 +571,7 @@ mod tests {
     use crate::{BUS, GRANDE, PIETONNE, ROUTE};
 
     fn pont(genre: u8, largeur: f32, pts: &[[f32; 3]]) -> Route {
-        Route { genre, largeur, points: pts.to_vec() }
+        Route { revetement: 0, genre, largeur, points: pts.to_vec() }
     }
 
     /// La hauteur du tablier au plus près de x (le long d'un pont vers l'est).

@@ -113,6 +113,13 @@ pub struct Demande {
 
 /// L'avancement d'une génération, lu par un autre thread : l'étape, sa part du tout (de 0
 /// à 1), le journal ; `arreter` l'interrompt (au prochain point d'arrêt).
+///
+/// Le suivi garde aussi de quoi surveiller une génération longue (`rapport`) : le temps
+/// passé dans chaque étape, une estimation de ce qui reste, les téléchargements (faits,
+/// leur volume, leur durée, ceux trouvés dans le cache, les échecs). Une génération
+/// l'écrit en continu dans son cache (`journal.txt`, chaque ligne datée, et `etat.txt`,
+/// le rapport, refait au plus chaque seconde) : on la suit de l'extérieur, même sans
+/// l'application.
 #[derive(Default)]
 pub struct Suivi {
     arret: AtomicBool,
@@ -120,6 +127,77 @@ pub struct Suivi {
     journal: Mutex<Vec<String>>,
     /// Imprimer aussi le journal (l'outil en ligne de commande).
     pub imprimer: bool,
+    mesures: Mutex<Mesures>,
+}
+
+/// Ce que le suivi mesure.
+#[derive(Default)]
+struct Mesures {
+    debut: Option<std::time::Instant>,
+    /// Les étapes : leur nom et leur début (s depuis le début).
+    etapes: Vec<(String, f64)>,
+    telecharges: usize,
+    octets: u64,
+    /// Le temps passé à télécharger (s, en additionnant les fils).
+    duree_telechargements: f64,
+    en_cache: usize,
+    echecs: usize,
+    /// Le dossier où écrire le journal et l'état, et la dernière écriture de l'état.
+    dossier: Option<PathBuf>,
+    ecrit: Option<std::time::Instant>,
+}
+
+/// Le rapport d'une génération (`Suivi::rapport`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Rapport {
+    pub etape: String,
+    pub part: f32,
+    /// Le temps écoulé depuis le début (s) et l'estimation de ce qui reste (s).
+    pub ecoule: f64,
+    pub reste: Option<f64>,
+    /// Les étapes passées et en cours : nom, durée (s).
+    pub etapes: Vec<(String, f64)>,
+    pub telecharges: usize,
+    pub octets: u64,
+    pub duree_telechargements: f64,
+    pub en_cache: usize,
+    pub echecs: usize,
+    pub derniere: Option<String>,
+    pub arrete: bool,
+}
+
+/// Une durée lisible : « 42 s », « 3 min 05 », « 1 h 12 ».
+pub fn duree(s: f64) -> String {
+    let s = s.max(0.0).round() as u64;
+    if s < 60 {
+        format!("{s} s")
+    } else if s < 3600 {
+        format!("{} min {:02}", s / 60, s % 60)
+    } else {
+        format!("{} h {:02}", s / 3600, s / 60 % 60)
+    }
+}
+
+impl Rapport {
+    /// Le rapport en quelques lignes.
+    pub fn texte(&self) -> String {
+        let mut t = format!("{} · {:.0} % · {}", if self.etape.is_empty() { "pas commencée" } else { &self.etape }, self.part * 100.0, duree(self.ecoule));
+        if let Some(r) = self.reste {
+            t += &format!(", reste ~{}", duree(r));
+        }
+        if self.arrete {
+            t += " · arrêt demandé";
+        }
+        let debit = if self.duree_telechargements > 0.0 { self.octets as f64 / self.duree_telechargements / 1e6 } else { 0.0 };
+        t += &format!("\ntéléchargements : {} ({:.1} Mo, {:.1} Mo/s par fil), {} dans le cache, {} échecs", self.telecharges, self.octets as f64 / 1e6, debit, self.en_cache, self.echecs);
+        for (n, d) in &self.etapes {
+            t += &format!("\n  {n} : {}", duree(*d));
+        }
+        if let Some(l) = &self.derniere {
+            t += &format!("\ndernière ligne : {l}");
+        }
+        t
+    }
 }
 
 impl Suivi {
@@ -130,12 +208,96 @@ impl Suivi {
         if let Ok(mut j) = self.journal.lock() {
             j.push(ligne.to_string());
         }
+        let (dossier, t) = match self.mesures.lock() {
+            Ok(m) => (m.dossier.clone(), m.debut.map_or(0.0, |d| d.elapsed().as_secs_f64())),
+            Err(_) => (None, 0.0),
+        };
+        if let Some(d) = dossier {
+            use std::io::Write;
+            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(d.join("journal.txt")) {
+                let _ = writeln!(f, "[{}] {ligne}", duree(t));
+            }
+        }
     }
 
     pub fn etape(&self, quoi: &str, part: f32) {
         if let Ok(mut e) = self.etat.lock() {
             *e = (quoi.to_string(), part.clamp(0.0, 1.0));
         }
+        if let Ok(mut m) = self.mesures.lock() {
+            let debut = *m.debut.get_or_insert_with(std::time::Instant::now);
+            let t = debut.elapsed().as_secs_f64();
+            // Une étape : le nom avant ses précisions entre parenthèses
+            let nom = quoi.split(" (").next().unwrap_or(quoi).to_string();
+            if m.etapes.last().is_none_or(|(n, _)| *n != nom) {
+                m.etapes.push((nom, t));
+            }
+        }
+        self.ecrire_etat(false);
+    }
+
+    /// Écrit le journal et l'état dans `dossier` (le cache de la génération).
+    pub fn ecrire_dans(&self, dossier: &Path) {
+        if let Ok(mut m) = self.mesures.lock() {
+            m.debut.get_or_insert_with(std::time::Instant::now);
+            m.dossier = Some(dossier.to_path_buf());
+        }
+        let _ = std::fs::write(dossier.join("journal.txt"), "");
+    }
+
+    /// `etat.txt` : le rapport, au plus chaque seconde (toujours si `forcer`).
+    fn ecrire_etat(&self, forcer: bool) {
+        let dossier = match self.mesures.lock() {
+            Ok(mut m) => {
+                if m.dossier.is_none() || (!forcer && m.ecrit.is_some_and(|e| e.elapsed().as_secs_f64() < 1.0)) {
+                    return;
+                }
+                m.ecrit = Some(std::time::Instant::now());
+                m.dossier.clone()
+            }
+            Err(_) => return,
+        };
+        if let Some(d) = dossier {
+            let _ = std::fs::write(d.join("etat.txt"), self.rapport().texte() + "\n");
+        }
+    }
+
+    /// Un téléchargement fini : réussi (son volume) ou non, et sa durée (s).
+    pub fn compter_telechargement(&self, octets: Option<u64>, secondes: f64) {
+        if let Ok(mut m) = self.mesures.lock() {
+            match octets {
+                Some(o) => {
+                    m.telecharges += 1;
+                    m.octets += o;
+                }
+                None => m.echecs += 1,
+            }
+            m.duree_telechargements += secondes;
+        }
+        self.ecrire_etat(false);
+    }
+
+    /// Un fichier trouvé dans le cache : rien à télécharger.
+    pub fn compter_cache(&self) {
+        if let Ok(mut m) = self.mesures.lock() {
+            m.en_cache += 1;
+        }
+    }
+
+    /// Où en est la génération.
+    pub fn rapport(&self) -> Rapport {
+        let (etape, part) = self.etat();
+        let mut r = Rapport { etape, part, arrete: self.arrete(), derniere: self.journal.lock().ok().and_then(|j| j.last().cloned()), ..Default::default() };
+        if let Ok(m) = self.mesures.lock() {
+            r.ecoule = m.debut.map_or(0.0, |d| d.elapsed().as_secs_f64());
+            r.etapes = m.etapes.iter().enumerate().map(|(i, (n, t))| (n.clone(), m.etapes.get(i + 1).map_or(r.ecoule, |e| e.1) - t)).collect();
+            (r.telecharges, r.octets, r.duree_telechargements, r.en_cache, r.echecs) = (m.telecharges, m.octets, m.duree_telechargements, m.en_cache, m.echecs);
+        }
+        // Ce qui reste, au rythme moyen, dès qu'on en a vu assez
+        if r.part > 0.02 && r.part < 1.0 && r.ecoule > 5.0 {
+            r.reste = Some(r.ecoule * (1.0 - r.part as f64) / r.part as f64);
+        }
+        r
     }
 
     /// L'étape et l'avancement.
@@ -150,6 +312,7 @@ impl Suivi {
 
     pub fn arreter(&self) {
         self.arret.store(true, Ordering::Relaxed);
+        self.ecrire_etat(true);
     }
 
     pub fn arrete(&self) -> bool {
@@ -166,6 +329,15 @@ impl Suivi {
     }
 }
 
+/// Télécharge en comptant (`Suivi::compter_telechargement`).
+fn telecharger(r: &dyn Reseau, s: &Suivi, url: &str, post: Option<&str>, f: &Path) -> Result<(), String> {
+    let t = std::time::Instant::now();
+    let rendu = r.telecharger(url, post, f);
+    let octets = rendu.as_ref().ok().map(|_| std::fs::metadata(f).map_or(0, |m| m.len()));
+    s.compter_telechargement(octets, t.elapsed().as_secs_f64());
+    rendu
+}
+
 /// Le dossier des téléchargements d'une sortie.
 pub fn cache(sortie: &Path) -> PathBuf {
     PathBuf::from(format!("{}.cache", sortie.display()))
@@ -173,12 +345,24 @@ pub fn cache(sortie: &Path) -> PathBuf {
 
 /// Prépare le lieu demandé, l'écrit dans `d.sortie` et le rend.
 pub fn generer(d: &Demande, r: &dyn Reseau, s: &Suivi) -> Result<Lieu, String> {
-    let (nom, lat, lon, pas) = (d.nom.as_str(), d.lat, d.lon, d.pas);
+    let pas = d.pas;
     if !(0.5..=64.0).contains(&pas) {
         return Err(format!("pas de {pas} m : entre 0,5 et 64"));
     }
     let cache = cache(&d.sortie);
     std::fs::create_dir_all(&cache).map_err(|e| format!("{} : {e}", cache.display()))?;
+    s.ecrire_dans(&cache);
+    let rendu = generer_dans(d, r, s, &cache);
+    match &rendu {
+        Ok(_) => s.noter(&format!("fini en {}", duree(s.rapport().ecoule))),
+        Err(e) => s.noter(&format!("échec : {e}")),
+    }
+    s.ecrire_etat(true);
+    rendu
+}
+
+fn generer_dans(d: &Demande, r: &dyn Reseau, s: &Suivi, cache: &Path) -> Result<Lieu, String> {
+    let (nom, lat, lon, pas) = (d.nom.as_str(), d.lat, d.lon, d.pas);
     let g = Grille::emprise(pas, d.largeur, d.longueur);
     let entiere = g.est_entiere(pas);
     // La grille du lieu : nx × nz points, le premier en (ox, oz) au repère du jeu
@@ -210,7 +394,9 @@ pub fn generer(d: &Demande, r: &dyn Reseau, s: &Suivi) -> Result<Lieu, String> {
                     "https://data.geopf.fr/wms-r/wms?SERVICE=WMS&VERSION=1.3.0&REQUEST=GetMap&LAYERS=ELEVATION.ELEVATIONGRIDCOVERAGE.HIGHRES&STYLES=&FORMAT=image/x-bil;bits=32&CRS=EPSG:2154&BBOX={minx},{miny},{maxx},{maxy}&WIDTH={w}&HEIGHT={ht}"
                 );
                 s.noter(&format!("relief IGN {a0}, {b0} ({w} × {ht})…"));
-                r.telecharger(&url, None, &f).map_err(|e| format!("le relief de l'IGN ne répond pas : {e}"))?;
+                telecharger(r, s, &url, None, &f).map_err(|e| format!("le relief de l'IGN ne répond pas : {e}"))?;
+            } else {
+                s.compter_cache();
             }
             let o = std::fs::read(&f).map_err(|e| e.to_string())?;
             if o.len() != w * ht * 4 {
@@ -405,31 +591,38 @@ pub fn generer(d: &Demande, r: &dyn Reseau, s: &Suivi) -> Result<Lieu, String> {
     let mut longueur = 0.0;
     // Les ponts et les tunnels à part : mis bout à bout, ils vont d'un bout à l'autre
     let (mut lignes_ponts, mut lignes_tunnels) = (Vec::new(), Vec::new());
+    // Les voies OSM par revêtement (le journal)
+    let mut revetements = [0usize; crate::REVETEMENTS as usize];
     for e in jr.get("elements").and_then(J::liste).unwrap_or(&[]) {
         let Some((genre, largeur, ou)) = genre_route(e.get("tags")) else { continue };
+        let rev = revetement_osm(e.get("tags"), genre);
+        if let Some(c) = revetements.get_mut(rev as usize) {
+            *c += 1;
+        }
         let l = ligne(e.get("geometry").unwrap_or(&J::Nul));
         if l.len() < 2 {
             continue;
         }
         match ou {
-            tr::PONT => lignes_ponts.push((genre, largeur, l, 0)),
-            tr::TUNNEL => lignes_tunnels.push((genre, largeur, l, niveau_osm(e.get("tags"), true))),
+            tr::PONT => lignes_ponts.push((genre, largeur, l, 0, rev)),
+            tr::TUNNEL => lignes_tunnels.push((genre, largeur, l, niveau_osm(e.get("tags"), true), rev)),
             _ => {
                 longueur += l.windows(2).map(|s| (s[1].0 - s[0].0).hypot(s[1].1 - s[0].1) * pas).sum::<f64>();
                 let (pts, ys) = au_sol(&l);
-                routes.extend(decouper(&pts, &ys).into_iter().map(|points| Route { genre, largeur, points }));
+                routes.extend(decouper(&pts, &ys).into_iter().map(|points| Route { revetement: rev, genre, largeur, points }));
             }
         }
     }
     for (liste, tunnel, sortie) in [(&lignes_ponts, false, &mut ponts), (&lignes_tunnels, true, &mut tunnels)] {
-        let l: Vec<_> = liste.iter().map(|(_, _, l, _)| l.clone()).collect();
+        let l: Vec<_> = liste.iter().map(|(_, _, l, _, _)| l.clone()).collect();
         let prof: Vec<f32> = liste.iter().map(|e| tr::profondeur(e.3)).collect();
-        for ((genre, largeur, _, _), (pts, ys)) in liste.iter().zip(ouvrages(&l, pas, &relief, niveau, tunnel, &prof)) {
-            sortie.extend(decouper(&pts, &ys).into_iter().map(|points| Route { genre: *genre, largeur: *largeur, points }));
+        for ((genre, largeur, _, _, rev), (pts, ys)) in liste.iter().zip(ouvrages(&l, pas, &relief, niveau, tunnel, &prof)) {
+            sortie.extend(decouper(&pts, &ys).into_iter().map(|points| Route { revetement: *rev, genre: *genre, largeur: *largeur, points }));
         }
     }
     s.noter(&format!("{} ponts OSM, {} tabliers ; {} tunnels OSM, {} morceaux", lignes_ponts.len(), ponts.len(), lignes_tunnels.len(), tunnels.len()));
     s.noter(&format!("{} routes, {:.0} km", routes.len(), longueur / 1000.0));
+    s.noter(&format!("revêtements des voies OSM : {}", crate::NOMS_REVETEMENTS.iter().zip(revetements).map(|(n, c)| format!("{n} {c}")).collect::<Vec<_>>().join(", ")));
 
     // Les cours d'eau : leurs tracés (axes), coupés au bord de la carte
     let jc = overpass(r, s, &cache.join(format!("osm_cours_eau{suffixe}.json")), "cours d'eau", &format!("way[\"waterway\"~\"^(river|canal|stream|ditch|drain)$\"]({bb});out tags geom;"))?;
@@ -827,7 +1020,7 @@ fn overpass(r: &dyn Reseau, s: &Suivi, f: &Path, quoi: &str, requete: &str) -> R
             for url in OVERPASS {
                 s.suivre()?;
                 s.noter(&format!("{quoi} OSM ({url})…"));
-                let rendu = r.telecharger(url, Some(&q), f);
+                let rendu = telecharger(r, s, url, Some(&q), f);
                 if rendu.is_ok() && std::fs::read(f).is_ok_and(|o| o.first() == Some(&b'{')) {
                     ok = true;
                     break 'essais;
@@ -845,6 +1038,8 @@ fn overpass(r: &dyn Reseau, s: &Suivi, f: &Path, quoi: &str, requete: &str) -> R
         if !ok {
             return Err("Overpass ne répond pas : réessayez plus tard".into());
         }
+    } else {
+        s.compter_cache();
     }
     let texte = std::fs::read_to_string(f).map_err(|e| e.to_string())?;
     json::lire(&texte).ok_or_else(|| {
@@ -1139,6 +1334,29 @@ fn genre_route(tags: Option<&J>) -> Option<(u8, f32, u8)> {
     Some((genre, largeur, pont))
 }
 
+/// Le revêtement d'une voie d'après son `surface=*` ; sans étiquette, selon son genre
+/// (un chemin est en gravier, un sentier en terre, le reste en bitume).
+fn revetement_osm(tags: Option<&J>, genre: u8) -> u8 {
+    use crate::{BETON, BITUME, CHEMIN, GRAVIER, HERBE, PAVES, SENTIER, TERRE};
+    let surface = tags.and_then(|t| t.get("surface")).and_then(J::txt).unwrap_or("");
+    // « paving_stones:30 », « concrete:plates » : la famille avant les deux-points
+    let famille = surface.split(':').next().unwrap_or("");
+    match (surface, famille) {
+        ("grass_paver", _) => HERBE,
+        (_, "asphalt" | "paved" | "chipseal" | "tartan" | "rubber") => BITUME,
+        (_, "concrete" | "metal" | "wood") => BETON,
+        (_, "paving_stones" | "sett" | "cobblestone" | "unhewn_cobblestone" | "bricks" | "stone" | "brick") => PAVES,
+        (_, "gravel" | "fine_gravel" | "pebblestone" | "compacted" | "rock" | "shells") => GRAVIER,
+        (_, "dirt" | "earth" | "ground" | "mud" | "sand" | "clay" | "unpaved" | "soil") => TERRE,
+        (_, "grass") => HERBE,
+        _ => match genre {
+            CHEMIN => GRAVIER,
+            SENTIER => TERRE,
+            _ => BITUME,
+        },
+    }
+}
+
 /// Un bâtiment sans mesure : la hauteur d'OSM ; deux pans à 40° (au plus 40 % de la
 /// hauteur) sur les maisons, annexes, édifices et petits immeubles, plat sinon.
 fn par_defaut(genre: u8, pied: f32, toit: f32, haut: f32, contour: Vec<[f32; 2]>) -> Batiment {
@@ -1193,6 +1411,9 @@ fn telecharger_mnh(r: &dyn Reseau, s: &Suivi, dossier: &Path, blocs: &[(i32, i32
     let reste: Vec<(i32, i32)> = blocs.iter().cloned().filter(|k| !mnh_present(&fichier_mnh(dossier, *k))).collect();
     let total = reste.len();
     s.noter(&format!("MNH : {} blocs de 250 m, {} déjà là, {:.2} Go à télécharger", blocs.len(), blocs.len() - total, (total as u64 * taille) as f64 / 1e9));
+    for _ in total..blocs.len() {
+        s.compter_cache();
+    }
     if total == 0 {
         return Ok(());
     }
@@ -1219,7 +1440,7 @@ fn telecharger_mnh(r: &dyn Reseau, s: &Suivi, dossier: &Path, blocs: &[(i32, i32
                     if s.arrete() {
                         break;
                     }
-                    if r.telecharger(&url, None, &f).is_ok() && mnh_present(&f) {
+                    if telecharger(r, s, &url, None, &f).is_ok() && mnh_present(&f) {
                         ok = true;
                         break;
                     }
@@ -1499,6 +1720,22 @@ mod tests {
         assert_eq!(niveau_arret(json::lire(r#"{"name":"Europe"}"#).as_ref()), (0, false));
         assert_eq!(niveau_osm(json::lire(r#"{"layer":"-2"}"#).as_ref(), true), -2);
         assert_eq!(niveau_osm(None, true), -1);
+    }
+
+    #[test]
+    fn le_revetement_vient_de_surface() {
+        use crate::{BETON, BITUME, GRAVIER, HERBE, PAVES, TERRE};
+        let r = |t: &str, g: u8| revetement_osm(json::lire(t).as_ref(), g);
+        assert_eq!(r(r#"{"surface":"sett"}"#, crate::ROUTE), PAVES);
+        assert_eq!(r(r#"{"surface":"paving_stones:30"}"#, crate::PIETONNE), PAVES);
+        assert_eq!(r(r#"{"surface":"concrete:plates"}"#, crate::ROUTE), BETON);
+        assert_eq!(r(r#"{"surface":"asphalt"}"#, crate::CHEMIN), BITUME);
+        assert_eq!(r(r#"{"surface":"compacted"}"#, crate::CHEMIN), GRAVIER);
+        assert_eq!(r(r#"{"surface":"dirt"}"#, crate::SENTIER), TERRE);
+        assert_eq!(r(r#"{"surface":"grass_paver"}"#, crate::SERVICE), HERBE);
+        assert_eq!(r("{}", crate::ROUTE), BITUME);
+        assert_eq!(r("{}", crate::CHEMIN), GRAVIER);
+        assert_eq!(r("{}", crate::SENTIER), TERRE);
     }
 
     #[test]

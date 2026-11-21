@@ -21,6 +21,8 @@
 //! - Les cours d'eau (`cours_eau`) : le tracé de chaque rivière, canal, ruisseau ou
 //!   fossé, son nom, sa largeur quand OSM la donne (depuis le format 9) ; les surfaces
 //!   d'eau d'OSM en vecteurs, leurs côtés étant les berges (depuis le format 10).
+//! - Le revêtement de chaque voie (routes, ponts, tunnels) d'après le `surface=*`
+//!   d'OSM : bitume, béton, pavés, gravier, terre, herbe (depuis le format 11).
 //! - L'occupation du sol (bois, prés et parcs, champs, quartiers habités, zones
 //!   d'activité) : une classe par point d'une grille deux fois plus lâche que le relief.
 //!
@@ -44,7 +46,7 @@ pub const DEMI_CARTE: i32 = 156;
 pub const DEPART: [f32; 2] = [TAILLE / 2.0, TAILLE / 2.0];
 
 pub const MAGIQUE: &[u8; 8] = b"SAGEREEL";
-pub const FORMAT: u32 = 10;
+pub const FORMAT: u32 = 11;
 
 /// Le texte à citer.
 pub const SOURCES: &str = "Relief et hauteurs © IGN (RGE ALTI, LiDAR HD) · eau, routes, bâtiments et occupation du sol © les contributeurs OpenStreetMap";
@@ -68,6 +70,19 @@ pub const SENTIER: u8 = 5;
 pub const BUS: u8 = 6;
 /// Le nombre de genres de routes.
 pub const GENRES: u8 = 7;
+
+/// Les revêtements des voies (le `surface=*` d'OSM), dans l'ordre de ceux du son des
+/// pneus (`sage-son-pneus::REVETEMENTS`).
+pub const BITUME: u8 = 0;
+pub const BETON: u8 = 1;
+pub const PAVES: u8 = 2;
+pub const GRAVIER: u8 = 3;
+pub const TERRE: u8 = 4;
+pub const HERBE: u8 = 5;
+/// Le nombre de revêtements.
+pub const REVETEMENTS: u8 = 6;
+/// Le nom de chaque revêtement, dans l'ordre des valeurs.
+pub const NOMS_REVETEMENTS: [&str; REVETEMENTS as usize] = ["bitume", "béton", "pavés", "gravier", "terre", "herbe"];
 
 /// Le nom de chaque genre de route, dans l'ordre des valeurs.
 pub const NOMS_GENRES: [&str; GENRES as usize] = ["Grande route", "Route", "Service", "Piétonne", "Chemin", "Sentier", "Bus"];
@@ -202,6 +217,8 @@ pub fn trianguler(c: &[[f32; 2]]) -> Vec<[usize; 3]> {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Route {
+    /// Le revêtement (`BITUME`, `BETON`, `PAVES`, `GRAVIER`, `TERRE`, `HERBE`).
+    pub revetement: u8,
     pub genre: u8,
     pub largeur: f32,
     /// x, z du jeu, et la hauteur de la chaussée.
@@ -477,13 +494,13 @@ impl Lieu {
                     if dans(p) {
                         m.push(*p);
                     } else if m.len() > 1 {
-                        v.push(Route { genre: r.genre, largeur: r.largeur, points: std::mem::take(&mut m) });
+                        v.push(Route { revetement: r.revetement, genre: r.genre, largeur: r.largeur, points: std::mem::take(&mut m) });
                     } else {
                         m.clear();
                     }
                 }
                 if m.len() > 1 {
-                    v.push(Route { genre: r.genre, largeur: r.largeur, points: m });
+                    v.push(Route { revetement: r.revetement, genre: r.genre, largeur: r.largeur, points: m });
                 }
             }
             v
@@ -728,6 +745,11 @@ impl Lieu {
         self.transports.ecrire(&mut o);
         cours_eau::ecrire(&mut o, &self.cours_eau);
         cours_eau::ecrire_surfaces(&mut o, &self.surfaces_eau);
+        // Les revêtements des routes, des ponts et des tunnels (format 11), dans leur ordre
+        for v in [&self.routes, &self.ponts, &self.transports.tunnels] {
+            o.extend_from_slice(&(v.len() as u32).to_le_bytes());
+            o.extend(v.iter().map(|r| r.revetement));
+        }
         o
     }
 
@@ -744,7 +766,7 @@ impl Lieu {
     /// Lit un fichier ; une erreur dite en clair.
     pub fn lire(f: &std::path::Path) -> Result<Lieu, String> {
         let o = std::fs::read(f).map_err(|e| e.to_string())?;
-        Lieu::depuis_octets(&o).ok_or_else(|| "ce n'est pas un lieu réel lisible (format SAGEREEL 1 à 8)".to_string())
+        Lieu::depuis_octets(&o).ok_or_else(|| "ce n'est pas un lieu réel lisible (format SAGEREEL 1 à 11)".to_string())
     }
 
     /// Relu ; rien si ce n'est pas un lieu réel de ce format, ou pour une autre carte.
@@ -809,7 +831,7 @@ impl Lieu {
                 let m = u32_(prendre(4)?) as usize;
                 let o = prendre(m * 12)?;
                 let points = o.chunks(12).map(|c| [f32_(&c[0..4]), f32_(&c[4..8]), f32_(&c[8..12])]).collect();
-                routes.push(Route { genre, largeur, points });
+                routes.push(Route { revetement: 0, genre, largeur, points });
             }
             routes
         }}}
@@ -856,6 +878,18 @@ impl Lieu {
         } else {
             Vec::new()
         };
+        let (mut routes, mut ponts, mut transports) = (routes, ponts, transports);
+        if format >= 11 {
+            for v in [&mut routes, &mut ponts, &mut transports.tunnels] {
+                if u32_(prendre(4)?) as usize != v.len() {
+                    return None;
+                }
+                let n = v.len();
+                for (r, &b) in v.iter_mut().zip(prendre(n)?) {
+                    r.revetement = b.min(REVETEMENTS - 1);
+                }
+            }
+        }
         if k != o.len() {
             return None;
         }
@@ -886,7 +920,7 @@ mod tests {
         let eau: Vec<bool> = (0..n * n).map(|i| i % n < n / 2).collect();
         let m = cote_sol(n);
         let b = Batiment::plat(MAISON, -1.0, 7.0, vec![[10.0, 10.0], [30.0, 10.0], [30.0, 20.0]]);
-        let r = Route { genre: ROUTE, largeur: 6.0, points: vec![[0.0, -200.0, 5.0], [0.0, 200.0, 5.0]] };
+        let r = Route { revetement: PAVES, genre: ROUTE, largeur: 6.0, points: vec![[0.0, -200.0, 5.0], [0.0, 200.0, 5.0]] };
         let mut l = Lieu::new("Essai", 49.0, 1.0, 1000.0, 2000.0, pas, 3.0, &h, &eau, vec![r.clone()], vec![b], vec![r.clone()]).avec_sol(vec![BOIS; m * m]);
         {
             use transports::*;

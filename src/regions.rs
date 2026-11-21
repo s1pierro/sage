@@ -736,7 +736,7 @@ impl Region {
             for k in 0..genres.len().min(largeurs.len()).min(debuts.len().saturating_sub(1)) {
                 let (d, fin) = (debuts[k] as usize * 3, debuts[k + 1] as usize * 3);
                 let p = points.get(d..fin).ok_or_else(|| e("routes"))?;
-                routes.push(Route { genre: genres[k], largeur: largeurs[k], points: p.chunks(3).map(|q| [q[0] + x0, q[1] + z0, q[2]]).collect() });
+                routes.push(Route { revetement: 0, genre: genres[k], largeur: largeurs[k], points: p.chunks(3).map(|q| [q[0] + x0, q[1] + z0, q[2]]).collect() });
             }
         }
         // Les instances procédurales ; les autres attendent leur générateur
@@ -1586,9 +1586,9 @@ mod tests {
         let n = cote(pas);
         let h: Vec<f32> = (0..n * n).map(|i| ((i % n) as f32 * 0.7).sin() * 4.0 + (i / n) as f32 * 0.1).collect();
         let eau: Vec<bool> = (0..n * n).map(|i| i % n < 3).collect();
-        let route = Route { genre: ROUTE, largeur: 6.0, points: vec![[-300.0, 40.0, 5.0], [700.0, 60.0, 6.0]] };
+        let route = Route { revetement: 0, genre: ROUTE, largeur: 6.0, points: vec![[-300.0, 40.0, 5.0], [700.0, 60.0, 6.0]] };
         let maison = Batiment::plat(MAISON, 0.0, 7.0, vec![[100.0, 100.0], [112.0, 100.0], [112.0, 110.0], [100.0, 110.0]]);
-        let pont = Route { genre: ROUTE, largeur: 5.0, points: vec![[300.0, 300.0, 9.0], [360.0, 300.0, 9.0]] };
+        let pont = Route { revetement: 0, genre: ROUTE, largeur: 5.0, points: vec![[300.0, 300.0, 9.0], [360.0, 300.0, 9.0]] };
         let m = cote_sol(n);
         Arc::new(Reel::new("Essai", 49.0, 1.0, 0.0, 0.0, pas, -50.0, &h, &eau, vec![route], vec![maison], vec![pont]).avec_sol(vec![BOIS; m * m]))
     }

@@ -453,7 +453,7 @@ pub fn travees(routes: &[Route], index: &Index) -> Vec<Route> {
                 let centre = s_h[ih as usize] + th * lh;
                 let n = ((2.0 * demi / 4.0).ceil() as usize).max(1);
                 let points = (0..=n).map(|j| point_a(rh, s_h, centre - demi + 2.0 * demi * j as f32 / n as f32)).collect();
-                sortie.push(Route { genre: rh.genre, largeur: rh.largeur, points });
+                sortie.push(Route { revetement: rh.revetement, genre: rh.genre, largeur: rh.largeur, points });
             }
         }
     }
@@ -470,11 +470,11 @@ mod tests {
         // Deux routes qui se rejoignent en (0, 0) à des hauteurs différentes, et une qui
         // finit au bout d'un pont
         let mut routes = vec![
-            Route { genre: ROUTE, largeur: 6.0, points: (0..=10).map(|i| [-(i as f32) * 8.0, 0.0, 4.0]).collect() },
-            Route { genre: ROUTE, largeur: 6.0, points: (0..=10).map(|i| [0.0, i as f32 * 8.0, 6.0]).collect() },
-            Route { genre: ROUTE, largeur: 6.0, points: (0..=10).map(|i| [100.0 + i as f32 * 8.0, 0.0, 2.0]).collect() },
+            Route { revetement: 0, genre: ROUTE, largeur: 6.0, points: (0..=10).map(|i| [-(i as f32) * 8.0, 0.0, 4.0]).collect() },
+            Route { revetement: 0, genre: ROUTE, largeur: 6.0, points: (0..=10).map(|i| [0.0, i as f32 * 8.0, 6.0]).collect() },
+            Route { revetement: 0, genre: ROUTE, largeur: 6.0, points: (0..=10).map(|i| [100.0 + i as f32 * 8.0, 0.0, 2.0]).collect() },
         ];
-        let pont = Route { genre: ROUTE, largeur: 6.0, points: vec![[90.0, 0.0, 3.0], [100.0, 0.0, 3.0]] };
+        let pont = Route { revetement: 0, genre: ROUTE, largeur: 6.0, points: vec![[90.0, 0.0, 3.0], [100.0, 0.0, 3.0]] };
         profiler_avec(&mut routes, &[pont], LISSAGE);
         assert!((routes[0].points[0][2] - 5.0).abs() < 1e-4 && (routes[1].points[0][2] - 5.0).abs() < 1e-4);
         // L'écart s'efface vers le bout libre
@@ -489,9 +489,9 @@ mod tests {
         // et une voie piétonne bien plus haute qui la rejoint au milieu
         let y = |i: i32| 10.0 + if i % 2 == 0 { 1.0 } else { -1.0 };
         let mut routes = vec![
-            Route { genre: ROUTE, largeur: 6.0, points: (0..=20).map(|i| [i as f32 * 7.0, 0.0, y(i)]).collect() },
-            Route { genre: ROUTE, largeur: 6.0, points: (20..=40).map(|i| [i as f32 * 7.0, 0.0, y(i)]).collect() },
-            Route { genre: crate::reel::PIETONNE, largeur: 2.0, points: (0..=10).map(|i| [140.0, i as f32 * 7.0, if i == 0 { y(20) } else { 30.0 }]).collect() },
+            Route { revetement: 0, genre: ROUTE, largeur: 6.0, points: (0..=20).map(|i| [i as f32 * 7.0, 0.0, y(i)]).collect() },
+            Route { revetement: 0, genre: ROUTE, largeur: 6.0, points: (20..=40).map(|i| [i as f32 * 7.0, 0.0, y(i)]).collect() },
+            Route { revetement: 0, genre: crate::reel::PIETONNE, largeur: 2.0, points: (0..=10).map(|i| [140.0, i as f32 * 7.0, if i == 0 { y(20) } else { 30.0 }]).collect() },
         ];
         profiler_avec(&mut routes, &[], LISSAGE);
         // Plus de heurt sur la rue, au carrefour des deux voies non plus ; la voie
@@ -507,7 +507,7 @@ mod tests {
     fn un_croisement_sans_carrefour_a_sa_travee() {
         // Une route à 0 m d'est en ouest, une autre à 6 m du nord au sud, sans point commun
         let routes =
-            vec![Route { genre: ROUTE, largeur: 6.0, points: vec![[-50.0, 1.0, 0.0], [50.0, 1.0, 0.0]] }, Route { genre: ROUTE, largeur: 4.0, points: vec![[2.0, -50.0, 6.0], [2.0, 50.0, 6.0]] }];
+            vec![Route { revetement: 0, genre: ROUTE, largeur: 6.0, points: vec![[-50.0, 1.0, 0.0], [50.0, 1.0, 0.0]] }, Route { revetement: 0, genre: ROUTE, largeur: 4.0, points: vec![[2.0, -50.0, 6.0], [2.0, 50.0, 6.0]] }];
         let index = indexer(&routes);
         // Le sol est à la plus basse au croisement, à la plus haute sur sa plateforme
         // hors de celle de l'autre, et un talus les relie
@@ -527,7 +527,7 @@ mod tests {
     fn le_sol_va_a_plat_de_la_rue_au_batiment() {
         // Une rue à 5 m d'est en ouest (bords à z ±3), une maison de z 10 à 20 au nord,
         // sur un relief à 12 m
-        let routes = vec![Route { genre: ROUTE, largeur: 6.0, points: vec![[-60.0, 0.0, 5.0], [60.0, 0.0, 5.0]] }];
+        let routes = vec![Route { revetement: 0, genre: ROUTE, largeur: 6.0, points: vec![[-60.0, 0.0, 5.0], [60.0, 0.0, 5.0]] }];
         let index = indexer(&routes);
         let maison: &[[f32; 2]] = &[[-5.0, 10.0], [5.0, 10.0], [5.0, 20.0], [-5.0, 20.0]];
         let a = abords(&routes, &[maison], 12.0, PORTEE);

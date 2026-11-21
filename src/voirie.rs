@@ -76,11 +76,11 @@ pub fn appliquer_avec(routes: &mut Vec<Route>, troncons: &[Troncon]) {
             let r = routes.remove(k);
             let mut morceaux = Vec::new();
             if ia > 0 {
-                morceaux.push(Route { genre: r.genre, largeur: r.largeur, points: r.points[..=ia].to_vec() });
+                morceaux.push(Route { revetement: r.revetement, genre: r.genre, largeur: r.largeur, points: r.points[..=ia].to_vec() });
             }
-            morceaux.push(Route { genre: t.genre.unwrap_or(r.genre), largeur: t.largeur.unwrap_or(r.largeur), points: r.points[ia..=ib].to_vec() });
+            morceaux.push(Route { revetement: r.revetement, genre: t.genre.unwrap_or(r.genre), largeur: t.largeur.unwrap_or(r.largeur), points: r.points[ia..=ib].to_vec() });
             if ib + 1 < r.points.len() {
-                morceaux.push(Route { genre: r.genre, largeur: r.largeur, points: r.points[ib..].to_vec() });
+                morceaux.push(Route { revetement: r.revetement, genre: r.genre, largeur: r.largeur, points: r.points[ib..].to_vec() });
             }
             let n = morceaux.len();
             for (j, m) in morceaux.into_iter().enumerate() {
@@ -260,10 +260,10 @@ mod tests {
 
     fn rue() -> Vec<Route> {
         vec![
-            Route { genre: ROUTE, largeur: 6.0, points: (0..=10).map(|i| [i as f32 * 10.0, 0.0, 1.0]).collect() },
+            Route { revetement: 0, genre: ROUTE, largeur: 6.0, points: (0..=10).map(|i| [i as f32 * 10.0, 0.0, 1.0]).collect() },
             // Une rue qui croise en (30, 0) et une autre qui part de (70, 0)
-            Route { genre: SERVICE, largeur: 4.0, points: vec![[30.0, -20.0, 1.0], [30.0, 0.0, 1.0], [30.0, 20.0, 1.0]] },
-            Route { genre: SERVICE, largeur: 4.0, points: vec![[70.0, 0.0, 1.0], [70.0, 30.0, 1.0]] },
+            Route { revetement: 0, genre: SERVICE, largeur: 4.0, points: vec![[30.0, -20.0, 1.0], [30.0, 0.0, 1.0], [30.0, 20.0, 1.0]] },
+            Route { revetement: 0, genre: SERVICE, largeur: 4.0, points: vec![[70.0, 0.0, 1.0], [70.0, 30.0, 1.0]] },
         ]
     }
 
