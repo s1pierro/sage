@@ -1,6 +1,6 @@
 [package]
 name = "sage-carte"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 license = "PolyForm-Noncommercial-1.0.0"
 description = "Les cartes matérialisées de S.A.G.E. : un dossier de tuiles GLB et son index, écrits par Flow, lus par WhiteRoom et S.A.G.E."
@@ -8,3 +8,6 @@ description = "Les cartes matérialisées de S.A.G.E. : un dossier de tuiles GLB
 # Aucune dépendance : partagé par Flow (qui écrit) et WhiteRoom / S.A.G.E. (qui
 # lisent). Les images (PNG) sont rendues telles quelles, à décoder par qui lit.
 [dependencies]
+
+[dev-dependencies]
+sage-reel = { path = "../sage-reel" }

@@ -26,6 +26,8 @@ fn t(s: &str) -> Json {
 fn couleur(m: &str) -> [f64; 3] {
     match m {
         "chaussee" => [0.22, 0.22, 0.23],
+        // Le bitume bordeaux des voies de bus en site propre
+        "chaussee_bus" => [0.36, 0.11, 0.13],
         "beton" => [0.80, 0.79, 0.76],
         // Les tons des bâtiments (Flow : maquette::matiere::TEINTES_BATI)
         "bati_0" => [0.92, 0.90, 0.85],
