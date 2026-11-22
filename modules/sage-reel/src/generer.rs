@@ -618,6 +618,27 @@ fn generer_dans(d: &Demande, r: &dyn Reseau, s: &Suivi, cache: &Path) -> Result<
     s.etape("routes et ponts", 0.22);
     // 4. Les routes, hors ponts et tunnels, la chaussée lissée le long de la route
     let jr = overpass(r, s, &cache.join(format!("osm_routes{suffixe}.json")), "routes", &format!("way[\"highway\"]({bb});out tags geom;"))?;
+    // Les dalles des tranchées couvertes : le LiDAR ôte les dalles comme les ponts, le
+    // relief au-dessus d'un tunnel peut être le fond de la tranchée ; comblé avant d'y
+    // poser les routes qui passent dessus
+    {
+        let lignes: Vec<(Vec<(f64, f64)>, f32)> = jr
+            .get("elements")
+            .and_then(J::liste)
+            .unwrap_or(&[])
+            .iter()
+            .filter(|e| place_pietonne(e.get("tags")).is_none())
+            .filter_map(|e| {
+                let (_, largeur, ou) = genre_route(e.get("tags"))?;
+                (ou == crate::transports::TUNNEL).then(|| (ligne(e.get("geometry").unwrap_or(&J::Nul)), largeur))
+            })
+            .filter(|(l, _)| l.len() >= 2)
+            .collect();
+        let (n, points) = combler_dalles(&mut h, nx, nz, pas, &lignes);
+        if n > 0 {
+            s.noter(&format!("{n} dalles de tranchées couvertes comblées ({points} points du relief)"));
+        }
+    }
     let relief = |gx: f64, gz: f64| -> f32 {
         let (a, b) = (gx.clamp(0.0, (nx - 1) as f64), gz.clamp(0.0, (nz - 1) as f64));
         let (a0, b0) = ((a as usize).min(nx - 2), (b as usize).min(nz - 2));
@@ -665,7 +686,18 @@ fn generer_dans(d: &Demande, r: &dyn Reseau, s: &Suivi, cache: &Path) -> Result<
     let (mut lignes_ponts, mut lignes_tunnels) = (Vec::new(), Vec::new());
     // Les voies OSM par revêtement (le journal)
     let mut revetements = [0usize; crate::REVETEMENTS as usize];
+    // Les places piétonnes : les surfaces de `highway=pedestrian` (`area=yes`), avec leur
+    // revêtement
+    let mut places = Vec::new();
     for e in jr.get("elements").and_then(J::liste).unwrap_or(&[]) {
+        if let Some(rev) = place_pietonne(e.get("tags")) {
+            let l = ligne(e.get("geometry").unwrap_or(&J::Nul));
+            if l.len() >= 4 && l.first() == l.last() {
+                let anneau: Vec<[f32; 2]> = l[..l.len() - 1].iter().map(|p| [(ox + p.0 * pas) as f32, (oz + p.1 * pas) as f32]).collect();
+                places.push(crate::cours_eau::SurfaceEau { nature: rev, anneaux: vec![anneau] });
+            }
+            continue;
+        }
         let Some((genre, largeur, ou)) = genre_route(e.get("tags")) else { continue };
         let rev = revetement_osm(e.get("tags"), genre);
         if let Some(c) = revetements.get_mut(rev as usize) {
@@ -694,6 +726,7 @@ fn generer_dans(d: &Demande, r: &dyn Reseau, s: &Suivi, cache: &Path) -> Result<
     }
     s.noter(&format!("{} ponts OSM, {} tabliers ; {} tunnels OSM, {} morceaux", lignes_ponts.len(), ponts.len(), lignes_tunnels.len(), tunnels.len()));
     s.noter(&format!("{} routes, {:.0} km", routes.len(), longueur / 1000.0));
+    s.noter(&format!("{} places piétonnes, {:.1} ha", places.len(), places.iter().map(|p| crate::aire(&p.anneaux[0]).abs()).sum::<f32>() / 10_000.0));
     s.noter(&format!("revêtements des voies OSM : {}", crate::NOMS_REVETEMENTS.iter().zip(revetements).map(|(n, c)| format!("{n} {c}")).collect::<Vec<_>>().join(", ")));
 
     // Les cours d'eau : leurs tracés (axes), coupés au bord de la carte
@@ -970,6 +1003,12 @@ fn generer_dans(d: &Demande, r: &dyn Reseau, s: &Suivi, cache: &Path) -> Result<
         ((c[1] as f64 / BLOC).floor() as i32, (c[0] as f64 / BLOC).floor() as i32)
     });
     let mut formes = [0usize; 5];
+    // Les toits déjà ajustés à une génération d'avant (même contour, même LiDAR) : repris
+    // tels quels
+    let fichier_toits = cache.join(TOITS);
+    let anciens = if d.toits { lire_toits(&fichier_toits) } else { Default::default() };
+    let mut ajustes: std::collections::HashMap<u64, Option<(u8, f32, f32, f32)>> = std::collections::HashMap::with_capacity(ordre.len());
+    let mut repris = 0usize;
     for (fait, &k) in ordre.iter().enumerate() {
         if fait % 2000 == 0 {
             s.suivre()?;
@@ -981,66 +1020,30 @@ fn generer_dans(d: &Demande, r: &dyn Reseau, s: &Suivi, cache: &Path) -> Result<
         let b = &batiments[k];
         let (moyen, haut) = sols_bati[k];
         let c = &b.contour;
-        let (mut x0b, mut z0b, mut x1b, mut z1b) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
-        for p in c {
-            (x0b, z0b, x1b, z1b) = (x0b.min(p[0]), z0b.min(p[1]), x1b.max(p[0]), z1b.max(p[1]));
-        }
-        // Le recalage : le contour d'OSM est souvent décalé d'un ou deux mètres du relevé.
-        // Le décalage (jusqu'à 2 m, par pas de 50 cm) qui met le plus de points bâtis
-        // (au moins 1,5 m) dans le contour, à 1 m près ; à égalité, le plus petit
-        let mut dedans = Vec::new();
-        let mut z = z0b + 0.5;
-        while z < z1b {
-            let mut x = x0b + 0.5;
-            while x < x1b {
-                if dans_contour(c, x, z, 0.6) {
-                    dedans.push((x, z));
-                }
-                x += 1.0;
+        let cle = cle_contour(c);
+        let ajuste = match anciens.get(&cle) {
+            Some(&a) => {
+                repris += 1;
+                a
             }
-            z += 1.0;
-        }
-        let mut decalage = (0.0f32, 0.0f32);
-        if !dedans.is_empty() {
-            let mut mieux = (-1.0f32, 0.0f32);
-            for dz in -4..=4 {
-                for dx in -4..=4 {
-                    let (ddx, ddz) = (dx as f32 * 0.5, dz as f32 * 0.5);
-                    let bati = dedans.iter().filter(|(x, z)| mnh.lire(x + ddx, z + ddz).is_some_and(|h| h >= 1.5)).count() as f32 / dedans.len() as f32;
-                    let d = ddx.hypot(ddz);
-                    let note = bati - 0.01 * d;
-                    if note > mieux.0 + 1e-6 || ((note - mieux.0).abs() <= 1e-6 && d < mieux.1) {
-                        mieux = (note, d);
-                        decalage = (ddx, ddz);
-                    }
-                }
-            }
-        }
-        // Les mesures, aux centres des points du MNH, dans le contour à 60 cm des murs
-        let mut m = Vec::new();
-        let (a0, a1) = ((x0b as f64 / RES).floor() as i64, (x1b as f64 / RES).ceil() as i64);
-        let (b0, b1) = ((z0b as f64 / RES).floor() as i64, (z1b as f64 / RES).ceil() as i64);
-        for bz in b0..b1 {
-            for ax in a0..a1 {
-                let (x, z) = (((ax as f64 + 0.5) * RES) as f32, ((bz as f64 + 0.5) * RES) as f32);
-                if !dans_contour(c, x, z, 0.6) {
-                    continue;
-                }
-                // Plus bas que 1,5 m : le jardin ou la cour (le contour d'OSM est souvent
-                // décalé d'un ou deux mètres), pas le toit
-                if let Some(h) = mnh.lire(x + decalage.0, z + decalage.1).filter(|h| *h >= 1.5) {
-                    let sol = relief(((x as f64) - ox) / pas, ((z as f64) - oz) / pas);
-                    m.push([x, z, sol + h - moyen]);
-                }
-            }
-        }
-        if let Some((forme, egout, toit, axe)) = toits::ajuster(c, &m) {
+            None => ajuster_toit(c, &mut mnh, &relief, ox, oz, pas, moyen),
+        };
+        ajustes.insert(cle, ajuste);
+        if let Some((forme, egout, toit, axe)) = ajuste {
             let egout = (moyen + egout).max(haut + 1.0);
             let b = &mut batiments[k];
             (b.forme, b.egout, b.toit, b.axe) = (forme, egout, (moyen + toit).max(egout), axe);
             formes[forme as usize] += 1;
         } else {
             formes[4] += 1;
+        }
+    }
+    if d.toits {
+        if repris > 0 {
+            s.noter(&format!("toits : {repris} repris d'une génération d'avant, {} ajustés", ordre.len() - repris));
+        }
+        if let Err(e) = ecrire_toits(&fichier_toits, &ajustes) {
+            s.noter(&format!("toits non gardés pour la suite : {e}"));
         }
     }
     if d.toits {
@@ -1119,6 +1122,10 @@ fn generer_dans(d: &Demande, r: &dyn Reseau, s: &Suivi, cache: &Path) -> Result<
     lieu.transports = transports;
     lieu.cours_eau = cours_eau;
     lieu.surfaces_eau = surfaces_eau;
+    {
+        let e = lieu.etendue();
+        lieu.places = crate::cours_eau::couper_surfaces(&places, [e[0] as f32, e[1] as f32, e[2] as f32, e[3] as f32]);
+    }
     lieu.ecrire(&d.sortie).map_err(|e| format!("{} : {e}", d.sortie.display()))?;
     s.noter(&format!("{} : {} Mo", d.sortie.display(), std::fs::metadata(&d.sortie).map_or(0, |m| m.len()) / 1_000_000));
     s.etape("fini", 1.0);
@@ -1413,6 +1420,233 @@ fn recaler(trace: Vec<Vec<[f32; 2]>>, voies: &Segments) -> Vec<crate::transports
         v.extend(courant);
     }
     v
+}
+
+/// Le fichier du cache qui garde les toits ajustés (`ecrire_toits`).
+const TOITS: &str = "toits.bin";
+/// La version de l'ajustement : un changement de `toits::ajuster` ou d'`ajuster_toit`
+/// la fait monter, et les toits gardés avant ne sont plus repris.
+const VERSION_TOITS: u32 = 1;
+
+/// La clé d'un contour : un hachage FNV de ses coordonnées au bit près (le même
+/// bâtiment, au même endroit de la même grille, a la même).
+fn cle_contour(c: &[[f32; 2]]) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for p in c {
+        for x in p {
+            for o in x.to_bits().to_le_bytes() {
+                h = (h ^ o as u64).wrapping_mul(0x100000001b3);
+            }
+        }
+    }
+    h
+}
+
+/// Les toits gardés par une génération d'avant (vide s'il n'y en a pas, ou d'une autre
+/// version) : par clé de contour, la forme, l'égout, le faîtage (au-dessus du sol moyen
+/// du contour) et l'axe ; rien pour un bâtiment sans mesure.
+fn lire_toits(f: &Path) -> std::collections::HashMap<u64, Option<(u8, f32, f32, f32)>> {
+    let mut v = std::collections::HashMap::new();
+    let Ok(o) = std::fs::read(f) else { return v };
+    if o.len() < 8 || u32::from_le_bytes(o[0..4].try_into().unwrap()) != VERSION_TOITS {
+        return v;
+    }
+    let n = u32::from_le_bytes(o[4..8].try_into().unwrap()) as usize;
+    if o.len() != 8 + n * 21 {
+        return v;
+    }
+    let f32_ = |c: &[u8]| f32::from_le_bytes(c.try_into().unwrap());
+    for e in o[8..].chunks_exact(21) {
+        let cle = u64::from_le_bytes(e[0..8].try_into().unwrap());
+        let t = (e[8] != u8::MAX).then(|| (e[8], f32_(&e[9..13]), f32_(&e[13..17]), f32_(&e[17..21])));
+        v.insert(cle, t);
+    }
+    v
+}
+
+/// Garde les toits ajustés de cette génération (`lire_toits`).
+fn ecrire_toits(f: &Path, v: &std::collections::HashMap<u64, Option<(u8, f32, f32, f32)>>) -> std::io::Result<()> {
+    let mut o = Vec::with_capacity(8 + v.len() * 21);
+    o.extend_from_slice(&VERSION_TOITS.to_le_bytes());
+    o.extend_from_slice(&(v.len() as u32).to_le_bytes());
+    for (cle, t) in v {
+        o.extend_from_slice(&cle.to_le_bytes());
+        let (forme, a, b, c) = t.unwrap_or((u8::MAX, 0.0, 0.0, 0.0));
+        o.push(forme);
+        for x in [a, b, c] {
+            o.extend_from_slice(&x.to_le_bytes());
+        }
+    }
+    let tmp = f.with_extension("part");
+    std::fs::write(&tmp, o)?;
+    std::fs::rename(tmp, f)
+}
+
+/// Le toit d'un contour d'après le MNH : sa forme, son égout et son faîtage (au-dessus
+/// du sol moyen `moyen`), son axe ; rien sans mesure.
+fn ajuster_toit(c: &[[f32; 2]], mnh: &mut Mnh, relief: &dyn Fn(f64, f64) -> f32, ox: f64, oz: f64, pas: f64, moyen: f32) -> Option<(u8, f32, f32, f32)> {
+    let (mut x0b, mut z0b, mut x1b, mut z1b) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+    for p in c {
+        (x0b, z0b, x1b, z1b) = (x0b.min(p[0]), z0b.min(p[1]), x1b.max(p[0]), z1b.max(p[1]));
+    }
+    // Le recalage : le contour d'OSM est souvent décalé d'un ou deux mètres du relevé.
+    // Le décalage (jusqu'à 2 m, par pas de 50 cm) qui met le plus de points bâtis
+    // (au moins 1,5 m) dans le contour, à 1 m près ; à égalité, le plus petit
+    let mut dedans = Vec::new();
+    let mut z = z0b + 0.5;
+    while z < z1b {
+        let mut x = x0b + 0.5;
+        while x < x1b {
+            if dans_contour(c, x, z, 0.6) {
+                dedans.push((x, z));
+            }
+            x += 1.0;
+        }
+        z += 1.0;
+    }
+    let mut decalage = (0.0f32, 0.0f32);
+    if !dedans.is_empty() {
+        let mut mieux = (-1.0f32, 0.0f32);
+        for dz in -4..=4 {
+            for dx in -4..=4 {
+                let (ddx, ddz) = (dx as f32 * 0.5, dz as f32 * 0.5);
+                let bati = dedans.iter().filter(|(x, z)| mnh.lire(x + ddx, z + ddz).is_some_and(|h| h >= 1.5)).count() as f32 / dedans.len() as f32;
+                let d = ddx.hypot(ddz);
+                let note = bati - 0.01 * d;
+                if note > mieux.0 + 1e-6 || ((note - mieux.0).abs() <= 1e-6 && d < mieux.1) {
+                    mieux = (note, d);
+                    decalage = (ddx, ddz);
+                }
+            }
+        }
+    }
+    // Les mesures, aux centres des points du MNH, dans le contour à 60 cm des murs
+    let mut m = Vec::new();
+    let (a0, a1) = ((x0b as f64 / RES).floor() as i64, (x1b as f64 / RES).ceil() as i64);
+    let (b0, b1) = ((z0b as f64 / RES).floor() as i64, (z1b as f64 / RES).ceil() as i64);
+    for bz in b0..b1 {
+        for ax in a0..a1 {
+            let (x, z) = (((ax as f64 + 0.5) * RES) as f32, ((bz as f64 + 0.5) * RES) as f32);
+            if !dans_contour(c, x, z, 0.6) {
+                continue;
+            }
+            // Plus bas que 1,5 m : le jardin ou la cour (le contour d'OSM est souvent
+            // décalé d'un ou deux mètres), pas le toit
+            if let Some(h) = mnh.lire(x + decalage.0, z + decalage.1).filter(|h| *h >= 1.5) {
+                let sol = relief(((x as f64) - ox) / pas, ((z as f64) - oz) / pas);
+                m.push([x, z, sol + h - moyen]);
+            }
+        }
+    }
+    toits::ajuster(c, &m)
+}
+
+/// L'écart (m) qui fait d'un creux du relief au-dessus d'un tunnel une dalle manquante :
+/// le relief y est plus bas d'autant que les deux côtés.
+const CREUX_DALLE: f32 = 3.0;
+/// Jusqu'où (m) chercher de part et d'autre du tunnel le bord de la tranchée.
+const BORD_DALLE: f64 = 30.0;
+
+/// Comble les dalles des tranchées couvertes que le LiDAR a ôtées : le long de chaque
+/// tunnel (lignes en pas de grille, avec leur largeur en m), là où le relief est plus bas
+/// de `CREUX_DALLE` que le plus haut de chacun des deux côtés (jusqu'à `BORD_DALLE` m) et
+/// pas plus haut que ses bouts (le fond de la tranchée, à 2,5 m près), le creux est
+/// remonté au plus bas des deux bords, sur toute sa largeur. Un relief au niveau de ses
+/// côtés (une trémie sous un carrefour) n'est pas touché. Rend le nombre de tunnels
+/// comblés et de points du relief remontés.
+fn combler_dalles(h: &mut [f32], nx: usize, nz: usize, pas: f64, lignes: &[(Vec<(f64, f64)>, f32)]) -> (usize, usize) {
+    let lire = |h: &[f32], gx: f64, gz: f64| -> f32 {
+        let (a, b) = (gx.clamp(0.0, (nx - 1) as f64), gz.clamp(0.0, (nz - 1) as f64));
+        let (a0, b0) = ((a as usize).min(nx - 2), (b as usize).min(nz - 2));
+        let (u, v) = ((a - a0 as f64) as f32, (b - b0 as f64) as f32);
+        let p = |a: usize, b: usize| h[b * nx + a];
+        (p(a0, b0) * (1.0 - u) + p(a0 + 1, b0) * u) * (1.0 - v) + (p(a0, b0 + 1) * (1.0 - u) + p(a0 + 1, b0 + 1) * u) * v
+    };
+    let dedans = |gx: f64, gz: f64| gx >= 0.0 && gz >= 0.0 && gx <= (nx - 1) as f64 && gz <= (nz - 1) as f64;
+    // Les remontées : (case, hauteur), appliquées à la fin (le relief lu reste celui du
+    // LiDAR)
+    let mut remonter: std::collections::HashMap<usize, f32> = std::collections::HashMap::new();
+    let mut comblees = 0;
+    let pas_lat = (pas * 0.5).min(1.0) / pas;
+    for (l, largeur) in lignes {
+        let (a, b) = (l[0], l[l.len() - 1]);
+        if !dedans(a.0, a.1) && !dedans(b.0, b.1) && !l.iter().any(|p| dedans(p.0, p.1)) {
+            continue;
+        }
+        let fond = lire(h, a.0, a.1).min(lire(h, b.0, b.1));
+        let demi = (*largeur as f64 / 2.0 + 1.0) / pas;
+        let pts = densifier(l, pas, (pas * 0.5).min(1.0));
+        let mut une = false;
+        for i in 0..pts.len() {
+            let p = pts[i];
+            if !dedans(p.0, p.1) {
+                continue;
+            }
+            let (q0, q1) = (pts[i.saturating_sub(1)], pts[(i + 1).min(pts.len() - 1)]);
+            let (tx, tz) = (q1.0 - q0.0, q1.1 - q0.1);
+            let lt = tx.hypot(tz);
+            if lt < 1e-9 {
+                continue;
+            }
+            let (nxx, nzz) = (-tz / lt, tx / lt);
+            let c = lire(h, p.0, p.1);
+            if c > fond + 2.5 {
+                continue;
+            }
+            // De chaque côté : le plus haut, et jusqu'où le creux va (là où le relief
+            // arrive à 0,5 m de ce plus haut)
+            let cote = |sens: f64| -> (f32, f64) {
+                let mut haut = f32::MIN;
+                let mut d = demi;
+                while d * pas <= BORD_DALLE {
+                    haut = haut.max(lire(h, p.0 + nxx * d * sens, p.1 + nzz * d * sens));
+                    d += pas_lat;
+                }
+                let mut bord = demi;
+                while bord * pas <= BORD_DALLE && lire(h, p.0 + nxx * bord * sens, p.1 + nzz * bord * sens) < haut - 0.5 {
+                    bord += pas_lat;
+                }
+                (haut, bord)
+            };
+            let ((hg, dg), (hd, dd)) = (cote(1.0), cote(-1.0));
+            let niveau = hg.min(hd);
+            if niveau - c < CREUX_DALLE {
+                continue;
+            }
+            une = true;
+            // Toute la largeur du creux, en travers, et un demi-pas le long
+            let mut t = -dd;
+            while t <= dg {
+                for e in [-0.5 * pas_lat, 0.0, 0.5 * pas_lat] {
+                    let (gx, gz) = (p.0 + nxx * t + tx / lt * e, p.1 + nzz * t + tz / lt * e);
+                    if dedans(gx, gz) {
+                        let k = gz.round() as usize * nx + gx.round() as usize;
+                        if h[k] < niveau {
+                            let r = remonter.entry(k).or_insert(niveau);
+                            *r = r.min(niveau);
+                        }
+                    }
+                }
+                t += pas_lat;
+            }
+        }
+        comblees += une as usize;
+    }
+    let n = remonter.len();
+    for (k, v) in remonter {
+        h[k] = h[k].max(v);
+    }
+    (comblees, n)
+}
+
+/// Le revêtement d'une place piétonne (`highway=pedestrian` en surface : `area=yes`),
+/// rien pour le reste.
+fn place_pietonne(tags: Option<&J>) -> Option<u8> {
+    let tag = |k: &str| tags.and_then(|t| t.get(k)).and_then(J::txt);
+    if tag("highway") != Some("pedestrian") || tag("area") != Some("yes") || tag("indoor").is_some_and(|v| v != "no") || tag("layer").and_then(|x| x.parse::<i32>().ok()).is_some_and(|n| n != 0) {
+        return None;
+    }
+    Some(revetement_osm(tags, crate::RUE_PIETONNE))
 }
 
 /// Le genre et la largeur (m) d'une route d'après ses étiquettes OSM, et où elle passe
@@ -2048,6 +2282,20 @@ mod tests {
         fn sonder(&self, url: &str) -> Option<bool> {
             Some(!url.contains("kumi"))
         }
+    }
+
+    #[test]
+    fn les_toits_ajustes_se_gardent() {
+        let f = std::env::temp_dir().join(format!("sage-reel-toits-{}.bin", std::process::id()));
+        let mut v = std::collections::HashMap::new();
+        let c = [[1.0f32, 2.0], [11.0, 2.0], [11.0, 9.5]];
+        v.insert(cle_contour(&c), Some((crate::toits::PLAT, 6.5, 6.5, 0.25)));
+        v.insert(cle_contour(&[[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]]), None);
+        ecrire_toits(&f, &v).unwrap();
+        let lus = lire_toits(&f);
+        let _ = std::fs::remove_file(&f);
+        assert_eq!(lus, v);
+        assert_ne!(cle_contour(&c), cle_contour(&[[1.0, 2.0], [11.0, 2.0], [11.0, 9.25]]));
     }
 
     #[test]

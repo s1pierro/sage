@@ -46,7 +46,7 @@ pub const DEMI_CARTE: i32 = 156;
 pub const DEPART: [f32; 2] = [TAILLE / 2.0, TAILLE / 2.0];
 
 pub const MAGIQUE: &[u8; 8] = b"SAGEREEL";
-pub const FORMAT: u32 = 11;
+pub const FORMAT: u32 = 12;
 
 /// Le texte à citer.
 pub const SOURCES: &str = "Relief et hauteurs © IGN (RGE ALTI, LiDAR HD) · eau, routes, bâtiments et occupation du sol © les contributeurs OpenStreetMap";
@@ -432,6 +432,9 @@ pub struct Lieu {
     pub cours_eau: Vec<cours_eau::CoursEau>,
     /// Les surfaces d'eau d'OSM, en vecteurs (depuis le format 10).
     pub surfaces_eau: Vec<cours_eau::SurfaceEau>,
+    /// Les places piétonnes d'OSM (`highway=pedestrian` en surface, `area=yes`), en
+    /// vecteurs, leur `nature` étant leur revêtement (`BITUME`…) (depuis le format 12).
+    pub places: Vec<cours_eau::SurfaceEau>,
 }
 
 /// L'échelle et la base qui encodent sur 16 bits des hauteurs de `lo` à `hi`.
@@ -456,7 +459,7 @@ impl Lieu {
         for (i, _) in eau.iter().enumerate().filter(|(_, e)| **e) {
             bits[i / 8] |= 1 << (i % 8);
         }
-        let mut l = Lieu { nom: nom.into(), lat, lon, x0, y0, pas, grille, niveau, base: 0.0, echelle: 1.0, h: Vec::new(), eau: bits, routes, batiments, ponts, sol: Vec::new(), transports: Default::default(), cours_eau: Vec::new(), surfaces_eau: Vec::new() };
+        let mut l = Lieu { nom: nom.into(), lat, lon, x0, y0, pas, grille, niveau, base: 0.0, echelle: 1.0, h: Vec::new(), eau: bits, routes, batiments, ponts, sol: Vec::new(), transports: Default::default(), cours_eau: Vec::new(), surfaces_eau: Vec::new(), places: Vec::new() };
         l.fixer_hauteurs(h);
         l
     }
@@ -520,6 +523,7 @@ impl Lieu {
         l.cours_eau = cours_eau::couper(&self.cours_eau, &|x, z| dans(&[x, z]));
         let e = g.etendue(self.pas);
         l.surfaces_eau = cours_eau::couper_surfaces(&self.surfaces_eau, [e[0] as f32, e[1] as f32, e[2] as f32, e[3] as f32]);
+        l.places = cours_eau::couper_surfaces(&self.places, [e[0] as f32, e[1] as f32, e[2] as f32, e[3] as f32]);
         l
     }
 
@@ -755,6 +759,8 @@ impl Lieu {
             o.extend_from_slice(&(v.len() as u32).to_le_bytes());
             o.extend(v.iter().map(|r| r.revetement));
         }
+        // Les places piétonnes (format 12)
+        cours_eau::ecrire_surfaces(&mut o, &self.places);
         o
     }
 
@@ -895,10 +901,16 @@ impl Lieu {
                 }
             }
         }
+        let places = if format >= 12 {
+            let mut p = |n: usize| prendre(n).map(|s| s.to_vec());
+            cours_eau::lire_surfaces(&mut p)?
+        } else {
+            Vec::new()
+        };
         if k != o.len() {
             return None;
         }
-        Some(Lieu { nom, lat, lon, x0, y0, pas, grille, niveau, base, echelle, h, eau, routes, batiments, ponts, sol, transports, cours_eau, surfaces_eau })
+        Some(Lieu { nom, lat, lon, x0, y0, pas, grille, niveau, base, echelle, h, eau, routes, batiments, ponts, sol, transports, cours_eau, surfaces_eau, places })
     }
 }
 
@@ -938,6 +950,7 @@ mod tests {
         }
         l.cours_eau = vec![cours_eau::CoursEau { genre: cours_eau::RIVIERE, nom: "Robec".into(), largeur: 4.5, souterrain: true, points: vec![[1.0, 2.0], [3.0, 4.0]] }];
         l.surfaces_eau = vec![cours_eau::SurfaceEau { nature: cours_eau::SURFACE_RIVIERE, anneaux: vec![vec![[0.0, 0.0], [5.0, 0.0], [5.0, 5.0]], vec![[1.0, 1.0], [2.0, 1.0], [2.0, 2.0]]] }];
+        l.places = vec![cours_eau::SurfaceEau { nature: PAVES, anneaux: vec![vec![[10.0, 0.0], [25.0, 0.0], [25.0, 15.0]]] }];
         let o = l.octets();
         assert_eq!(Lieu::depuis_octets(&o), Some(l.clone()));
         assert!(Lieu::depuis_octets(&o[..o.len() - 1]).is_none());

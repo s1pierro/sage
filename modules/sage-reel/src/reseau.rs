@@ -991,6 +991,10 @@ pub fn niveler(r: &mut Reseau, v: &[Contrainte], iterations: usize) -> Bilan {
             y[i] = base[i] + monte[i] - descend[i];
         }
         let (mut hauts, mut bas_) = (Vec::new(), Vec::new());
+        // Ce que chaque point doit monter (descendre) à ce tour : la plus forte des
+        // demandes, pas leur somme (trois voies sur un même tunnel ne l'enfoncent pas
+        // trois fois)
+        let (mut a_monter, mut a_descendre) = (vec![0.0f32; nv], vec![0.0f32; nv]);
         for c in cs.iter() {
             let bas = c.b.map_or(c.plancher, |b| lire(&y, b));
             let m = bas + c.ecart - lire(&y, c.h);
@@ -999,13 +1003,13 @@ pub fn niveler(r: &mut Reseau, v: &[Contrainte], iterations: usize) -> Bilan {
             }
             let dh = (m * c.part + 0.01).min(MONTEE_MAX);
             for v in [c.h.0, c.h.1].into_iter().filter(|&v| c.part > 0.0 && !(c.pieton_h && route[v])) {
-                monte[v] = (monte[v] + dh).min(MONTEE_MAX);
+                a_monter[v] = a_monter[v].max(dh);
                 hauts.push(v);
             }
             if let Some(b) = c.b.filter(|_| c.part < 1.0) {
                 let db = (m * (1.0 - c.part) + 0.01).min(MONTEE_MAX);
                 for v in [b.0, b.1].into_iter().filter(|&v| !(c.pieton_b && route[v])) {
-                    descend[v] = (descend[v] + db).min(MONTEE_MAX);
+                    a_descendre[v] = a_descendre[v].max(db);
                     bas_.push(v);
                 }
             }
@@ -1013,6 +1017,14 @@ pub fn niveler(r: &mut Reseau, v: &[Contrainte], iterations: usize) -> Bilan {
         if hauts.is_empty() && bas_.is_empty() {
             break;
         }
+        for i in 0..nv {
+            monte[i] = (monte[i] + a_monter[i]).min(MONTEE_MAX);
+            descend[i] = (descend[i] + a_descendre[i]).min(MONTEE_MAX);
+        }
+        hauts.sort_unstable();
+        hauts.dedup();
+        bas_.sort_unstable();
+        bas_.dedup();
         propager(&mut monte, &hauts, &fixe_bas);
         propager(&mut descend, &bas_, &fixe_haut);
     }
