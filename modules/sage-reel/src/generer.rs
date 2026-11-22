@@ -686,6 +686,8 @@ fn generer_dans(d: &Demande, r: &dyn Reseau, s: &Suivi, cache: &Path) -> Result<
     let (mut lignes_ponts, mut lignes_tunnels) = (Vec::new(), Vec::new());
     // Les voies OSM par revêtement (le journal)
     let mut revetements = [0usize; crate::REVETEMENTS as usize];
+    // Les voies carrossables aux files déduites, et lues dans OSM
+    let mut nfiles = [0usize; 2];
     // Les places piétonnes : les surfaces de `highway=pedestrian` (`area=yes`), avec leur
     // revêtement
     let mut places = Vec::new();
@@ -700,6 +702,8 @@ fn generer_dans(d: &Demande, r: &dyn Reseau, s: &Suivi, cache: &Path) -> Result<
         }
         let Some((genre, largeur, ou)) = genre_route(e.get("tags")) else { continue };
         let rev = revetement_osm(e.get("tags"), genre);
+        let files = files_voie(e.get("tags"), genre, largeur);
+        nfiles[usize::from(files.osm)] += usize::from(files.total > 0);
         if let Some(c) = revetements.get_mut(rev as usize) {
             *c += 1;
         }
@@ -708,24 +712,25 @@ fn generer_dans(d: &Demande, r: &dyn Reseau, s: &Suivi, cache: &Path) -> Result<
             continue;
         }
         match ou {
-            tr::PONT => lignes_ponts.push((genre, largeur, l, 0, rev)),
-            tr::TUNNEL => lignes_tunnels.push((genre, largeur, l, niveau_osm(e.get("tags"), true), rev)),
+            tr::PONT => lignes_ponts.push((genre, largeur, l, 0, rev, files)),
+            tr::TUNNEL => lignes_tunnels.push((genre, largeur, l, niveau_osm(e.get("tags"), true), rev, files)),
             _ => {
                 longueur += l.windows(2).map(|s| (s[1].0 - s[0].0).hypot(s[1].1 - s[0].1) * pas).sum::<f64>();
                 let (pts, ys) = au_sol(&l);
-                routes.extend(decouper(&pts, &ys).into_iter().map(|points| Route { revetement: rev, genre, largeur, points }));
+                routes.extend(decouper(&pts, &ys).into_iter().map(|points| Route { revetement: rev, files, genre, largeur, points }));
             }
         }
     }
     for (liste, tunnel, sortie) in [(&lignes_ponts, false, &mut ponts), (&lignes_tunnels, true, &mut tunnels)] {
-        let l: Vec<_> = liste.iter().map(|(_, _, l, _, _)| l.clone()).collect();
+        let l: Vec<_> = liste.iter().map(|(_, _, l, _, _, _)| l.clone()).collect();
         let prof: Vec<f32> = liste.iter().map(|e| tr::profondeur(e.3)).collect();
-        for ((genre, largeur, _, _, rev), (pts, ys)) in liste.iter().zip(ouvrages(&l, pas, &relief, niveau, tunnel, &prof)) {
-            sortie.extend(decouper(&pts, &ys).into_iter().map(|points| Route { revetement: *rev, genre: *genre, largeur: *largeur, points }));
+        for ((genre, largeur, _, _, rev, files), (pts, ys)) in liste.iter().zip(ouvrages(&l, pas, &relief, niveau, tunnel, &prof)) {
+            sortie.extend(decouper(&pts, &ys).into_iter().map(|points| Route { revetement: *rev, files: *files, genre: *genre, largeur: *largeur, points }));
         }
     }
     s.noter(&format!("{} ponts OSM, {} tabliers ; {} tunnels OSM, {} morceaux", lignes_ponts.len(), ponts.len(), lignes_tunnels.len(), tunnels.len()));
     s.noter(&format!("{} routes, {:.0} km", routes.len(), longueur / 1000.0));
+    s.noter(&format!("files des voies carrossables : {} lues dans OSM, {} déduites", nfiles[1], nfiles[0]));
     s.noter(&format!("{} places piétonnes, {:.1} ha", places.len(), places.iter().map(|p| crate::aire(&p.anneaux[0]).abs()).sum::<f32>() / 10_000.0));
     s.noter(&format!("revêtements des voies OSM : {}", crate::NOMS_REVETEMENTS.iter().zip(revetements).map(|(n, c)| format!("{n} {c}")).collect::<Vec<_>>().join(", ")));
 
@@ -1691,6 +1696,38 @@ fn genre_route(tags: Option<&J>) -> Option<(u8, f32, u8)> {
     Some((genre, largeur, pont))
 }
 
+/// Les files d'une voie d'après `lanes`, `lanes:forward`, `lanes:backward` et
+/// `oneway` (un giratoire et une autoroute sont à sens unique) ; sans `lanes`, déduites
+/// de son genre et de sa largeur (`Files::deduire`).
+fn files_voie(tags: Option<&J>, genre: u8, largeur: f32) -> crate::Files {
+    use crate::Files;
+    if !crate::carrossable(genre) {
+        return Files::default();
+    }
+    let tag = |k: &str| tags.and_then(|t| t.get(k)).and_then(J::txt);
+    let sens: i8 = match tag("oneway") {
+        Some("yes" | "1" | "true") => 1,
+        Some("-1" | "reverse") => -1,
+        Some("no") => 0,
+        _ if tag("junction").is_some_and(|j| j == "roundabout" || j == "circular") || tag("highway") == Some("motorway") => 1,
+        _ => 0,
+    };
+    let n = |k: &str| tag(k).and_then(|v| v.split(';').next()?.trim().parse::<u8>().ok()).filter(|n| (1..=12).contains(n));
+    let Some(total) = n("lanes") else { return Files::deduire(genre, largeur, sens) };
+    let (avant, arriere) = match sens {
+        1 => (total, 0),
+        -1 => (0, total),
+        _ => match (n("lanes:forward"), n("lanes:backward")) {
+            (Some(f), Some(b)) => (f.min(total), b.min(total - f.min(total))),
+            (Some(f), None) => (f.min(total), total - f.min(total)),
+            (None, Some(b)) => (total - b.min(total), b.min(total)),
+            // Sans précision : moitié-moitié, une file impaire au centre partagée
+            _ => (total / 2, total / 2),
+        },
+    };
+    Files { total, avant, arriere, osm: true }
+}
+
 /// Le revêtement d'une voie d'après son `surface=*` ; sans étiquette, selon son genre
 /// (un chemin est en gravier, un sentier en terre, le reste en bitume).
 fn revetement_osm(tags: Option<&J>, genre: u8) -> u8 {
@@ -2282,6 +2319,20 @@ mod tests {
         fn sonder(&self, url: &str) -> Option<bool> {
             Some(!url.contains("kumi"))
         }
+    }
+
+    #[test]
+    fn les_files_se_lisent_ou_se_deduisent() {
+        use crate::Files;
+        let j = |t: &str| json::lire(t);
+        let f = |t: &str| files_voie(j(t).as_ref(), crate::GRANDE, 10.0);
+        assert_eq!(f(r#"{"lanes":"2","oneway":"yes"}"#), Files { total: 2, avant: 2, arriere: 0, osm: true });
+        assert_eq!(f(r#"{"lanes":"3","lanes:forward":"2"}"#), Files { total: 3, avant: 2, arriere: 1, osm: true });
+        assert_eq!(f(r#"{"lanes":"3"}"#), Files { total: 3, avant: 1, arriere: 1, osm: true });
+        assert_eq!(f(r#"{"junction":"roundabout"}"#), Files { total: 3, avant: 3, arriere: 0, osm: false });
+        assert_eq!(files_voie(j(r#"{}"#).as_ref(), crate::ROUTE, 6.0), Files { total: 2, avant: 1, arriere: 1, osm: false });
+        assert_eq!(files_voie(j(r#"{}"#).as_ref(), crate::SERVICE, 4.0), Files { total: 1, avant: 0, arriere: 0, osm: false });
+        assert_eq!(files_voie(j(r#"{}"#).as_ref(), crate::PIETONNE, 2.0), Files::default());
     }
 
     #[test]

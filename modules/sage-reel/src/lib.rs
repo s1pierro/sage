@@ -46,7 +46,7 @@ pub const DEMI_CARTE: i32 = 156;
 pub const DEPART: [f32; 2] = [TAILLE / 2.0, TAILLE / 2.0];
 
 pub const MAGIQUE: &[u8; 8] = b"SAGEREEL";
-pub const FORMAT: u32 = 12;
+pub const FORMAT: u32 = 13;
 
 /// Le texte à citer.
 pub const SOURCES: &str = "Relief et hauteurs © IGN (RGE ALTI, LiDAR HD) · eau, routes, bâtiments et occupation du sol © les contributeurs OpenStreetMap";
@@ -220,10 +220,57 @@ pub fn trianguler(c: &[[f32; 2]]) -> Vec<[usize; 3]> {
     t
 }
 
+/// Les files d'une voie (format 13) : une donnée annexe, lue dans OSM (`lanes`,
+/// `lanes:forward`, `lanes:backward`, `oneway`) ou déduite de son genre et de sa
+/// largeur. Le réseau (tracés, largeurs, nivellement) n'en dépend pas.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Files {
+    /// Le nombre de files (0 : une voie sans files, piétonne ou chemin).
+    pub total: u8,
+    /// Les files dans le sens du tracé (à sa droite) et dans l'autre (à sa gauche) ; le
+    /// reste, `total − avant − arriere`, est partagé (une file pour les deux sens, une
+    /// file centrale).
+    pub avant: u8,
+    pub arriere: u8,
+    /// Le nombre de files vient d'OSM ; sinon il est déduit.
+    pub osm: bool,
+}
+
+impl Files {
+    /// Les files déduites d'une voie sans `lanes` : de sa largeur (3,25 m par file, 1 m
+    /// de bords), en sens unique (`sens` 1 dans le sens du tracé, −1 dans l'autre) ou à
+    /// double sens (un nombre pair, au moins 2 ; une seule file partagée sous 4,5 m).
+    pub fn deduire(genre: u8, largeur: f32, sens: i8) -> Files {
+        if !carrossable(genre) {
+            return Files::default();
+        }
+        let n = ((largeur - 1.0) / 3.25).round().clamp(1.0, 8.0) as u8;
+        match sens {
+            1 => Files { total: n, avant: n, arriere: 0, osm: false },
+            -1 => Files { total: n, avant: 0, arriere: n, osm: false },
+            _ if largeur < 4.5 => Files { total: 1, avant: 0, arriere: 0, osm: false },
+            _ => {
+                let t = (((largeur - 1.0) / 6.5).round() as u8).clamp(1, 4) * 2;
+                Files { total: t, avant: t / 2, arriere: t / 2, osm: false }
+            }
+        }
+    }
+
+    fn octets(&self) -> [u8; 4] {
+        [self.total, self.avant, self.arriere, u8::from(self.osm)]
+    }
+
+    fn depuis(o: &[u8]) -> Files {
+        Files { total: o[0], avant: o[1].min(o[0]), arriere: o[2].min(o[0].saturating_sub(o[1])), osm: o[3] != 0 }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Route {
     /// Le revêtement (`BITUME`, `BETON`, `PAVES`, `GRAVIER`, `TERRE`, `HERBE`).
     pub revetement: u8,
+    /// Ses files (format 13).
+    pub files: Files,
     pub genre: u8,
     pub largeur: f32,
     /// x, z du jeu, et la hauteur de la chaussée.
@@ -502,13 +549,13 @@ impl Lieu {
                     if dans(p) {
                         m.push(*p);
                     } else if m.len() > 1 {
-                        v.push(Route { revetement: r.revetement, genre: r.genre, largeur: r.largeur, points: std::mem::take(&mut m) });
+                        v.push(Route { revetement: r.revetement, files: r.files, genre: r.genre, largeur: r.largeur, points: std::mem::take(&mut m) });
                     } else {
                         m.clear();
                     }
                 }
                 if m.len() > 1 {
-                    v.push(Route { revetement: r.revetement, genre: r.genre, largeur: r.largeur, points: m });
+                    v.push(Route { revetement: r.revetement, files: r.files, genre: r.genre, largeur: r.largeur, points: m });
                 }
             }
             v
@@ -761,6 +808,13 @@ impl Lieu {
         }
         // Les places piétonnes (format 12)
         cours_eau::ecrire_surfaces(&mut o, &self.places);
+        // Les files des routes, des ponts et des tunnels (format 13), dans leur ordre
+        for v in [&self.routes, &self.ponts, &self.transports.tunnels] {
+            o.extend_from_slice(&(v.len() as u32).to_le_bytes());
+            for r in v.iter() {
+                o.extend_from_slice(&r.files.octets());
+            }
+        }
         o
     }
 
@@ -842,7 +896,7 @@ impl Lieu {
                 let m = u32_(prendre(4)?) as usize;
                 let o = prendre(m * 12)?;
                 let points = o.chunks(12).map(|c| [f32_(&c[0..4]), f32_(&c[4..8]), f32_(&c[8..12])]).collect();
-                routes.push(Route { revetement: 0, genre, largeur, points });
+                routes.push(Route { revetement: 0, files: Files::deduire(genre, largeur, 0), genre, largeur, points });
             }
             routes
         }}}
@@ -907,6 +961,17 @@ impl Lieu {
         } else {
             Vec::new()
         };
+        if format >= 13 {
+            for v in [&mut routes, &mut ponts, &mut transports.tunnels] {
+                if u32_(prendre(4)?) as usize != v.len() {
+                    return None;
+                }
+                let n = v.len();
+                for (r, f) in v.iter_mut().zip(prendre(n * 4)?.chunks(4)) {
+                    r.files = Files::depuis(f);
+                }
+            }
+        }
         if k != o.len() {
             return None;
         }
@@ -937,7 +1002,7 @@ mod tests {
         let eau: Vec<bool> = (0..n * n).map(|i| i % n < n / 2).collect();
         let m = cote_sol(n);
         let b = Batiment::plat(MAISON, -1.0, 7.0, vec![[10.0, 10.0], [30.0, 10.0], [30.0, 20.0]]);
-        let r = Route { revetement: PAVES, genre: ROUTE, largeur: 6.0, points: vec![[0.0, -200.0, 5.0], [0.0, 200.0, 5.0]] };
+        let r = Route { revetement: PAVES, files: Files { total: 3, avant: 2, arriere: 1, osm: true }, genre: ROUTE, largeur: 6.0, points: vec![[0.0, -200.0, 5.0], [0.0, 200.0, 5.0]] };
         let mut l = Lieu::new("Essai", 49.0, 1.0, 1000.0, 2000.0, pas, 3.0, &h, &eau, vec![r.clone()], vec![b], vec![r.clone()]).avec_sol(vec![BOIS; m * m]);
         {
             use transports::*;
