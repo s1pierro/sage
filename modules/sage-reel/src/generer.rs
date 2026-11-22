@@ -1,6 +1,7 @@
 //! La génération d'un lieu réel : 20 km autour d'un point de France, d'après le relief
-//! de l'IGN (RGE ALTI, Géoplateforme), le MNH LiDAR HD pour les toits et OpenStreetMap
-//! (Overpass) pour l'eau, les routes, les ponts, les bâtiments et l'occupation du sol.
+//! de l'IGN (RGE ALTI, Géoplateforme), le MNH LiDAR HD pour les toits, les bâtiments et
+//! l'occupation du sol de l'IGN (son WFS ; OpenStreetMap en secours) et OpenStreetMap
+//! (Overpass) pour l'eau, les routes, les ponts et les transports.
 //!
 //! Le réseau est fourni par l'appelant (`Reseau` : curl pour l'outil de S.A.G.E., Java
 //! pour Flow) ; l'avancement et le journal se lisent dans `Suivi`, qui peut aussi
@@ -22,10 +23,11 @@
 //! service, voie piétonne, chemin, sentier, voie de bus : `busway`, `bus_guideway`) et une largeur (`width`, `lanes` ou selon le
 //! genre) ; un point tous les 8 m, la hauteur de la chaussée prise au relief et lissée.
 //!
-//! Les bâtiments : `building=*` (chemins et relations, leurs contours extérieurs), un
-//! genre (maison, immeuble, industriel, édifice, annexe) et une hauteur ; le pied au plus
-//! bas du sol sous le contour (un mètre dessous), le toit à la hauteur au-dessus du sol
-//! moyen. La requête se fait en neuf morceaux.
+//! Les bâtiments : ceux de la BD TOPO (contours du cadastre, hauteur mesurée, nature et
+//! usage, `genre_bati_ign`), page par page ; en secours (hors de France, IGN
+//! indisponible), `building=*` d'OSM en neuf morceaux. Un genre (maison, immeuble,
+//! industriel, édifice, annexe) et une hauteur ; le pied au plus bas du sol sous le
+//! contour (un mètre dessous), le toit à la hauteur au-dessus du sol moyen.
 //!
 //! Les toits : le MNH LiDAR HD de l'IGN (la hauteur au-dessus du sol, à 50 cm), par blocs
 //! de 250 m là où il y a des bâtiments (4 téléchargements à la fois). Dans chaque
@@ -35,7 +37,10 @@
 //! sans mesure (neuf, ou hors des blocs) garde la hauteur d'OSM, avec deux pans à 40°
 //! sur les maisons.
 //!
-//! L'occupation du sol : `landuse=*`, les bois, prés et landes (`natural=*`), les parcs
+//! L'occupation du sol : de l'IGN (`sol_ign` : BD CARTO en fond, ce qu'elle ne couvre
+//! pas étant cultivé ; par-dessus la végétation de la BD TOPO, le RPG, les parcs et
+//! cimetières), par son WFS, sans file d'attente. En secours (hors de France, IGN
+//! indisponible), d'OSM : `landuse=*`, les bois, prés et landes (`natural=*`), les parcs
 //! et terrains (`leisure=*`), en cinq classes, tramées sur une grille de `2 × pas` ; là
 //! où elles se recouvrent, la plus précise l'emporte. En neuf morceaux.
 //!
@@ -60,7 +65,18 @@ const OVERPASS: [&str; 2] = ["https://overpass-api.de/api/interpreter", "https:/
 /// threads à la fois.
 pub trait Reseau: Sync {
     fn telecharger(&self, url: &str, post: Option<&str>, sortie: &Path) -> Result<(), String>;
+
+    /// Le serveur de `url` répond-il vite (en une dizaine de secondes, quelle que soit
+    /// la réponse) ? Rien si l'on ne sait pas le demander : on lui envoie alors la
+    /// requête quand même.
+    fn sonder(&self, _url: &str) -> Option<bool> {
+        None
+    }
 }
+
+/// Le plus long entre deux tours d'essais auprès d'Overpass (s) : sans limite de tours,
+/// on attend qu'un serveur revienne (un arrêt demandé coupe l'attente).
+const ATTENTE_OVERPASS_MAX: u64 = 300;
 
 /// Le réseau par curl (l'outil de S.A.G.E., les essais).
 pub struct Curl;
@@ -79,6 +95,11 @@ impl Reseau for Curl {
             return Err("curl a échoué".into());
         }
         std::fs::rename(&tmp, sortie).map_err(|e| e.to_string())
+    }
+
+    fn sonder(&self, url: &str) -> Option<bool> {
+        let o = std::process::Command::new("curl").args(["-s", "-m", "10", "-A", "sage-lieu-reel/1.0", "-o", "/dev/null", "-w", "%{http_code}"]).arg(url).output().ok()?;
+        Some(String::from_utf8_lossy(&o.stdout).trim() != "000")
     }
 }
 
@@ -109,6 +130,55 @@ pub struct Demande {
     /// que la carte) pour la carte entière. Le lieu ne couvre qu'elle (`Grille::emprise`).
     pub largeur: f64,
     pub longueur: f64,
+}
+
+/// Le fichier du cache qui garde la demande (pour reprendre une génération).
+pub const DEMANDE: &str = "demande.txt";
+
+impl Demande {
+    /// La demande en texte (`cle = valeur`, une par ligne), sans la sortie.
+    pub fn texte(&self) -> String {
+        format!("nom = {}\nlat = {}\nlon = {}\npas = {}\nlargeur = {}\nlongueur = {}\ntoits = {}\n", self.nom, self.lat, self.lon, self.pas, self.largeur, self.longueur, self.toits)
+    }
+
+    /// La demande d'une génération restée inachevée, d'après son cache (`<sortie>.cache`) :
+    /// le `demande.txt` qu'elle y a laissé ; sinon (une génération d'avant), retrouvée
+    /// d'après la première ligne du journal (le nom, le centre en Lambert-93, la grille)
+    /// et les noms des réponses gardées (l'emprise), avec les toits. Rien si le cache ne
+    /// dit pas assez.
+    pub fn reprendre(sortie: &Path) -> Option<Demande> {
+        let c = cache(sortie);
+        if let Ok(t) = std::fs::read_to_string(c.join(DEMANDE)) {
+            let v = |k: &str| t.lines().find_map(|l| l.split_once('=').filter(|(a, _)| a.trim() == k).map(|(_, b)| b.trim().to_string()));
+            let n = |k: &str| v(k).and_then(|x| x.parse::<f64>().ok());
+            return Some(Demande { nom: v("nom")?, lat: n("lat")?, lon: n("lon")?, pas: n("pas")?, sortie: sortie.to_path_buf(), toits: v("toits").is_none_or(|x| x != "false"), largeur: n("largeur").unwrap_or(0.0), longueur: n("longueur").unwrap_or(0.0) });
+        }
+        // « [0 s] nom : Lambert-93 (561728, 6928450), 10017 × 10017 points de 2 m (…) »
+        let journal = std::fs::read_to_string(c.join("journal.txt")).ok()?;
+        let l = journal.lines().find(|l| l.contains(" : Lambert-93 ("))?;
+        let l = l.split_once("] ").map_or(l, |(_, b)| b);
+        let (nom, reste) = l.split_once(" : Lambert-93 (")?;
+        let (xy, reste) = reste.split_once("), ")?;
+        let (x, y) = xy.split_once(", ")?;
+        let (x, y): (f64, f64) = (x.trim().parse().ok()?, y.trim().parse().ok()?);
+        let pas: f64 = reste.split_once(" points de ")?.1.split(' ').next()?.parse().ok()?;
+        let (lat, lon) = crate::lambert93_inverse(x, y);
+        // L'emprise : le suffixe des réponses d'OSM (« _6000x6000.json »), sinon la carte
+        // entière
+        let mut emprise = (0.0, 0.0);
+        for e in std::fs::read_dir(&c).ok()?.flatten() {
+            let f = e.file_name().to_string_lossy().into_owned();
+            if let Some(s) = f.strip_prefix("osm_").and_then(|f| f.strip_suffix(".json")) {
+                if let Some((a, b)) = s.rsplit('_').next().and_then(|d| d.split_once('x')) {
+                    if let (Ok(a), Ok(b)) = (a.parse::<f64>(), b.parse::<f64>()) {
+                        emprise = (a, b);
+                        break;
+                    }
+                }
+            }
+        }
+        Some(Demande { nom: nom.to_string(), lat, lon, pas, sortie: sortie.to_path_buf(), toits: true, largeur: emprise.0, longueur: emprise.1 })
+    }
 }
 
 /// L'avancement d'une génération, lu par un autre thread : l'étape, sa part du tout (de 0
@@ -351,6 +421,8 @@ pub fn generer(d: &Demande, r: &dyn Reseau, s: &Suivi) -> Result<Lieu, String> {
     }
     let cache = cache(&d.sortie);
     std::fs::create_dir_all(&cache).map_err(|e| format!("{} : {e}", cache.display()))?;
+    // De quoi la reprendre si elle s'interrompt
+    let _ = std::fs::write(cache.join(DEMANDE), d.texte());
     s.ecrire_dans(&cache);
     let rendu = generer_dans(d, r, s, &cache);
     match &rendu {
@@ -810,38 +882,63 @@ fn generer_dans(d: &Demande, r: &dyn Reseau, s: &Suivi, cache: &Path) -> Result<
     let mut batiments = Vec::new();
     let mut sols_bati: Vec<(f32, f32)> = Vec::new();
     let mut vus = std::collections::HashSet::new();
-    for (bi, bj) in (0..3).flat_map(|j| (0..3).map(move |i| (i, j))) {
-        s.suivre()?;
-        let (la0, lo0) = (cadre.0 + (cadre.2 - cadre.0) * bj as f64 / 3.0, cadre.1 + (cadre.3 - cadre.1) * bi as f64 / 3.0);
-        let (la1, lo1) = (cadre.0 + (cadre.2 - cadre.0) * (bj + 1) as f64 / 3.0, cadre.1 + (cadre.3 - cadre.1) * (bi + 1) as f64 / 3.0);
-        let b = format!("{la0:.5},{lo0:.5},{la1:.5},{lo1:.5}");
-        let jb = overpass(r, s, &cache.join(format!("osm_bati_{bi}_{bj}{suffixe}.json")), "bâtiments", &format!("(way[\"building\"]({b});relation[\"building\"]({b}););out tags geom;"))?;
-        for e in jb.get("elements").and_then(J::liste).unwrap_or(&[]) {
-            let id = (e.get("type").and_then(J::txt).unwrap_or("").to_string(), e.get("id").and_then(J::num).unwrap_or(0.0) as i64);
-            if !vus.insert(id) {
-                continue;
+    // Un contour (en points de grille) gardé s'il est dans la carte, posé sur le relief
+    let ajouter = |batiments: &mut Vec<Batiment>, sols_bati: &mut Vec<(f32, f32)>, genre: u8, hauteur: f32, mut c: Vec<(f64, f64)>| {
+        if c.first() == c.last() {
+            c.pop();
+        }
+        c.dedup();
+        if c.len() < 3 || !c.iter().all(|p| p.0 > 0.0 && p.1 > 0.0 && p.0 < (nx - 1) as f64 && p.1 < (nz - 1) as f64) {
+            return;
+        }
+        let sols: Vec<f32> = c.iter().map(|p| relief(p.0, p.1)).collect();
+        let (bas, haut) = (sols.iter().cloned().fold(f32::MAX, f32::min), sols.iter().cloned().fold(f32::MIN, f32::max));
+        let moyen = sols.iter().sum::<f32>() / sols.len() as f32;
+        let contour = c.iter().map(|p| [(ox + p.0 * pas) as f32, (oz + p.1 * pas) as f32]).collect();
+        batiments.push(par_defaut(genre, bas - 1.0, (moyen + hauteur).max(haut + 2.0), haut, contour));
+        sols_bati.push((moyen, haut));
+    };
+    // D'abord ceux de l'IGN (BD TOPO : contours du cadastre, hauteurs mesurées) ;
+    // d'OSM en secours
+    let en_grille_bati = |x: f64, y: f64| ((x - x0 - ox) / pas, (y0 - y - oz) / pas);
+    let ign = wfs_ign(r, s, &cache, &suffixe, "BDTOPO_V3:batiment", CHAMPS_BATI_IGN, cadre, &mut |o| {
+        let Some((genre, hauteur)) = o.get("properties").and_then(genre_bati_ign) else { return };
+        // Chaque polygone : son contour extérieur (les cours intérieures se couvrent)
+        for a in contours_geojson(o.get("geometry"), &en_grille_bati) {
+            ajouter(&mut batiments, &mut sols_bati, genre, hauteur, a);
+        }
+    });
+    match ign {
+        Ok(n) if n > 0 => s.noter(&format!("bâtiments de l'IGN : {n} objets")),
+        rendu => {
+            match rendu {
+                Err(e) => s.noter(&format!("bâtiments de l'IGN indisponibles ({e}) : OpenStreetMap en secours")),
+                _ => s.noter("aucun bâtiment de l'IGN ici (hors de France ?) : OpenStreetMap en secours"),
             }
-            let Some((genre, hauteur)) = genre_bati(e.get("tags")) else { continue };
-            // Une relation : chacun de ses contours extérieurs (les cours intérieures se
-            // couvrent)
-            let contours: Vec<Vec<(f64, f64)>> = match e.get("type").and_then(J::txt) {
-                Some("way") => vec![ligne(e.get("geometry").unwrap_or(&J::Nul))],
-                _ => anneaux(e.get("members").and_then(J::liste).unwrap_or(&[]).iter().filter(|m| m.get("role").and_then(J::txt) == Some("outer")).map(|m| ligne(m.get("geometry").unwrap_or(&J::Nul))).filter(|l| l.len() > 1).collect()),
-            };
-            for mut c in contours {
-                if c.first() == c.last() {
-                    c.pop();
+            batiments.clear();
+            sols_bati.clear();
+            for (bi, bj) in (0..3).flat_map(|j| (0..3).map(move |i| (i, j))) {
+                s.suivre()?;
+                let (la0, lo0) = (cadre.0 + (cadre.2 - cadre.0) * bj as f64 / 3.0, cadre.1 + (cadre.3 - cadre.1) * bi as f64 / 3.0);
+                let (la1, lo1) = (cadre.0 + (cadre.2 - cadre.0) * (bj + 1) as f64 / 3.0, cadre.1 + (cadre.3 - cadre.1) * (bi + 1) as f64 / 3.0);
+                let b = format!("{la0:.5},{lo0:.5},{la1:.5},{lo1:.5}");
+                let jb = overpass(r, s, &cache.join(format!("osm_bati_{bi}_{bj}{suffixe}.json")), "bâtiments", &format!("(way[\"building\"]({b});relation[\"building\"]({b}););out tags geom;"))?;
+                for e in jb.get("elements").and_then(J::liste).unwrap_or(&[]) {
+                    let id = (e.get("type").and_then(J::txt).unwrap_or("").to_string(), e.get("id").and_then(J::num).unwrap_or(0.0) as i64);
+                    if !vus.insert(id) {
+                        continue;
+                    }
+                    let Some((genre, hauteur)) = genre_bati(e.get("tags")) else { continue };
+                    // Une relation : chacun de ses contours extérieurs (les cours intérieures se
+                    // couvrent)
+                    let contours: Vec<Vec<(f64, f64)>> = match e.get("type").and_then(J::txt) {
+                        Some("way") => vec![ligne(e.get("geometry").unwrap_or(&J::Nul))],
+                        _ => anneaux(e.get("members").and_then(J::liste).unwrap_or(&[]).iter().filter(|m| m.get("role").and_then(J::txt) == Some("outer")).map(|m| ligne(m.get("geometry").unwrap_or(&J::Nul))).filter(|l| l.len() > 1).collect()),
+                    };
+                    for c in contours {
+                        ajouter(&mut batiments, &mut sols_bati, genre, hauteur, c);
+                    }
                 }
-                c.dedup();
-                if c.len() < 3 || !c.iter().all(|p| p.0 > 0.0 && p.1 > 0.0 && p.0 < (nx - 1) as f64 && p.1 < (nz - 1) as f64) {
-                    continue;
-                }
-                let sols: Vec<f32> = c.iter().map(|p| relief(p.0, p.1)).collect();
-                let (bas, haut) = (sols.iter().cloned().fold(f32::MAX, f32::min), sols.iter().cloned().fold(f32::MIN, f32::max));
-                let moyen = sols.iter().sum::<f32>() / sols.len() as f32;
-                let contour = c.iter().map(|p| [(ox + p.0 * pas) as f32, (oz + p.1 * pas) as f32]).collect();
-                batiments.push(par_defaut(genre, bas - 1.0, (moyen + hauteur).max(haut + 2.0), haut, contour));
-                sols_bati.push((moyen, haut));
             }
         }
     }
@@ -950,54 +1047,73 @@ fn generer_dans(d: &Demande, r: &dyn Reseau, s: &Suivi, cache: &Path) -> Result<
         s.noter(&format!("toits mesurés : {} plats, {} à deux pans, {} en croupe, {} en appentis ; {} sans mesure", formes[0], formes[1], formes[2], formes[3], formes[4]));
     }
     s.etape("occupation du sol", 0.93);
-    // 6. L'occupation du sol, en neuf morceaux, tramée classe après classe
+    // 6. L'occupation du sol : de l'IGN (BD CARTO en fond, BD TOPO, RPG), sinon
+    // d'OpenStreetMap ; chaque surface avec sa classe et si elle est du fond (peinte
+    // d'abord, les plus précises par-dessus)
     let (mx, mz) = g.sol();
+    let en_grille = |x: f64, y: f64| ((x - x0 - ox) / pas / 2.0, (y0 - y - oz) / pas / 2.0);
     let mut surfaces_sol: Vec<(u8, Vec<Vec<(f64, f64)>>)> = Vec::new();
-    let mut vus = std::collections::HashSet::new();
-    let filtre = "[\"natural\"~\"^(wood|scrub|grassland|heath)$\"]";
-    let loisirs = "[\"leisure\"~\"^(park|garden|pitch|golf_course|recreation_ground|playground)$\"]";
-    for (bi, bj) in (0..3).flat_map(|j| (0..3).map(move |i| (i, j))) {
-        s.suivre()?;
-        let (la0, lo0) = (cadre.0 + (cadre.2 - cadre.0) * bj as f64 / 3.0, cadre.1 + (cadre.3 - cadre.1) * bi as f64 / 3.0);
-        let (la1, lo1) = (cadre.0 + (cadre.2 - cadre.0) * (bj + 1) as f64 / 3.0, cadre.1 + (cadre.3 - cadre.1) * (bi + 1) as f64 / 3.0);
-        let b = format!("{la0:.5},{lo0:.5},{la1:.5},{lo1:.5}");
-        let q = format!("(way[\"landuse\"]({b});relation[\"landuse\"]({b});way{filtre}({b});relation{filtre}({b});way{loisirs}({b});relation{loisirs}({b}););out geom;");
-        let js = overpass(r, s, &cache.join(format!("osm_sol_{bi}_{bj}{suffixe}.json")), "occupation du sol", &q)?;
-        for e in js.get("elements").and_then(J::liste).unwrap_or(&[]) {
-            let id = (e.get("type").and_then(J::txt).unwrap_or("").to_string(), e.get("id").and_then(J::num).unwrap_or(0.0) as i64);
-            if !vus.insert(id) {
-                continue;
+    let mut fond: Vec<(u8, Vec<Vec<(f64, f64)>>)> = Vec::new();
+    match sol_ign(r, s, &cache, &suffixe, cadre, &en_grille) {
+        Ok((f, p)) if !f.is_empty() || !p.is_empty() => {
+            s.noter(&format!("occupation du sol de l'IGN : {} surfaces de fond, {} précises", f.len(), p.len()));
+            (fond, surfaces_sol) = (f, p);
+        }
+        rendu => {
+            match rendu {
+                Err(e) => s.noter(&format!("occupation du sol de l'IGN indisponible ({e}) : OpenStreetMap en secours")),
+                _ => s.noter("rien de l'IGN ici (hors de France ?) : OpenStreetMap en secours"),
             }
-            let Some(classe) = classe_sol(e.get("tags")) else { continue };
-            // En points de la grille de 8 m
-            let demi = |l: Vec<(f64, f64)>| l.into_iter().map(|p| (p.0 / 2.0, p.1 / 2.0)).collect::<Vec<_>>();
-            let anneaux_ = match e.get("type").and_then(J::txt) {
-                Some("way") => {
-                    let l = ligne(e.get("geometry").unwrap_or(&J::Nul));
-                    if l.len() < 4 || l.first() != l.last() {
-                        continue;
-                    }
-                    vec![demi(l)]
+        let mut vus = std::collections::HashSet::new();
+        let filtre = "[\"natural\"~\"^(wood|scrub|grassland|heath)$\"]";
+        let loisirs = "[\"leisure\"~\"^(park|garden|pitch|golf_course|recreation_ground|playground)$\"]";
+        for (bi, bj) in (0..3).flat_map(|j| (0..3).map(move |i| (i, j))) {
+            s.suivre()?;
+            let (la0, lo0) = (cadre.0 + (cadre.2 - cadre.0) * bj as f64 / 3.0, cadre.1 + (cadre.3 - cadre.1) * bi as f64 / 3.0);
+            let (la1, lo1) = (cadre.0 + (cadre.2 - cadre.0) * (bj + 1) as f64 / 3.0, cadre.1 + (cadre.3 - cadre.1) * (bi + 1) as f64 / 3.0);
+            let b = format!("{la0:.5},{lo0:.5},{la1:.5},{lo1:.5}");
+            let q = format!("(way[\"landuse\"]({b});relation[\"landuse\"]({b});way{filtre}({b});relation{filtre}({b});way{loisirs}({b});relation{loisirs}({b}););out geom;");
+            let js = overpass(r, s, &cache.join(format!("osm_sol_{bi}_{bj}{suffixe}.json")), "occupation du sol", &q)?;
+            for e in js.get("elements").and_then(J::liste).unwrap_or(&[]) {
+                let id = (e.get("type").and_then(J::txt).unwrap_or("").to_string(), e.get("id").and_then(J::num).unwrap_or(0.0) as i64);
+                if !vus.insert(id) {
+                    continue;
                 }
-                _ => anneaux(e.get("members").and_then(J::liste).unwrap_or(&[]).iter().filter(|m| m.get("type").and_then(J::txt) == Some("way")).map(|m| ligne(m.get("geometry").unwrap_or(&J::Nul))).filter(|l| l.len() > 1).collect()).into_iter().map(demi).collect(),
-            };
-            surfaces_sol.push((classe, anneaux_));
+                let Some(classe) = classe_sol(e.get("tags")) else { continue };
+                // En points de la grille de 8 m
+                let demi = |l: Vec<(f64, f64)>| l.into_iter().map(|p| (p.0 / 2.0, p.1 / 2.0)).collect::<Vec<_>>();
+                let anneaux_ = match e.get("type").and_then(J::txt) {
+                    Some("way") => {
+                        let l = ligne(e.get("geometry").unwrap_or(&J::Nul));
+                        if l.len() < 4 || l.first() != l.last() {
+                            continue;
+                        }
+                        vec![demi(l)]
+                    }
+                    _ => anneaux(e.get("members").and_then(J::liste).unwrap_or(&[]).iter().filter(|m| m.get("type").and_then(J::txt) == Some("way")).map(|m| ligne(m.get("geometry").unwrap_or(&J::Nul))).filter(|l| l.len() > 1).collect()).into_iter().map(demi).collect(),
+                };
+                surfaces_sol.push((classe, anneaux_));
+            }
+        }
         }
     }
     // Les moins précises d'abord : les quartiers, puis les champs, les prés, les bois
     use crate::{BOIS, CHAMP, HABITE, PRE, ZONE};
-    let mut sol = vec![0u8; mx * mz];
+    // Avec l'IGN, ce que la BD CARTO ne couvre pas est cultivé
+    let mut sol = vec![if fond.is_empty() { 0u8 } else { CHAMP }; mx * mz];
     let mut compte = [0usize; 6];
-    for classe in [HABITE, ZONE, CHAMP, PRE, BOIS] {
-        for (_, a) in surfaces_sol.iter().filter(|(c, _)| *c == classe) {
-            remplir_avec(a, mx, mz, |i| sol[i] = classe);
+    for liste in [&fond, &surfaces_sol] {
+        for classe in [HABITE, ZONE, CHAMP, PRE, BOIS] {
+            for (_, a) in liste.iter().filter(|(c, _)| *c == classe) {
+                remplir_avec(a, mx, mz, |i| sol[i] = classe);
+            }
         }
     }
     for c in &sol {
         compte[*c as usize] += 1;
     }
     let km2 = |k: usize| compte[k] as f64 * (pas * 2.0).powi(2) / 1e6;
-    s.noter(&format!("{} surfaces d'occupation : bois {:.0} km², prés {:.0}, champs {:.0}, habité {:.0}, zones {:.0}", surfaces_sol.len(), km2(1), km2(2), km2(3), km2(4), km2(5)));
+    s.noter(&format!("{} surfaces d'occupation : bois {:.0} km², prés {:.0}, champs {:.0}, habité {:.0}, zones {:.0}", fond.len() + surfaces_sol.len(), km2(1), km2(2), km2(3), km2(4), km2(5)));
     s.etape("écriture", 0.98);
     let mut lieu = Lieu::sur(nom, lat, lon, x0, y0, pas, g, niveau, &h, &eau, routes, batiments, ponts).avec_sol(sol);
     lieu.transports = transports;
@@ -1015,28 +1131,35 @@ fn generer_dans(d: &Demande, r: &dyn Reseau, s: &Suivi, cache: &Path) -> Result<
 fn overpass(r: &dyn Reseau, s: &Suivi, f: &Path, quoi: &str, requete: &str) -> Result<J, String> {
     if !f.exists() {
         let q = format!("data={}", encoder(&format!("[out:json][timeout:300];{requete}")));
-        let mut ok = false;
-        'essais: for essai in 0..5 {
+        // Les tours d'essais, sans limite : chaque serveur à son tour (un serveur muet,
+        // qui ne répond même pas à sa page d'état, est sauté : sa requête attendrait
+        // 5 minutes pour rien), puis une attente qui double jusqu'à 5 minutes
+        let mut essai = 0u32;
+        'essais: loop {
             for url in OVERPASS {
                 s.suivre()?;
+                if r.sonder(&url.replace("/interpreter", "/status")) == Some(false) {
+                    s.noter(&format!("{quoi} OSM : {url} ne répond pas, sauté"));
+                    continue;
+                }
                 s.noter(&format!("{quoi} OSM ({url})…"));
                 let rendu = telecharger(r, s, url, Some(&q), f);
                 if rendu.is_ok() && std::fs::read(f).is_ok_and(|o| o.first() == Some(&b'{')) {
-                    ok = true;
                     break 'essais;
+                }
+                if let Err(e) = rendu {
+                    s.noter(&format!("{quoi} OSM : {url} a échoué ({e})"));
                 }
                 let _ = std::fs::remove_file(f);
             }
-            let attente = 15 << essai;
-            s.noter(&format!("Overpass occupé, nouvel essai dans {attente} s"));
+            let attente = (15u64 << essai.min(5)).min(ATTENTE_OVERPASS_MAX);
+            s.noter(&format!("Overpass occupé (tour {}), nouvel essai dans {} — on attend qu'un serveur revienne", essai + 1, duree(attente as f64)));
             // Par secondes : un arrêt demandé n'attend pas
             for _ in 0..attente {
                 s.suivre()?;
                 std::thread::sleep(std::time::Duration::from_secs(1));
             }
-        }
-        if !ok {
-            return Err("Overpass ne répond pas : réessayez plus tard".into());
+            essai += 1;
         }
     } else {
         s.compter_cache();
@@ -1514,6 +1637,270 @@ impl Mnh {
     }
 }
 
+/// Les surfaces classées d'une couche (fond ou précises).
+pub type Surfaces = Vec<(u8, Vec<Vec<(f64, f64)>>)>;
+
+/// Le WFS de la Géoplateforme de l'IGN.
+const WFS_IGN: &str = "https://data.geopf.fr/wfs/ows";
+/// Les objets par page du WFS.
+const PAGE_WFS: usize = 5000;
+
+/// Une couche du WFS de l'IGN dans le cadre (degrés : lat0, lon0, lat1, lon1), en
+/// Lambert 93, page par page (gardées dans le cache), réduite aux champs `champs` (tous
+/// si vide) : chaque objet donné à `f`, page après page (une couche entière serait
+/// lourde à garder) ; rend leur nombre.
+fn wfs_ign(r: &dyn Reseau, s: &Suivi, cache: &Path, suffixe: &str, couche: &str, champs: &str, cadre: (f64, f64, f64, f64), f_objet: &mut dyn FnMut(&J)) -> Result<usize, String> {
+    let court = couche.rsplit(':').next().unwrap_or(couche);
+    let base = format!("{WFS_IGN}?SERVICE=WFS&VERSION=2.0.0&REQUEST=GetFeature&TYPENAMES={couche}&BBOX={:.5},{:.5},{:.5},{:.5},urn:ogc:def:crs:EPSG::4326", cadre.0, cadre.1, cadre.2, cadre.3);
+    let proprietes = if champs.is_empty() { String::new() } else { format!("&PROPERTYNAME={champs}") };
+    let fichier = |page: usize| cache.join(format!("ign_{court}_{page}{suffixe}.json"));
+    // Une page dans le cache (si elle n'y est pas déjà) : trois essais, à dix secondes
+    // d'écart
+    let charger = |page: usize| -> Result<(), String> {
+        let f = fichier(page);
+        if f.exists() {
+            s.compter_cache();
+            return Ok(());
+        }
+        let url = format!("{base}&OUTPUTFORMAT=application/json&SRSNAME=EPSG:2154&COUNT={PAGE_WFS}&STARTINDEX={}{proprietes}", page * PAGE_WFS);
+        let mut rendu = Err(String::new());
+        for essai in 0..3 {
+            if essai > 0 {
+                for _ in 0..10 {
+                    s.suivre()?;
+                    std::thread::sleep(std::time::Duration::from_secs(1));
+                }
+            }
+            rendu = telecharger(r, s, &url, None, &f).and_then(|_| if std::fs::read(&f).is_ok_and(|o| o.first() == Some(&b'{')) { Ok(()) } else { Err("réponse qui n'est pas du JSON".into()) });
+            if rendu.is_ok() {
+                break;
+            }
+            let _ = std::fs::remove_file(&f);
+        }
+        rendu.map_err(|e| format!("{court} : {e}"))
+    };
+    // Le nombre d'objets (une requête légère) : les pages se téléchargent alors
+    // `FILS_WFS` à la fois (le serveur sert chaque requête lentement)
+    if let Some(n) = nombre_wfs(r, s, &cache.join(format!("ign_{court}_nombre{suffixe}.xml")), &format!("{base}&RESULTTYPE=hits")) {
+        let pages = n.div_ceil(PAGE_WFS).max(1);
+        s.noter(&format!("IGN : {court}, {n} objets en {pages} pages, {FILS_WFS} à la fois…"));
+        let suivante = std::sync::atomic::AtomicUsize::new(0);
+        let faites = std::sync::atomic::AtomicUsize::new(0);
+        let erreur: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+        std::thread::scope(|sc| {
+            for _ in 0..FILS_WFS.min(pages) {
+                sc.spawn(|| loop {
+                    let p = suivante.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    if p >= pages || erreur.lock().map_or(true, |e| e.is_some()) {
+                        break;
+                    }
+                    let deja = fichier(p).exists();
+                    if let Err(e) = s.suivre().and_then(|_| charger(p)) {
+                        if let Ok(mut m) = erreur.lock() {
+                            m.get_or_insert(e);
+                        }
+                        break;
+                    }
+                    let k = faites.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                    if !deja {
+                        s.noter(&format!("IGN : {court}, {k}/{pages} pages"));
+                    }
+                });
+            }
+        });
+        if let Some(e) = erreur.into_inner().ok().flatten() {
+            return Err(e);
+        }
+    }
+    // Puis lues dans l'ordre (sans le nombre : téléchargées en les lisant, une à une)
+    let mut objets = 0;
+    for page in 0.. {
+        s.suivre()?;
+        if !fichier(page).exists() {
+            s.noter(&format!("IGN : {court}, page {}…", page + 1));
+        }
+        charger(page)?;
+        let f = fichier(page);
+        let texte = std::fs::read_to_string(&f).map_err(|e| e.to_string())?;
+        let Some(j) = json::lire(&texte) else {
+            let _ = std::fs::remove_file(&f);
+            return Err(format!("{court} : réponse illisible"));
+        };
+        let liste = j.get("features").and_then(J::liste).ok_or_else(|| format!("{court} : réponse sans objets"))?;
+        let n = liste.len();
+        for o in liste {
+            f_objet(o);
+        }
+        objets += n;
+        if n < PAGE_WFS {
+            break;
+        }
+    }
+    Ok(objets)
+}
+
+/// Les pages du WFS téléchargées à la fois.
+const FILS_WFS: usize = 4;
+
+/// Le nombre d'objets d'une requête WFS (`RESULTTYPE=hits`, gardé dans `f`) ; rien si
+/// le serveur ne le dit pas.
+fn nombre_wfs(r: &dyn Reseau, s: &Suivi, f: &Path, url: &str) -> Option<usize> {
+    if !f.exists() && telecharger(r, s, url, None, f).is_err() {
+        let _ = std::fs::remove_file(f);
+        return None;
+    }
+    let t = std::fs::read_to_string(f).ok()?;
+    let n = t.split("numberMatched=\"").nth(1)?.split('"').next()?.parse().ok();
+    if n.is_none() {
+        let _ = std::fs::remove_file(f);
+    }
+    n
+}
+
+/// Les anneaux d'une géométrie GeoJSON (Polygon ou MultiPolygon), par `en_grille`.
+fn anneaux_geojson(g: Option<&J>, en_grille: &dyn Fn(f64, f64) -> (f64, f64)) -> Vec<Vec<(f64, f64)>> {
+    let Some(g) = g else { return Vec::new() };
+    let anneau = |a: &J| -> Vec<(f64, f64)> { a.liste().unwrap_or(&[]).iter().filter_map(|p| p.nombres::<2>()).map(|[x, y]| en_grille(x, y)).collect() };
+    let polygones: Vec<&J> = match g.get("type").and_then(J::txt) {
+        Some("Polygon") => g.get("coordinates").into_iter().collect(),
+        Some("MultiPolygon") => g.get("coordinates").and_then(J::liste).unwrap_or(&[]).iter().collect(),
+        _ => Vec::new(),
+    };
+    polygones.into_iter().flat_map(|p| p.liste().unwrap_or(&[]).iter().map(anneau)).filter(|a| a.len() > 3).collect()
+}
+
+/// L'occupation du sol de l'IGN : en fond, la BD CARTO (bâti, zones d'activités,
+/// forêts, prairies : tout le pays, au 1:50 000) ; par-dessus, la végétation de la
+/// BD TOPO (les bois au mètre), les parcelles agricoles déclarées (RPG : champs ou
+/// prés selon la culture), les parcs, squares et jardins, les cimetières.
+pub fn sol_ign(r: &dyn Reseau, s: &Suivi, cache: &Path, suffixe: &str, cadre: (f64, f64, f64, f64), en_grille: &dyn Fn(f64, f64) -> (f64, f64)) -> Result<(Surfaces, Surfaces), String> {
+    use crate::PRE;
+    let couche = |nom: &str, classe: &dyn Fn(&J) -> Option<u8>| -> Result<Surfaces, String> {
+        let mut v = Vec::new();
+        wfs_ign(r, s, cache, suffixe, nom, "", cadre, &mut |o| {
+            let Some(c) = o.get("properties").and_then(classe) else { return };
+            let a = anneaux_geojson(o.get("geometry"), en_grille);
+            if !a.is_empty() {
+                v.push((c, a));
+            }
+        })?;
+        Ok(v)
+    };
+    let txt = |p: &J, k: &str| p.get(k).and_then(J::txt).map(str::to_string).unwrap_or_default();
+    let fond = couche("BDCARTO_V5:occupation_du_sol", &|p| classe_bdcarto(&txt(p, "nature")))?;
+    let mut precises = couche("BDTOPO_V3:zone_de_vegetation", &|p| classe_vegetation(&txt(p, "nature")))?;
+    precises.extend(couche("IGNF_RPG_PARCELLES-AGRICOLES-CATEGORISEES_2024:parcelles_agricole_categorisees_2024", &|p| Some(classe_rpg(&txt(p, "code_cultu"))))?);
+    precises.extend(couche("BDTOPO_V3:zone_d_activite_ou_d_interet", &|p| classe_interet(&txt(p, "nature"), &txt(p, "nature_detaillee")))?);
+    precises.extend(couche("BDTOPO_V3:cimetiere", &|_| Some(PRE))?);
+    Ok((fond, precises))
+}
+
+/// Les champs des bâtiments demandés à l'IGN.
+const CHAMPS_BATI_IGN: &str = "geometrie,nature,usage_1,construction_legere,etat_de_l_objet,hauteur,nombre_d_etages";
+
+/// Les contours extérieurs d'une géométrie GeoJSON (le premier anneau de chaque
+/// polygone), par `en_grille`.
+fn contours_geojson(g: Option<&J>, en_grille: &dyn Fn(f64, f64) -> (f64, f64)) -> Vec<Vec<(f64, f64)>> {
+    let Some(g) = g else { return Vec::new() };
+    let polygones: Vec<&J> = match g.get("type").and_then(J::txt) {
+        Some("Polygon") => g.get("coordinates").into_iter().collect(),
+        Some("MultiPolygon") => g.get("coordinates").and_then(J::liste).unwrap_or(&[]).iter().collect(),
+        _ => Vec::new(),
+    };
+    polygones
+        .into_iter()
+        .filter_map(|p| p.liste()?.first())
+        .map(|a| a.liste().unwrap_or(&[]).iter().filter_map(|p| p.liste().filter(|l| l.len() >= 2).and_then(|l| Some((l[0].num()?, l[1].num()?)))).map(|(x, y)| en_grille(x, y)).collect())
+        .collect()
+}
+
+/// Le genre et la hauteur (m) d'un bâtiment de la BD TOPO : sa hauteur mesurée, sinon
+/// ses étages, sinon selon son genre ; le genre d'après sa nature et son usage (une
+/// construction légère est une annexe ; un résidentiel ou indifférencié, une maison
+/// jusqu'à deux niveaux et 9 m, un immeuble au-delà). Rien pour ce qui n'est pas (ou
+/// plus) en service.
+fn genre_bati_ign(p: &J) -> Option<(u8, f32)> {
+    use crate::{ANNEXE, EDIFICE, IMMEUBLE, INDUSTRIEL, MAISON};
+    let txt = |k: &str| p.get(k).and_then(J::txt).unwrap_or("");
+    if !matches!(txt("etat_de_l_objet"), "" | "En service") {
+        return None;
+    }
+    let mesuree = p.get("hauteur").and_then(J::num).filter(|h| *h > 0.5).map(|h| h as f32);
+    let etages = p.get("nombre_d_etages").and_then(J::num).filter(|e| *e > 0.0).map(|e| e as f32);
+    let h = mesuree.or(etages.map(|e| 3.0 * e + 1.0));
+    let (nature, usage) = (txt("nature"), txt("usage_1"));
+    let genre = if p.get("construction_legere").and_then(J::bool) == Some(true) || usage == "Annexe" {
+        ANNEXE
+    } else if matches!(nature, "Eglise" | "Chapelle" | "Tour, donjon" | "Monument" | "Château" | "Fort, blockhaus, casemate" | "Arc de triomphe") || matches!(usage, "Religieux" | "Sportif") {
+        EDIFICE
+    } else if matches!(nature, "Industriel, agricole ou commercial" | "Serre" | "Silo") || matches!(usage, "Industriel" | "Agricole") {
+        INDUSTRIEL
+    } else if h.is_some_and(|h| h <= 9.0) && etages.is_none_or(|e| e <= 2.0) {
+        MAISON
+    } else if h.is_some() {
+        IMMEUBLE
+    } else {
+        MAISON
+    };
+    let defaut = match genre {
+        ANNEXE => 3.0,
+        EDIFICE => 14.0,
+        INDUSTRIEL => 8.0,
+        IMMEUBLE => 12.0,
+        _ => 7.0,
+    };
+    Some((genre, h.unwrap_or(defaut)))
+}
+
+/// La classe d'une surface de la BD CARTO (`nature`). Ses terres cultivées n'y sont
+/// pas : c'est ce qui reste entre ses surfaces (des champs).
+fn classe_bdcarto(nature: &str) -> Option<u8> {
+    use crate::{BOIS, HABITE, PRE, ZONE};
+    match nature {
+        "Forêt" | "Bois" | "Peupleraie" => Some(BOIS),
+        "Prairie" | "Broussailles" | "Marais, tourbière" | "Vigne, verger" => Some(PRE),
+        "Bâti" => Some(HABITE),
+        "Zone d'activités" | "Carrière, décharge" => Some(ZONE),
+        _ => None,
+    }
+}
+
+/// La classe d'une zone de végétation de la BD TOPO (`nature`) : les vergers, vignes
+/// et landes en prés, le reste en bois.
+fn classe_vegetation(nature: &str) -> Option<u8> {
+    use crate::{BOIS, PRE};
+    match nature {
+        "Verger" | "Vigne" | "Lande herbacée" => Some(PRE),
+        "" => None,
+        _ => Some(BOIS),
+    }
+}
+
+/// La classe d'une parcelle du RPG d'après sa culture (`code_cultu`) : les prairies
+/// (permanentes, temporaires, pâturages) et jachères en prés, le reste en champs.
+fn classe_rpg(code: &str) -> u8 {
+    use crate::{CHAMP, PRE};
+    let pre = ["PPH", "PRL", "PTR", "PPR", "PRA", "SPH", "SPL", "PAT", "BOP", "CAE", "CEE", "JAC", "JNO", "J5M", "J6P", "J6S", "MLG"];
+    if pre.contains(&code) {
+        PRE
+    } else {
+        CHAMP
+    }
+}
+
+/// La classe d'une zone d'activité ou d'intérêt de la BD TOPO : les parcs, squares et
+/// jardins en prés, les zones industrielles et d'activités en zones ; le reste (écoles,
+/// places, mairies…) ne dit rien du sol.
+fn classe_interet(nature: &str, detaillee: &str) -> Option<u8> {
+    use crate::{PRE, ZONE};
+    match (nature, detaillee) {
+        (_, "Parc" | "Square" | "Jardin public" | "Jardins familiaux" | "Jardin botanique" | "Arboretum") => Some(PRE),
+        ("Parc" | "Golf" | "Camping" | "Parc de loisirs", _) => Some(PRE),
+        ("Zone industrielle" | "Usine" | "Divers industriel" | "Centrale électrique" | "Déchèterie" | "Carrière" | "Marché", _) | (_, "Zone d'activités") => Some(ZONE),
+        _ => None,
+    }
+}
+
 /// La classe d'occupation du sol d'une surface d'après ses étiquettes OSM.
 fn classe_sol(tags: Option<&J>) -> Option<u8> {
     use crate::{BOIS, CHAMP, HABITE, PRE, ZONE};
@@ -1648,6 +2035,52 @@ mod tests {
             };
             std::fs::write(sortie, o).map_err(|e| e.to_string())
         }
+    }
+
+    /// Un réseau dont le second serveur Overpass est muet.
+    struct Muet(Mutex<Vec<String>>);
+
+    impl Reseau for Muet {
+        fn telecharger(&self, url: &str, _post: Option<&str>, sortie: &Path) -> Result<(), String> {
+            self.0.lock().unwrap().push(url.to_string());
+            std::fs::write(sortie, b"{\"elements\": []}").map_err(|e| e.to_string())
+        }
+        fn sonder(&self, url: &str) -> Option<bool> {
+            Some(!url.contains("kumi"))
+        }
+    }
+
+    #[test]
+    fn une_demande_se_reprend_de_son_cache() {
+        let sortie = std::env::temp_dir().join(format!("sage-reel-reprise-{}.reel", std::process::id()));
+        let c = cache(&sortie);
+        let _ = std::fs::remove_dir_all(&c);
+        std::fs::create_dir_all(&c).unwrap();
+        // D'après le journal (une génération d'avant)
+        let (x, y) = crate::lambert93(49.4431, 1.0993);
+        std::fs::write(c.join("journal.txt"), format!("[0 s] Rouen centre : Lambert-93 ({x:.0}, {y:.0}), 3001 × 2501 points de 2 m (6.0 × 5.0 km)\n[3 s] eau…\n")).unwrap();
+        std::fs::write(c.join("osm_eau_6000x5000.json"), "{}").unwrap();
+        let d = Demande::reprendre(&sortie).unwrap();
+        assert_eq!((d.nom.as_str(), d.pas, d.largeur, d.longueur, d.toits), ("Rouen centre", 2.0, 6000.0, 5000.0, true));
+        assert!((d.lat - 49.4431).abs() < 1e-4 && (d.lon - 1.0993).abs() < 1e-4, "{} {}", d.lat, d.lon);
+        // D'après la demande gardée
+        let e = Demande { nom: "Rouen = centre".into(), lat: 49.1, lon: 1.2, pas: 4.0, sortie: sortie.clone(), toits: false, largeur: 3000.0, longueur: 0.0 };
+        std::fs::write(c.join(DEMANDE), e.texte()).unwrap();
+        let d = Demande::reprendre(&sortie).unwrap();
+        let _ = std::fs::remove_dir_all(&c);
+        assert_eq!((d.nom.as_str(), d.lat, d.lon, d.pas, d.toits, d.largeur, d.longueur), ("Rouen = centre", 49.1, 1.2, 4.0, false, 3000.0, 0.0));
+    }
+
+    #[test]
+    fn un_serveur_overpass_muet_est_saute() {
+        let f = std::env::temp_dir().join(format!("sage-reel-muet-{}.json", std::process::id()));
+        let _ = std::fs::remove_file(&f);
+        let r = Muet(Mutex::new(Vec::new()));
+        // Le premier serveur échoue (fichier pas en JSON) : le second, muet, est sauté
+        // sans rien lui demander ; ici le premier répond du premier coup
+        overpass(&r, &Suivi::default(), &f, "essai", "node(1);out;").unwrap();
+        let _ = std::fs::remove_file(&f);
+        assert_eq!(r.0.lock().unwrap().as_slice(), [OVERPASS[0]]);
     }
 
     #[test]
