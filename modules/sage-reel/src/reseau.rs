@@ -264,6 +264,8 @@ pub struct Arete {
     pub passage: Passage,
     pub genre: u8,
     pub largeur: f32,
+    /// Le revêtement de la voie (`crate::BITUME`…).
+    pub revetement: u8,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -279,6 +281,7 @@ pub struct Reseau {
 struct Brut {
     passage: Passage,
     genre: u8,
+    revetement: u8,
     largeur: f32,
     points: Vec<[f32; 3]>,
 }
@@ -323,7 +326,7 @@ impl Index {
 
 /// Le réseau des voies d'un lieu : tous les tracés (sol, ponts, tunnels) en un graphe.
 pub fn reseau(l: &Lieu) -> Reseau {
-    let mut t: Vec<Brut> = traces(l).into_iter().filter(|x| x.route.points.len() >= 2).map(|x| Brut { passage: x.passage, genre: x.route.genre, largeur: x.route.largeur, points: x.route.points.clone() }).collect();
+    let mut t: Vec<Brut> = traces(l).into_iter().filter(|x| x.route.points.len() >= 2).map(|x| Brut { passage: x.passage, genre: x.route.genre, revetement: x.route.revetement, largeur: x.route.largeur, points: x.route.points.clone() }).collect();
     let mut r = Reseau::default();
     // Les sommets de tous les tracés, au centimètre
     let compter = |t: &[Brut]| {
@@ -434,7 +437,7 @@ pub fn reseau(l: &Lieu) -> Reseau {
             if i == n - 1 || sommets[&cle(x.points[i])] > 1 {
                 let (a, b) = (noeud(x.points[debut], &mut r), noeud(x.points[i], &mut r));
                 let k = r.aretes.len();
-                r.aretes.push(Arete { a, b, points: x.points[debut..=i].to_vec(), passage: x.passage, genre: x.genre, largeur: x.largeur });
+                r.aretes.push(Arete { a, b, points: x.points[debut..=i].to_vec(), passage: x.passage, genre: x.genre, largeur: x.largeur, revetement: x.revetement });
                 r.noeuds[a].aretes.push(k);
                 if b != a {
                     r.noeuds[b].aretes.push(k);

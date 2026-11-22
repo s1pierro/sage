@@ -29,6 +29,11 @@ fn couleur(m: &str) -> [f64; 3] {
         // Le bitume bordeaux des voies de bus en site propre
         "chaussee_bus" => [0.36, 0.11, 0.13],
         "chaussee_tunnel" => [0.15, 0.15, 0.17],
+        "chaussee_beton" => [0.70, 0.69, 0.66],
+        "chaussee_paves" => [0.50, 0.46, 0.42],
+        "chaussee_gravier" => [0.62, 0.58, 0.50],
+        "chaussee_terre" => [0.45, 0.36, 0.26],
+        "chaussee_herbe" => [0.40, 0.52, 0.30],
         "beton" => [0.80, 0.79, 0.76],
         // Les tons des bâtiments (Flow : maquette::matiere::TEINTES_BATI)
         "bati_0" => [0.92, 0.90, 0.85],

@@ -14,7 +14,9 @@ fn main() {
     let mut par_tuile: HashMap<usize, Vec<(usize, f32, f32, f32)>> = HashMap::new();
     // TUNNELS=1 : les tunnels au lieu des voies de bus
     let tunnels = std::env::var("TUNNELS").is_ok();
-    for (k, x) in r.aretes.iter().enumerate().filter(|(_, x)| if tunnels { x.passage == sage_reel::reseau::Passage::Tunnel && x.genre <= sage_reel::SERVICE } else { x.genre == sage_reel::BUS }) {
+    // PAVES=1 : les voies pavées (hors piétonnes et sentiers)
+    let paves = std::env::var("PAVES").is_ok();
+    for (k, x) in r.aretes.iter().enumerate().filter(|(_, x)| if paves { x.revetement == sage_reel::PAVES && x.passage == sage_reel::reseau::Passage::Sol && (x.genre <= sage_reel::SERVICE || x.genre == sage_reel::RUE_PIETONNE) } else if tunnels { x.passage == sage_reel::reseau::Passage::Tunnel && x.genre <= sage_reel::SERVICE } else { x.genre == sage_reel::BUS }) {
         for w in x.points.windows(2) {
             let (dx, dz) = (w[1][0] - w[0][0], w[1][1] - w[0][1]);
             let n = dx.hypot(dz).ceil().max(1.0) as usize;
@@ -58,7 +60,7 @@ fn main() {
     println!("{} m d'axe de bus dans la carte : {:?}", res.len(), compte);
     // Trous : cases non bordeaux regroupées par 10 m
     let mut trous: HashMap<(i32, i32), (usize, String)> = HashMap::new();
-    for x in res.iter().filter(|x| x.3 != if tunnels { "chaussee_tunnel" } else { "chaussee_bus" }) {
+    for x in res.iter().filter(|x| x.3 != if paves { "chaussee_paves" } else if tunnels { "chaussee_tunnel" } else { "chaussee_bus" }) {
         let c = trous.entry(((x.1 / 10.0).floor() as i32, (x.2 / 10.0).floor() as i32)).or_insert((0, x.3.clone()));
         c.0 += 1;
     }

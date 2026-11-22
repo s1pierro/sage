@@ -68,8 +68,12 @@ pub const CHEMIN: u8 = 4;
 pub const SENTIER: u8 = 5;
 /// Les voies réservées aux bus (sites propres) : une chaussée, à part des autres.
 pub const BUS: u8 = 6;
+/// Les rues piétonnes (`highway=pedestrian`) : dessinées sur l'axe de la rue comme une
+/// route (au contraire des trottoirs et cheminements, `PIETONNE`), elles ont une
+/// chaussée, souvent pavée.
+pub const RUE_PIETONNE: u8 = 7;
 /// Le nombre de genres de routes.
-pub const GENRES: u8 = 7;
+pub const GENRES: u8 = 8;
 
 /// Les revêtements des voies (le `surface=*` d'OSM), dans l'ordre de ceux du son des
 /// pneus (`sage-son-pneus::REVETEMENTS`).
@@ -85,12 +89,12 @@ pub const REVETEMENTS: u8 = 6;
 pub const NOMS_REVETEMENTS: [&str; REVETEMENTS as usize] = ["bitume", "béton", "pavés", "gravier", "terre", "herbe"];
 
 /// Le nom de chaque genre de route, dans l'ordre des valeurs.
-pub const NOMS_GENRES: [&str; GENRES as usize] = ["Grande route", "Route", "Service", "Piétonne", "Chemin", "Sentier", "Bus"];
+pub const NOMS_GENRES: [&str; GENRES as usize] = ["Grande route", "Route", "Service", "Piétonne", "Chemin", "Sentier", "Bus", "Rue piétonne"];
 
-/// Une chaussée (grande route, route, service, bus), par opposition aux voies
-/// piétonnes, chemins et sentiers.
+/// Une chaussée (grande route, route, service, bus, rue piétonne), par opposition aux
+/// trottoirs et cheminements, chemins et sentiers.
 pub fn carrossable(genre: u8) -> bool {
-    genre <= SERVICE || genre == BUS
+    genre <= SERVICE || genre == BUS || genre == RUE_PIETONNE
 }
 
 /// La couleur d'une route de ce genre.
@@ -102,6 +106,7 @@ pub fn teinte(genre: u8) -> [f32; 3] {
         PIETONNE => [0.60, 0.58, 0.54],
         CHEMIN => [0.56, 0.48, 0.37],
         BUS => [0.44, 0.27, 0.25],
+        RUE_PIETONNE => [0.50, 0.48, 0.45],
         _ => [0.52, 0.45, 0.34],
     }
 }

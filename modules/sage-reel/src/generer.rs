@@ -1296,7 +1296,7 @@ fn recaler(trace: Vec<Vec<[f32; 2]>>, voies: &Segments) -> Vec<crate::transports
 /// (`transports::SOL`, `PONT`, `TUNNEL`) ; rien pour ce qui n'est pas une voie
 /// (escaliers, projets, surfaces, voies intérieures…).
 fn genre_route(tags: Option<&J>) -> Option<(u8, f32, u8)> {
-    use crate::{BUS, CHEMIN, GRANDE, PIETONNE, ROUTE, SENTIER, SERVICE};
+    use crate::{BUS, CHEMIN, GRANDE, PIETONNE, ROUTE, RUE_PIETONNE, SENTIER, SERVICE};
     let tag = |k: &str| tags.and_then(|t| t.get(k)).and_then(J::txt);
     let pont = ou_passe(tags);
     if tag("area") == Some("yes") || tag("indoor").is_some_and(|v| v != "no") {
@@ -1316,7 +1316,7 @@ fn genre_route(tags: Option<&J>) -> Option<(u8, f32, u8)> {
         "busway" | "bus_guideway" => (BUS, 3.5),
         "service" if ["bus", "psv"].iter().any(|k| tag(k) == Some("designated")) => (BUS, 3.5),
         "service" => (SERVICE, 4.0),
-        "pedestrian" => (PIETONNE, 6.0),
+        "pedestrian" => (RUE_PIETONNE, 6.0),
         "cycleway" => (PIETONNE, 2.5),
         "footway" => (PIETONNE, 2.0),
         "track" => (CHEMIN, 3.0),
@@ -1326,7 +1326,7 @@ fn genre_route(tags: Option<&J>) -> Option<(u8, f32, u8)> {
     // Une chaussée non revêtue est un chemin ; un sentier revêtu, une voie piétonne
     let terre = tag("surface").is_some_and(|s| ["unpaved", "gravel", "fine_gravel", "dirt", "earth", "ground", "grass", "compacted", "mud", "sand"].contains(&s));
     let genre = match (genre, terre) {
-        (ROUTE | SERVICE | PIETONNE, true) => CHEMIN,
+        (ROUTE | SERVICE | PIETONNE | RUE_PIETONNE, true) => CHEMIN,
         (SENTIER, false) if tag("surface").is_some() => PIETONNE,
         (g, _) => g,
     };
@@ -1745,6 +1745,11 @@ mod tests {
         assert_eq!(g(r#"{"highway":"bus_guideway","lanes":"2"}"#), Some((crate::BUS, 7.5)));
         assert_eq!(g(r#"{"highway":"service","psv":"designated"}"#), Some((crate::BUS, 3.5)));
         assert_eq!(g(r#"{"highway":"service"}"#), Some((crate::SERVICE, 4.0)));
+        // Les rues piétonnes à part des trottoirs ; une place (surface) n'est pas lue
+        assert_eq!(g(r#"{"highway":"pedestrian"}"#), Some((crate::RUE_PIETONNE, 6.0)));
+        assert_eq!(g(r#"{"highway":"footway","footway":"sidewalk"}"#), Some((crate::PIETONNE, 2.0)));
+        assert_eq!(g(r#"{"highway":"pedestrian","area":"yes"}"#), None);
+        assert!(crate::carrossable(crate::RUE_PIETONNE) && !crate::carrossable(crate::PIETONNE));
         assert!(crate::carrossable(crate::BUS) && !crate::carrossable(crate::SENTIER));
     }
 }
