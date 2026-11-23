@@ -46,7 +46,7 @@ pub const DEMI_CARTE: i32 = 156;
 pub const DEPART: [f32; 2] = [TAILLE / 2.0, TAILLE / 2.0];
 
 pub const MAGIQUE: &[u8; 8] = b"SAGEREEL";
-pub const FORMAT: u32 = 13;
+pub const FORMAT: u32 = 15;
 
 /// Le texte à citer.
 pub const SOURCES: &str = "Relief et hauteurs © IGN (RGE ALTI, LiDAR HD) · eau, routes, bâtiments et occupation du sol © les contributeurs OpenStreetMap";
@@ -234,6 +234,9 @@ pub struct Files {
     pub arriere: u8,
     /// Le nombre de files vient d'OSM ; sinon il est déduit.
     pub osm: bool,
+    /// Les files réservées au bus (format 15) : le bit `i` pour la file `i`, comptée
+    /// de la gauche du tracé (comme les décalages : 0 la plus à gauche).
+    pub bus: u16,
 }
 
 impl Files {
@@ -246,14 +249,19 @@ impl Files {
         }
         let n = ((largeur - 1.0) / 3.25).round().clamp(1.0, 8.0) as u8;
         match sens {
-            1 => Files { total: n, avant: n, arriere: 0, osm: false },
-            -1 => Files { total: n, avant: 0, arriere: n, osm: false },
-            _ if largeur < 4.5 => Files { total: 1, avant: 0, arriere: 0, osm: false },
+            1 => Files { total: n, avant: n, arriere: 0, osm: false, bus: 0 },
+            -1 => Files { total: n, avant: 0, arriere: n, osm: false, bus: 0 },
+            _ if largeur < 4.5 => Files { total: 1, avant: 0, arriere: 0, osm: false, bus: 0 },
             _ => {
                 let t = (((largeur - 1.0) / 6.5).round() as u8).clamp(1, 4) * 2;
-                Files { total: t, avant: t / 2, arriere: t / 2, osm: false }
+                Files { total: t, avant: t / 2, arriere: t / 2, osm: false, bus: 0 }
             }
         }
+    }
+
+    /// La file `i` (de la gauche du tracé) est réservée au bus.
+    pub fn est_bus(&self, i: usize) -> bool {
+        i < 16 && self.bus >> i & 1 == 1
     }
 
     fn octets(&self) -> [u8; 4] {
@@ -261,12 +269,15 @@ impl Files {
     }
 
     fn depuis(o: &[u8]) -> Files {
-        Files { total: o[0], avant: o[1].min(o[0]), arriere: o[2].min(o[0].saturating_sub(o[1])), osm: o[3] != 0 }
+        Files { total: o[0], avant: o[1].min(o[0]), arriere: o[2].min(o[0].saturating_sub(o[1])), osm: o[3] != 0, bus: 0 }
     }
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Route {
+    /// Le niveau d'OSM (`layer`, format 14) : qui passe dessus quand deux ponts ou deux
+    /// tunnels se croisent ; un tunnel est au moins au niveau −1, un pont au moins 1.
+    pub niveau: i8,
     /// Le revêtement (`BITUME`, `BETON`, `PAVES`, `GRAVIER`, `TERRE`, `HERBE`).
     pub revetement: u8,
     /// Ses files (format 13).
@@ -549,13 +560,13 @@ impl Lieu {
                     if dans(p) {
                         m.push(*p);
                     } else if m.len() > 1 {
-                        v.push(Route { revetement: r.revetement, files: r.files, genre: r.genre, largeur: r.largeur, points: std::mem::take(&mut m) });
+                        v.push(Route { niveau: r.niveau, revetement: r.revetement, files: r.files, genre: r.genre, largeur: r.largeur, points: std::mem::take(&mut m) });
                     } else {
                         m.clear();
                     }
                 }
                 if m.len() > 1 {
-                    v.push(Route { revetement: r.revetement, files: r.files, genre: r.genre, largeur: r.largeur, points: m });
+                    v.push(Route { niveau: r.niveau, revetement: r.revetement, files: r.files, genre: r.genre, largeur: r.largeur, points: m });
                 }
             }
             v
@@ -815,6 +826,18 @@ impl Lieu {
                 o.extend_from_slice(&r.files.octets());
             }
         }
+        // Les niveaux des routes, des ponts et des tunnels (format 14)
+        for v in [&self.routes, &self.ponts, &self.transports.tunnels] {
+            o.extend_from_slice(&(v.len() as u32).to_le_bytes());
+            o.extend(v.iter().map(|r| r.niveau as u8));
+        }
+        // Les files réservées au bus des routes, des ponts et des tunnels (format 15)
+        for v in [&self.routes, &self.ponts, &self.transports.tunnels] {
+            o.extend_from_slice(&(v.len() as u32).to_le_bytes());
+            for r in v.iter() {
+                o.extend_from_slice(&r.files.bus.to_le_bytes());
+            }
+        }
         o
     }
 
@@ -896,7 +919,7 @@ impl Lieu {
                 let m = u32_(prendre(4)?) as usize;
                 let o = prendre(m * 12)?;
                 let points = o.chunks(12).map(|c| [f32_(&c[0..4]), f32_(&c[4..8]), f32_(&c[8..12])]).collect();
-                routes.push(Route { revetement: 0, files: Files::deduire(genre, largeur, 0), genre, largeur, points });
+                routes.push(Route { niveau: 0, revetement: 0, files: Files::deduire(genre, largeur, 0), genre, largeur, points });
             }
             routes
         }}}
@@ -972,6 +995,32 @@ impl Lieu {
                 }
             }
         }
+        if format >= 14 {
+            for v in [&mut routes, &mut ponts, &mut transports.tunnels] {
+                if u32_(prendre(4)?) as usize != v.len() {
+                    return None;
+                }
+                let n = v.len();
+                for (r, &b) in v.iter_mut().zip(prendre(n)?) {
+                    r.niveau = b as i8;
+                }
+            }
+        } else {
+            // Avant le format 14 : les ponts au niveau 1, les tunnels au niveau −1
+            ponts.iter_mut().for_each(|r| r.niveau = 1);
+            transports.tunnels.iter_mut().for_each(|r| r.niveau = -1);
+        }
+        if format >= 15 {
+            for v in [&mut routes, &mut ponts, &mut transports.tunnels] {
+                if u32_(prendre(4)?) as usize != v.len() {
+                    return None;
+                }
+                let n = v.len();
+                for (r, b) in v.iter_mut().zip(prendre(n * 2)?.chunks(2)) {
+                    r.files.bus = u16::from_le_bytes([b[0], b[1]]);
+                }
+            }
+        }
         if k != o.len() {
             return None;
         }
@@ -1002,7 +1051,7 @@ mod tests {
         let eau: Vec<bool> = (0..n * n).map(|i| i % n < n / 2).collect();
         let m = cote_sol(n);
         let b = Batiment::plat(MAISON, -1.0, 7.0, vec![[10.0, 10.0], [30.0, 10.0], [30.0, 20.0]]);
-        let r = Route { revetement: PAVES, files: Files { total: 3, avant: 2, arriere: 1, osm: true }, genre: ROUTE, largeur: 6.0, points: vec![[0.0, -200.0, 5.0], [0.0, 200.0, 5.0]] };
+        let r = Route { niveau: 0, revetement: PAVES, files: Files { total: 3, avant: 2, arriere: 1, osm: true, bus: 0 }, genre: ROUTE, largeur: 6.0, points: vec![[0.0, -200.0, 5.0], [0.0, 200.0, 5.0]] };
         let mut l = Lieu::new("Essai", 49.0, 1.0, 1000.0, 2000.0, pas, 3.0, &h, &eau, vec![r.clone()], vec![b], vec![r.clone()]).avec_sol(vec![BOIS; m * m]);
         {
             use transports::*;

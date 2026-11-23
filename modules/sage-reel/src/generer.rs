@@ -712,20 +712,20 @@ fn generer_dans(d: &Demande, r: &dyn Reseau, s: &Suivi, cache: &Path) -> Result<
             continue;
         }
         match ou {
-            tr::PONT => lignes_ponts.push((genre, largeur, l, 0, rev, files)),
+            tr::PONT => lignes_ponts.push((genre, largeur, l, niveau_osm(e.get("tags"), false).max(1), rev, files)),
             tr::TUNNEL => lignes_tunnels.push((genre, largeur, l, niveau_osm(e.get("tags"), true), rev, files)),
             _ => {
                 longueur += l.windows(2).map(|s| (s[1].0 - s[0].0).hypot(s[1].1 - s[0].1) * pas).sum::<f64>();
                 let (pts, ys) = au_sol(&l);
-                routes.extend(decouper(&pts, &ys).into_iter().map(|points| Route { revetement: rev, files, genre, largeur, points }));
+                routes.extend(decouper(&pts, &ys).into_iter().map(|points| Route { niveau: niveau_osm(e.get("tags"), false), revetement: rev, files, genre, largeur, points }));
             }
         }
     }
     for (liste, tunnel, sortie) in [(&lignes_ponts, false, &mut ponts), (&lignes_tunnels, true, &mut tunnels)] {
         let l: Vec<_> = liste.iter().map(|(_, _, l, _, _, _)| l.clone()).collect();
         let prof: Vec<f32> = liste.iter().map(|e| tr::profondeur(e.3)).collect();
-        for ((genre, largeur, _, _, rev, files), (pts, ys)) in liste.iter().zip(ouvrages(&l, pas, &relief, niveau, tunnel, &prof)) {
-            sortie.extend(decouper(&pts, &ys).into_iter().map(|points| Route { revetement: *rev, files: *files, genre: *genre, largeur: *largeur, points }));
+        for ((genre, largeur, _, niv, rev, files), (pts, ys)) in liste.iter().zip(ouvrages(&l, pas, &relief, niveau, tunnel, &prof)) {
+            sortie.extend(decouper(&pts, &ys).into_iter().map(|points| Route { niveau: *niv, revetement: *rev, files: *files, genre: *genre, largeur: *largeur, points }));
         }
     }
     s.noter(&format!("{} ponts OSM, {} tabliers ; {} tunnels OSM, {} morceaux", lignes_ponts.len(), ponts.len(), lignes_tunnels.len(), tunnels.len()));
@@ -1725,7 +1725,93 @@ fn files_voie(tags: Option<&J>, genre: u8, largeur: f32) -> crate::Files {
             _ => (total / 2, total / 2),
         },
     };
-    Files { total, avant, arriere, osm: true }
+    let mut f = Files { total, avant, arriere, osm: true, bus: 0 };
+    f.bus = files_bus(&tag, sens, &f);
+    f
+}
+
+/// Les files réservées au bus (le bit `i` pour la file `i` de la gauche du tracé),
+/// d'après `bus:lanes`, `psv:lanes` (et leurs `:forward` / `:backward`), `lanes:bus`,
+/// `lanes:psv` (un nombre : les files de droite) et `busway` (`lane` : la file au bord
+/// du côté dit). Les listes `*:lanes` vont de gauche à droite dans le sens où l'on roule.
+fn files_bus<'a>(tag: &dyn Fn(&str) -> Option<&'a str>, sens: i8, f: &crate::Files) -> u16 {
+    let n = (f.total as usize).min(16);
+    if n == 0 {
+        return 0;
+    }
+    let ar = (f.arriere as usize).min(n);
+    let av = (f.avant as usize).min(n - ar);
+    let reserve = |v: &str| matches!(v.trim(), "designated" | "only");
+    let poser = |i: usize, m: &mut u16| {
+        if i < n {
+            *m |= 1 << i;
+        }
+    };
+    let mut m: u16 = 0;
+    // Par file : de gauche à droite dans le sens du tracé (toute la voie), dans le sens
+    // du tracé (les files « avant »), ou dans l'autre sens (les files « arrière »)
+    for cle in ["bus:lanes", "psv:lanes"] {
+        if let Some(v) = tag(cle) {
+            for (p, x) in v.split('|').enumerate() {
+                if reserve(x) {
+                    poser(p, &mut m);
+                }
+            }
+        }
+        if let Some(v) = tag(&format!("{cle}:forward")) {
+            for (p, x) in v.split('|').enumerate() {
+                if reserve(x) && p < av {
+                    poser(n - av + p, &mut m);
+                }
+            }
+        }
+        if let Some(v) = tag(&format!("{cle}:backward")) {
+            for (p, x) in v.split('|').enumerate() {
+                if reserve(x) && p < ar {
+                    poser(ar - 1 - p, &mut m);
+                }
+            }
+        }
+    }
+    // Un nombre de files : celles de droite, dans chaque sens
+    let nombre = |k: &str| tag(k).and_then(|v| v.trim().parse::<usize>().ok());
+    let droite_avant = |k: usize, m: &mut u16| (0..k.min(av)).for_each(|j| *m |= 1 << (n - 1 - j));
+    let droite_arriere = |k: usize, m: &mut u16| (0..k.min(ar)).for_each(|j| *m |= 1 << j);
+    for cle in ["lanes:bus", "lanes:psv"] {
+        if let Some(k) = nombre(&format!("{cle}:forward")) {
+            droite_avant(k, &mut m);
+        }
+        if let Some(k) = nombre(&format!("{cle}:backward")) {
+            droite_arriere(k, &mut m);
+        }
+        if let Some(k) = nombre(cle) {
+            match sens {
+                1 => droite_avant(k, &mut m),
+                -1 => droite_arriere(k, &mut m),
+                _ => {
+                    droite_avant(k.div_ceil(2), &mut m);
+                    droite_arriere(k / 2, &mut m);
+                }
+            }
+        }
+    }
+    // busway : la file au bord du côté dit
+    let voie = |k: &str| tag(k).is_some_and(|v| v == "lane");
+    if voie("busway") || voie("busway:both") {
+        droite_avant(1, &mut m);
+        droite_arriere(1, &mut m);
+    }
+    if voie("busway:right") {
+        poser(n - 1, &mut m);
+    }
+    if voie("busway:left") {
+        poser(0, &mut m);
+    }
+    // Pas toutes : une voie entièrement réservée est une voie de bus, pas une file
+    if m.count_ones() as usize >= n && n > 1 {
+        return 0;
+    }
+    m
 }
 
 /// Le revêtement d'une voie d'après son `surface=*` ; sans étiquette, selon son genre
@@ -2326,12 +2412,17 @@ mod tests {
         use crate::Files;
         let j = |t: &str| json::lire(t);
         let f = |t: &str| files_voie(j(t).as_ref(), crate::GRANDE, 10.0);
-        assert_eq!(f(r#"{"lanes":"2","oneway":"yes"}"#), Files { total: 2, avant: 2, arriere: 0, osm: true });
-        assert_eq!(f(r#"{"lanes":"3","lanes:forward":"2"}"#), Files { total: 3, avant: 2, arriere: 1, osm: true });
-        assert_eq!(f(r#"{"lanes":"3"}"#), Files { total: 3, avant: 1, arriere: 1, osm: true });
-        assert_eq!(f(r#"{"junction":"roundabout"}"#), Files { total: 3, avant: 3, arriere: 0, osm: false });
-        assert_eq!(files_voie(j(r#"{}"#).as_ref(), crate::ROUTE, 6.0), Files { total: 2, avant: 1, arriere: 1, osm: false });
-        assert_eq!(files_voie(j(r#"{}"#).as_ref(), crate::SERVICE, 4.0), Files { total: 1, avant: 0, arriere: 0, osm: false });
+        assert_eq!(f(r#"{"lanes":"2","oneway":"yes"}"#), Files { total: 2, avant: 2, arriere: 0, osm: true, bus: 0 });
+        assert_eq!(f(r#"{"lanes":"3","lanes:forward":"2"}"#), Files { total: 3, avant: 2, arriere: 1, osm: true, bus: 0 });
+        assert_eq!(f(r#"{"lanes":"3"}"#), Files { total: 3, avant: 1, arriere: 1, osm: true, bus: 0 });
+        assert_eq!(f(r#"{"junction":"roundabout"}"#), Files { total: 3, avant: 3, arriere: 0, osm: false, bus: 0 });
+        assert_eq!(files_voie(j(r#"{}"#).as_ref(), crate::ROUTE, 6.0), Files { total: 2, avant: 1, arriere: 1, osm: false, bus: 0 });
+        assert_eq!(files_voie(j(r#"{}"#).as_ref(), crate::SERVICE, 4.0), Files { total: 1, avant: 0, arriere: 0, osm: false, bus: 0 });
+        // Les files de bus : par file, par nombre, par busway
+        assert_eq!(f(r#"{"lanes":"3","oneway":"yes","bus:lanes":"||designated"}"#).bus, 0b100);
+        assert_eq!(f(r#"{"lanes":"3","oneway":"yes","lanes:bus":"1"}"#).bus, 0b100);
+        assert_eq!(f(r#"{"lanes":"4","lanes:forward":"2","lanes:backward":"2","bus:lanes:backward":"|designated"}"#).bus, 0b0001);
+        assert_eq!(f(r#"{"lanes":"3","oneway":"yes","busway:right":"lane"}"#).bus, 0b100);
         assert_eq!(files_voie(j(r#"{}"#).as_ref(), crate::PIETONNE, 2.0), Files::default());
     }
 

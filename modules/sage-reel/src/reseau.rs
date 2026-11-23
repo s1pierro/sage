@@ -269,6 +269,8 @@ pub struct Arete {
     /// Ses files, dans le sens de ses points (donnée annexe : le réseau n'en dépend
     /// pas).
     pub files: crate::Files,
+    /// Le niveau d'OSM (`crate::Route::niveau`).
+    pub niveau: i8,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -283,6 +285,7 @@ pub struct Reseau {
 /// Un tracé en cours de construction.
 struct Brut {
     passage: Passage,
+    niveau: i8,
     files: crate::Files,
     genre: u8,
     revetement: u8,
@@ -330,7 +333,7 @@ impl Index {
 
 /// Le réseau des voies d'un lieu : tous les tracés (sol, ponts, tunnels) en un graphe.
 pub fn reseau(l: &Lieu) -> Reseau {
-    let mut t: Vec<Brut> = traces(l).into_iter().filter(|x| x.route.points.len() >= 2).map(|x| Brut { passage: x.passage, files: x.route.files, genre: x.route.genre, revetement: x.route.revetement, largeur: x.route.largeur, points: x.route.points.clone() }).collect();
+    let mut t: Vec<Brut> = traces(l).into_iter().filter(|x| x.route.points.len() >= 2).map(|x| Brut { passage: x.passage, niveau: x.route.niveau, files: x.route.files, genre: x.route.genre, revetement: x.route.revetement, largeur: x.route.largeur, points: x.route.points.clone() }).collect();
     let mut r = Reseau::default();
     // Les sommets de tous les tracés, au centimètre
     let compter = |t: &[Brut]| {
@@ -441,7 +444,7 @@ pub fn reseau(l: &Lieu) -> Reseau {
             if i == n - 1 || sommets[&cle(x.points[i])] > 1 {
                 let (a, b) = (noeud(x.points[debut], &mut r), noeud(x.points[i], &mut r));
                 let k = r.aretes.len();
-                r.aretes.push(Arete { a, b, points: x.points[debut..=i].to_vec(), passage: x.passage, genre: x.genre, largeur: x.largeur, revetement: x.revetement, files: x.files });
+                r.aretes.push(Arete { a, b, points: x.points[debut..=i].to_vec(), passage: x.passage, genre: x.genre, largeur: x.largeur, revetement: x.revetement, files: x.files, niveau: x.niveau });
                 r.noeuds[a].aretes.push(k);
                 if b != a {
                     r.noeuds[b].aretes.push(k);
@@ -526,6 +529,11 @@ impl Reseau {
 /// tunnel : l'écart de hauteur minimal entre deux voies qui se croisent dénivelées.
 pub const GABARIT: f32 = 4.5;
 pub const EPAISSEUR: f32 = 1.0;
+/// Sous une voie, un passage piéton (un souterrain) : sa hauteur libre et sa dalle
+/// (0.18 ; avant, 5,5 m comme une route : un souterrain piéton coincé entre la surface
+/// et un tunnel routier ne tenait nulle part).
+pub const GABARIT_PIETON: f32 = 2.5;
+pub const EPAISSEUR_PIETON: f32 = 0.5;
 /// Le tirant d'air d'un pont sur l'eau (m), sous son tablier.
 pub const TIRANT_D_AIR: f32 = 4.0;
 
@@ -617,13 +625,17 @@ pub fn contraintes(r: &Reseau, l: &Lieu) -> Vec<Contrainte> {
                     Sol => 1,
                     Tunnel => 0,
                 };
+                // Deux ponts ou deux tunnels : le niveau d'OSM, s'il les distingue (des
+                // passages piétons à −1 au-dessus de tunnels routiers à −2)
                 let premier_dessus = match rang(a1.passage).cmp(&rang(a2.passage)) {
                     std::cmp::Ordering::Greater => true,
                     std::cmp::Ordering::Less => false,
+                    std::cmp::Ordering::Equal if a1.passage != Sol && a1.niveau != a2.niveau => a1.niveau > a2.niveau,
                     std::cmp::Ordering::Equal => h1 >= h2,
                 };
                 let ((haut, ph), (bas, pb)) = if premier_dessus { ((o1, a1.passage), (o2, a2.passage)) } else { ((o2, a2.passage), (o1, a1.passage)) };
                 let genre = if pb == Tunnel && ph != Pont { Genre::TunnelSousVoie } else { Genre::PontSurVoie };
+                let ecart = if r.aretes[bas.0].genre == crate::PIETONNE { GABARIT_PIETON + EPAISSEUR_PIETON } else { ecart };
                 v.push(Contrainte { genre, haut, bas: Some(bas), plancher: 0.0, ecart, implicite: ph == Sol && genre == Genre::PontSurVoie });
             }
         }
@@ -828,7 +840,12 @@ pub fn niveler(r: &mut Reseau, v: &[Contrainte], iterations: usize) -> Bilan {
             let pb = c.bas.map(|b| r.aretes[b.0].passage);
             // Entre une route et une piétonne, seule la piétonne bouge
             let pieton = |k: usize| r.aretes[k].genre == crate::PIETONNE;
+            // Sauf un souterrain piéton au-dessus d'un tunnel routier (niveaux d'OSM) :
+            // le tunnel routier, plus profond, s'enfonce ; le souterrain reste tenu sous
+            // la surface
+            let sous_terre = |k: usize| r.aretes[k].passage == Passage::Tunnel;
             let part = match c.bas.map(|b| (pieton(c.haut.0), pieton(b.0))) {
+                Some((true, false)) if sous_terre(c.haut.0) && c.bas.is_some_and(|b| sous_terre(b.0) && r.aretes[b.0].niveau < r.aretes[c.haut.0].niveau) => 0.0,
                 Some((true, false)) => 1.0,
                 Some((false, true)) => 0.0,
                 _ => match (ph, pb) {

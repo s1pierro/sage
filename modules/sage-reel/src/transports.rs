@@ -155,7 +155,7 @@ impl Transports {
             }
             v
         }
-        let tunnels = self.tunnels.iter().flat_map(|r| morceaux(&r.points, |p| dans(p[0], p[1])).into_iter().map(|points| crate::Route { revetement: r.revetement, files: r.files, genre: r.genre, largeur: r.largeur, points })).collect();
+        let tunnels = self.tunnels.iter().flat_map(|r| morceaux(&r.points, |p| dans(p[0], p[1])).into_iter().map(|points| crate::Route { niveau: r.niveau, revetement: r.revetement, files: r.files, genre: r.genre, largeur: r.largeur, points })).collect();
         let rails = self.rails.iter().flat_map(|r| morceaux(&r.points, |p| dans(p[0], p[1])).into_iter().map(|points| Rail { mode: r.mode, ou: r.ou, niveau: r.niveau, points })).collect();
         let mut nouveau = vec![u32::MAX; self.arrets.len()];
         let mut arrets = Vec::new();
@@ -242,7 +242,7 @@ impl Transports {
             let largeur = f32_(&prendre(4)?);
             let m = u32_(prendre)?;
             let points = prendre(m * 12)?.chunks(12).map(|c| [f32_(&c[0..4]), f32_(&c[4..8]), f32_(&c[8..12])]).collect();
-            tunnels.push(crate::Route { revetement: 0, files: crate::Files::deduire(genre, largeur, 0), genre, largeur, points });
+            tunnels.push(crate::Route { niveau: 0, revetement: 0, files: crate::Files::deduire(genre, largeur, 0), genre, largeur, points });
         }
         let mut rails = Vec::new();
         for _ in 0..u32_(prendre)? {
