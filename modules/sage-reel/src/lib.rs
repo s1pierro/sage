@@ -30,6 +30,7 @@
 //! bâtiments et occupation © les contributeurs OpenStreetMap (ODbL). Un fichier préparé
 //! est une base de données dérivée d'OSM : il reste sous ODbL, et ne va dans aucun dépôt.
 
+pub mod circulation;
 pub mod generer;
 pub mod json;
 pub mod cours_eau;
@@ -46,7 +47,7 @@ pub const DEMI_CARTE: i32 = 156;
 pub const DEPART: [f32; 2] = [TAILLE / 2.0, TAILLE / 2.0];
 
 pub const MAGIQUE: &[u8; 8] = b"SAGEREEL";
-pub const FORMAT: u32 = 15;
+pub const FORMAT: u32 = 16;
 
 /// Le texte à citer.
 pub const SOURCES: &str = "Relief et hauteurs © IGN (RGE ALTI, LiDAR HD) · eau, routes, bâtiments et occupation du sol © les contributeurs OpenStreetMap";
@@ -493,6 +494,10 @@ pub struct Lieu {
     /// Les places piétonnes d'OSM (`highway=pedestrian` en surface, `area=yes`), en
     /// vecteurs, leur `nature` étant leur revêtement (`BITUME`…) (depuis le format 12).
     pub places: Vec<cours_eau::SurfaceEau>,
+    /// Les interdictions de tourner d'OSM (depuis le format 16).
+    pub interdictions: Vec<circulation::Interdiction>,
+    /// La hauteur libre des voies qui en ont une dans OSM (depuis le format 16).
+    pub gabarits: Vec<circulation::Gabarit>,
 }
 
 /// L'échelle et la base qui encodent sur 16 bits des hauteurs de `lo` à `hi`.
@@ -517,7 +522,7 @@ impl Lieu {
         for (i, _) in eau.iter().enumerate().filter(|(_, e)| **e) {
             bits[i / 8] |= 1 << (i % 8);
         }
-        let mut l = Lieu { nom: nom.into(), lat, lon, x0, y0, pas, grille, niveau, base: 0.0, echelle: 1.0, h: Vec::new(), eau: bits, routes, batiments, ponts, sol: Vec::new(), transports: Default::default(), cours_eau: Vec::new(), surfaces_eau: Vec::new(), places: Vec::new() };
+        let mut l = Lieu { nom: nom.into(), lat, lon, x0, y0, pas, grille, niveau, base: 0.0, echelle: 1.0, h: Vec::new(), eau: bits, routes, batiments, ponts, sol: Vec::new(), transports: Default::default(), cours_eau: Vec::new(), surfaces_eau: Vec::new(), places: Vec::new(), interdictions: Vec::new(), gabarits: Vec::new() };
         l.fixer_hauteurs(h);
         l
     }
@@ -582,6 +587,7 @@ impl Lieu {
         let e = g.etendue(self.pas);
         l.surfaces_eau = cours_eau::couper_surfaces(&self.surfaces_eau, [e[0] as f32, e[1] as f32, e[2] as f32, e[3] as f32]);
         l.places = cours_eau::couper_surfaces(&self.places, [e[0] as f32, e[1] as f32, e[2] as f32, e[3] as f32]);
+        (l.interdictions, l.gabarits) = circulation::couper(&self.interdictions, &self.gabarits, &|x, z| dans(&[x, z]));
         l
     }
 
@@ -838,6 +844,8 @@ impl Lieu {
                 o.extend_from_slice(&r.files.bus.to_le_bytes());
             }
         }
+        // Les interdictions de tourner et les hauteurs libres (format 16)
+        circulation::ecrire(&mut o, &self.interdictions, &self.gabarits);
         o
     }
 
@@ -854,7 +862,7 @@ impl Lieu {
     /// Lit un fichier ; une erreur dite en clair.
     pub fn lire(f: &std::path::Path) -> Result<Lieu, String> {
         let o = std::fs::read(f).map_err(|e| e.to_string())?;
-        Lieu::depuis_octets(&o).ok_or_else(|| "ce n'est pas un lieu réel lisible (format SAGEREEL 1 à 11)".to_string())
+        Lieu::depuis_octets(&o).ok_or_else(|| format!("ce n'est pas un lieu réel lisible (format SAGEREEL 1 à {FORMAT})"))
     }
 
     /// Relu ; rien si ce n'est pas un lieu réel de ce format, ou pour une autre carte.
@@ -1021,10 +1029,11 @@ impl Lieu {
                 }
             }
         }
+        let (interdictions, gabarits) = if format >= 16 { circulation::lire(&mut prendre)? } else { (Vec::new(), Vec::new()) };
         if k != o.len() {
             return None;
         }
-        Some(Lieu { nom, lat, lon, x0, y0, pas, grille, niveau, base, echelle, h, eau, routes, batiments, ponts, sol, transports, cours_eau, surfaces_eau, places })
+        Some(Lieu { nom, lat, lon, x0, y0, pas, grille, niveau, base, echelle, h, eau, routes, batiments, ponts, sol, transports, cours_eau, surfaces_eau, places, interdictions, gabarits })
     }
 }
 

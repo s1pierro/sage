@@ -691,6 +691,8 @@ fn generer_dans(d: &Demande, r: &dyn Reseau, s: &Suivi, cache: &Path) -> Result<
     // Les places piétonnes : les surfaces de `highway=pedestrian` (`area=yes`), avec leur
     // revêtement
     let mut places = Vec::new();
+    // La hauteur libre des voies qui en ont une (sous un pont, dans un souterrain)
+    let mut gabarits = Vec::new();
     for e in jr.get("elements").and_then(J::liste).unwrap_or(&[]) {
         if let Some(rev) = place_pietonne(e.get("tags")) {
             let l = ligne(e.get("geometry").unwrap_or(&J::Nul));
@@ -710,6 +712,9 @@ fn generer_dans(d: &Demande, r: &dyn Reseau, s: &Suivi, cache: &Path) -> Result<
         let l = ligne(e.get("geometry").unwrap_or(&J::Nul));
         if l.len() < 2 {
             continue;
+        }
+        if let Some(hauteur) = crate::circulation::hauteur_voie(e.get("tags")) {
+            gabarits.push(crate::circulation::Gabarit { hauteur, points: l.iter().map(|p| [(ox + p.0 * pas) as f32, (oz + p.1 * pas) as f32]).collect() });
         }
         match ou {
             tr::PONT => lignes_ponts.push((genre, largeur, l, niveau_osm(e.get("tags"), false).max(1), rev, files)),
@@ -732,6 +737,41 @@ fn generer_dans(d: &Demande, r: &dyn Reseau, s: &Suivi, cache: &Path) -> Result<
     s.noter(&format!("{} routes, {:.0} km", routes.len(), longueur / 1000.0));
     s.noter(&format!("files des voies carrossables : {} lues dans OSM, {} déduites", nfiles[1], nfiles[0]));
     s.noter(&format!("{} places piétonnes, {:.1} ha", places.len(), places.iter().map(|p| crate::aire(&p.anneaux[0]).abs()).sum::<f32>() / 10_000.0));
+    s.noter(&format!("{} voies à la hauteur libre dite", gabarits.len()));
+    // Les interdictions de tourner : la voie d'où l'on vient, le carrefour, celle où
+    // l'on irait, repérées par leurs points (le lieu ne garde pas les identifiants)
+    let ji = overpass(r, s, &cache.join(format!("osm_interdictions{suffixe}.json")), "interdictions de tourner", &format!("relation[\"type\"=\"restriction\"]({bb});out geom;"))?;
+    let mut interdictions = Vec::new();
+    let mut ecartees = 0usize;
+    for e in ji.get("elements").and_then(J::liste).unwrap_or(&[]) {
+        let tags = e.get("tags");
+        let Some((genre, seulement)) = crate::circulation::regle(tags).and_then(crate::circulation::genre) else {
+            ecartees += 1;
+            continue;
+        };
+        let sauf = crate::circulation::sauf(tags.and_then(|t| t.get("except")).and_then(J::txt));
+        let en_jeu = |l: &[(f64, f64)]| -> Vec<[f32; 2]> { l.iter().map(|p| [(ox + p.0 * pas) as f32, (oz + p.1 * pas) as f32]).collect() };
+        let (mut de, mut vers, mut via) = (Vec::new(), Vec::new(), Vec::new());
+        for m in e.get("members").and_then(J::liste).unwrap_or(&[]) {
+            let role = m.get("role").and_then(J::txt).unwrap_or("");
+            let pts = match m.get("type").and_then(J::txt) {
+                Some("node") => vers_grille(m).map(|p| en_jeu(&[p])).unwrap_or_default(),
+                Some("way") => en_jeu(&ligne(m.get("geometry").unwrap_or(&J::Nul))),
+                _ => Vec::new(),
+            };
+            match role {
+                "from" if de.is_empty() => de = pts,
+                "to" if vers.is_empty() => vers = pts,
+                "via" => via.extend(pts),
+                _ => {}
+            }
+        }
+        match crate::circulation::interdiction(genre, seulement, sauf, &de, &via, &vers) {
+            Some(i) => interdictions.push(i),
+            None => ecartees += 1,
+        }
+    }
+    s.noter(&format!("{} interdictions de tourner ({ecartees} écartées : autre règle, membres manquants ou hors carte)", interdictions.len()));
     s.noter(&format!("revêtements des voies OSM : {}", crate::NOMS_REVETEMENTS.iter().zip(revetements).map(|(n, c)| format!("{n} {c}")).collect::<Vec<_>>().join(", ")));
 
     // Les cours d'eau : leurs tracés (axes), coupés au bord de la carte
@@ -1130,6 +1170,8 @@ fn generer_dans(d: &Demande, r: &dyn Reseau, s: &Suivi, cache: &Path) -> Result<
     {
         let e = lieu.etendue();
         lieu.places = crate::cours_eau::couper_surfaces(&places, [e[0] as f32, e[1] as f32, e[2] as f32, e[3] as f32]);
+        let dans = |x: f32, z: f32| (x as f64) >= e[0] && (x as f64) <= e[2] && (z as f64) >= e[1] && (z as f64) <= e[3];
+        (lieu.interdictions, lieu.gabarits) = crate::circulation::couper(&interdictions, &gabarits, &dans);
     }
     lieu.ecrire(&d.sortie).map_err(|e| format!("{} : {e}", d.sortie.display()))?;
     s.noter(&format!("{} : {} Mo", d.sortie.display(), std::fs::metadata(&d.sortie).map_or(0, |m| m.len()) / 1_000_000));
