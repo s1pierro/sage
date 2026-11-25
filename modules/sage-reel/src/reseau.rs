@@ -247,12 +247,31 @@ pub const A_NIVEAU: f32 = 1.0;
 /// Un raccord tombe sur un sommet existant s'il en est à moins de `SUR_SOMMET` mètres.
 const SUR_SOMMET: f32 = 0.5;
 
+/// D'où vient un nœud du réseau : un point des tracés du lieu (les données), ou un
+/// point que la construction a ajouté ou sur lequel elle a raccordé un bout.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum Origine {
+    /// Un point des tracés du lieu (OSM, coupé aux ponts et aux tunnels ; ou retouché).
+    #[default]
+    Donnees,
+    /// Le bout d'un tracé coupé au bord de la carte.
+    Bord,
+    /// Un bout libre raccordé à un autre tracé, sur un point ajouté (`RACCORD`).
+    Raccord,
+    /// Un bout libre raccordé sur un sommet existant d'un autre tracé (`SUR_SOMMET`).
+    RaccordSommet,
+    /// Deux voies au sol qui se croisent sans point commun : un point ajouté (`A_NIVEAU`).
+    Croisement,
+}
+
 /// Un nœud du réseau : un carrefour, un raccord (changement de passage) ou un bout.
 #[derive(Clone, Debug)]
 pub struct Noeud {
     /// x, z, hauteur (comme les points des routes).
     pub p: [f32; 3],
     pub aretes: Vec<usize>,
+    /// D'où il vient (tracé pendant la construction).
+    pub origine: Origine,
 }
 
 /// Une arête : d'un nœud à l'autre, un même tracé et un même passage.
@@ -345,6 +364,8 @@ pub fn reseau(l: &Lieu) -> Reseau {
         }
         s
     };
+    // Les points ajoutés ou visés par la construction, et pourquoi
+    let mut marques: HashMap<(i64, i64), Origine> = HashMap::new();
     // 1. Les bouts libres raccordés au tracé le plus proche (moins de RACCORD mètres)
     {
         let sommets = compter(&t);
@@ -373,12 +394,15 @@ pub fn reseau(l: &Lieu) -> Reseau {
                 let lg = (b[0] - a[0]).hypot(b[1] - a[1]);
                 // Sur un sommet existant s'il est tout près ; sinon un sommet nouveau
                 let cible = if u * lg < SUR_SOMMET {
+                    marques.entry(cle(a)).or_insert(Origine::RaccordSommet);
                     a
                 } else if (1.0 - u) * lg < SUR_SOMMET {
+                    marques.entry(cle(b)).or_insert(Origine::RaccordSommet);
                     b
                 } else {
                     let q = entre(a, b, u);
                     inserer.push((kk, s, u, q));
+                    marques.insert(cle(q), Origine::Raccord);
                     q
                 };
                 prolonger.push((k, debut, cible));
@@ -419,6 +443,7 @@ pub fn reseau(l: &Lieu) -> Reseau {
                         continue;
                     }
                     let q = [p1[0], p1[1], (p1[2] + p2[2]) / 2.0];
+                    marques.insert(cle(q), Origine::Croisement);
                     inserer.push((k1, s1, u1, q));
                     inserer.push((k2, s2, u2, q));
                     r.a_niveau += 1;
@@ -431,9 +456,12 @@ pub fn reseau(l: &Lieu) -> Reseau {
     //    tracé qui repasse par lui-même) ; les tracés coupés en arêtes à leurs nœuds
     let sommets = compter(&t);
     let mut numero: HashMap<(i64, i64), usize> = HashMap::new();
+    let [x0, z0, x1, z1] = l.etendue();
+    let au_bord = |p: [f32; 3]| (p[0] as f64 - x0).min(x1 - p[0] as f64).min(p[1] as f64 - z0).min(z1 - p[1] as f64) < 1.0;
     let mut noeud = |p: [f32; 3], r: &mut Reseau| -> usize {
         *numero.entry(cle(p)).or_insert_with(|| {
-            r.noeuds.push(Noeud { p, aretes: Vec::new() });
+            let origine = marques.get(&cle(p)).copied().unwrap_or(if au_bord(p) { Origine::Bord } else { Origine::Donnees });
+            r.noeuds.push(Noeud { p, aretes: Vec::new(), origine });
             r.noeuds.len() - 1
         })
     };
